@@ -6,6 +6,11 @@ secure storage, recovery, signing, or third-party redistribution rights.
 
 ## KDE keyring follow-up
 
+**All nine hosted CI jobs passed** for code commit `2b65696`, including the new
+Ubuntu 22.04/24.04 keyring matrix and all four native packages:
+[CI run 36478678901](https://github.com/BIGGASSS/Yun/actions/runs/36478678901).
+Download this run's artifacts for the KDE fix, rather than the earlier baseline.
+
 The Linux-only secure-storage fork now supports `org.kde.secretservicecompat`
 when `org.freedesktop.secrets` is neither running nor activatable. Local validation:
 27 isolated real-libsecret/private-D-Bus tests passed, including the plugin's
