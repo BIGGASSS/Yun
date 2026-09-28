@@ -43,11 +43,11 @@ jobs:
         shell: bash
         run: |
           mkdir -p dist
-          dart pub global run fvm:fvm flutter pub deps --style=compact > dist/flutter-dependencies.txt
+          dart pub global run fvm:main flutter pub deps --style=compact > dist/flutter-dependencies.txt
           cp pubspec.lock dist/pubspec.lock
           cp docs/RELEASE.md docs/VALIDATION.md scripts/release/NOTICES.txt dist/
           printf '%s\n' "Commit: $GITHUB_SHA" "Target: ${{ matrix.target }}" > dist/BUILD.txt
-          dart pub global run fvm:fvm flutter --version >> dist/BUILD.txt
+          dart pub global run fvm:main flutter --version >> dist/BUILD.txt
           rustc --version >> dist/BUILD.txt
       - if: matrix.target == 'linux-x64'
         shell: bash
@@ -98,6 +98,9 @@ jobs:
           distribution: temurin
           java-version: '17'
       - uses: android-actions/setup-android@v3
+        with:
+          # Legacy SDK 'tools' was removed; Flutter installs platform/build tools.
+          packages: platform-tools
       - uses: ./.github/actions/flutter
       - name: Dependency inventory (not a completed license audit)
         env:

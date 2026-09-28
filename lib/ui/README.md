@@ -16,15 +16,17 @@ the specified major. Core dependencies must also be installed before running
 - Library search, albums/artists, metadata and immediate artwork replacement.
 - Ordered playlists with unique entry IDs, explicit duplicates, drag handles
   and accessible move-up/down menus.
-- Downloads show completed-track progress, pinned selections, storage totals,
-  removal and retry through sync. The current core API does not expose partial
-  audio-download byte counts; no invented byte progress is shown.
+- Downloads show per-track byte progress, queued/verifying/failed states, pinned
+  selections, storage totals, removal and retries. Artwork is cached privately
+  and remains visible offline.
 - Upload picker and desktop drop use persistent core jobs, acknowledged-byte
-  progress, cancellation/retry. Cancelled jobs are re-enqueued as new uploads.
+  progress, cancellation/retry. Sources are copied into durable account-private
+  staging storage. Cancelled uploads require selecting the source file again;
+  macOS drop bookmarks remain scoped until the copy completes.
 - Listening history/top lists and inclusive local-date range selection (server
   `to` is exclusive). Pending listening outbox counts are explained.
-- Server login/logout, theme light/dark/system (session-local choice), device
+- Server login/logout, theme light/dark/system (persisted by bootstrap), device
   text scaling/reduced motion, labeled controls, Ctrl/Cmd shortcuts.
 
-Tests: `test/ui/widgets_test.dart`, `test/ui/app_test.dart`. Test fixtures only
-exist under `test/ui`; production screens contain no mock records.
+Tests: `test/ui/` and `test/core/app_artwork_test.dart`. Production screens
+contain no mock records; fixtures live only in the test directories.

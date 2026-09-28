@@ -1,6 +1,6 @@
 # Client integration API
 
-Import `package:yun/core/app_controller.dart` (re-exports models). `AppController` is a `ChangeNotifier`. Create once, `await app.initialize()`, use `ListenableBuilder`/Provider, and dispose at shutdown. Native playback is initialized lazily on first play. All async operations throw actionable exceptions; UI should catch and show them. `error` also reports background failures. No UI dependency beyond Flutter foundation.
+Import `package:yun/core/app_controller.dart` (re-exports models). `AppController` is a `ChangeNotifier`. Create once, `await app.initialize()`, use `ListenableBuilder`/Provider, and dispose at shutdown. Native playback is initialized lazily on first play. `lib/main.dart` owns initialization, lifecycle checkpoints, orderly exit, and persistent theme settings. All async operations throw actionable exceptions; UI should catch and show them. `error` also reports background failures. No UI dependency beyond Flutter foundation.
 
 ## AppController
 - `AppController({ApiClient? api, Future<Directory> Function()? storageDirectory, CacheDatabase Function(File)? databaseFactory, PlaybackEngine? playbackEngine, SystemMediaControls? systemControls, bool enableSystemControls = true, bool automaticRefresh = true})`. Production defaults; injectable adapters permit native-free tests.
@@ -14,7 +14,9 @@ Import `package:yun/core/app_controller.dart` (re-exports models). `AppControlle
 - `Future<Track> updateTrack(Track track, Map<String,dynamic> changes)`, `deleteTrack(String id)`, `Future<Track> setArtwork(Track track, Uint8List bytes, {String mimeType = 'image/jpeg'})`.
 - `Future<Playlist> createPlaylist(String name)`, `savePlaylist(Playlist playlist, {String? name, List<PlaylistEntry>? entries})`, `deletePlaylist(Playlist playlist)`; entry IDs generated with `newId()` (duplicates of a track allowed).
 - `Future<void> pinTrack(String id, {bool pinned = true})`, `pinAlbum(String album, String artist, {bool pinned = true})`, `pinPlaylist(String id, {bool pinned = true})`; `bool isPinned(String type, String id)`; pins persist and referenced files are reconciled after sync. Album pin identity: `albumPinId(album, artist)`.
-- `Future<void> enqueueUpload(String path)`, `cancelUpload(String id)`, `retryUpload(String id)`; persistent jobs include byte progress/status/error.
+- `Future<void> enqueueUpload(String path)`, `cancelUpload(String id)`, `retryUpload(String id)`; persistent jobs include byte progress/status/error. Enqueue copies the source into a durable account-private spool before returning, bounded by `maxUploadBytes` (default 1 GiB). Await it while picker sandbox access is available. Successful/cancelled owned copies are removed; external originals are never deleted.
+- `String? artworkPath(Track track)`, `Future<String?> getArtwork(Track track)`; account/revision-scoped local-first cache (128 MiB budget), safe through logout and late requests.
+- `DownloadProgress downloadProgress(Track track)`, `Future<void> retryDownloads()`; byte-level queued/downloading/verifying/downloaded/failed progress and errors. Download selections remain durable.
 - `Future<ServerStats> loadStats({DateTime? from, DateTime? to})`; `ServerStats? stats`.
 - `Future<void> shutdown()` flushes playback segments and closes account resources, retaining active credentials for the next launch. Await at orderly process shutdown; `dispose()` also initiates cleanup.
 

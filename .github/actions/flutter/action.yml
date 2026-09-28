@@ -16,9 +16,9 @@ runs:
       run: |
         dart pub global activate fvm 4.3.1
         python -c 'import os; root=os.environ.get("PUB_CACHE") or (os.path.join(os.environ["LOCALAPPDATA"], "Pub", "Cache") if os.name == "nt" else os.path.expanduser("~/.pub-cache")); print(os.path.join(root,"bin"))' >> "$GITHUB_PATH"
-        dart pub global run fvm:fvm install --skip-pub-get
+        dart pub global run fvm:main install --skip-pub-get
     - shell: bash
       run: |
         # Direct Dart invocation also works in Windows Git Bash (which may not resolve fvm.bat).
-        dart pub global run fvm:fvm flutter --version
-        dart pub global run fvm:fvm flutter pub get
+        dart pub global run fvm:main flutter --version
+        dart pub global run fvm:main flutter pub get
