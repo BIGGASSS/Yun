@@ -1,10 +1,20 @@
 import 'dart:math' as math;
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart' hide RepeatMode;
 
 import '../core/app_controller.dart';
 import 'track_widgets.dart';
 import 'widgets.dart';
+
+bool get _desktopVolume =>
+    !kIsWeb &&
+    switch (defaultTargetPlatform) {
+      TargetPlatform.linux ||
+      TargetPlatform.macOS ||
+      TargetPlatform.windows => true,
+      _ => false,
+    };
 
 class PlayerBar extends StatelessWidget {
   const PlayerBar({
@@ -122,7 +132,25 @@ class PlayerBar extends StatelessWidget {
                     onPressed: () => runUiAction(context, player.next),
                     icon: const Icon(Icons.skip_next_rounded),
                   ),
-                if (!compact)
+                if (compact && _desktopVolume)
+                  IconButton(
+                    tooltip: 'Volume',
+                    onPressed: () => _showVolume(context, app),
+                    icon: Icon(
+                      player.isMuted
+                          ? Icons.volume_off_rounded
+                          : Icons.volume_up_rounded,
+                    ),
+                  ),
+                if (!compact && _desktopVolume)
+                  SizedBox(width: 168, child: PlaybackVolume(app: app)),
+                if (!compact && _desktopVolume)
+                  IconButton(
+                    tooltip: 'Show queue',
+                    onPressed: onQueue,
+                    icon: const Icon(Icons.queue_music_rounded),
+                  ),
+                if (!compact && !_desktopVolume)
                   Expanded(
                     flex: 2,
                     child: Align(
@@ -141,6 +169,69 @@ class PlayerBar extends StatelessWidget {
       ),
     );
   }
+}
+
+/// App-local gain, not the operating system's master volume.
+class PlaybackVolume extends StatelessWidget {
+  const PlaybackVolume({super.key, required this.app});
+  final AppController app;
+
+  @override
+  Widget build(BuildContext context) {
+    final player = app.playback;
+    return Row(
+      children: [
+        IconButton(
+          tooltip: player.isMuted ? 'Unmute' : 'Mute',
+          onPressed: () => runUiAction(context, player.toggleMute),
+          icon: Icon(
+            player.isMuted
+                ? Icons.volume_off_rounded
+                : player.volume < 50
+                ? Icons.volume_down_rounded
+                : Icons.volume_up_rounded,
+          ),
+        ),
+        Expanded(
+          child: Semantics(
+            label: 'Volume',
+            child: Slider(
+              key: const ValueKey('playback-volume-slider'),
+              value: player.volume,
+              max: 100,
+              divisions: 100,
+              label: '${player.volume.round()}%',
+              semanticFormatterCallback: (value) => '${value.round()}%',
+              onChanged: (value) =>
+                  runUiAction(context, () => player.setVolume(value)),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+void _showVolume(BuildContext context, AppController app) {
+  showDialog<void>(
+    context: context,
+    builder: (context) => AlertDialog(
+      title: const Text('Volume'),
+      content: SizedBox(
+        width: 280,
+        child: ListenableBuilder(
+          listenable: app,
+          builder: (context, _) => PlaybackVolume(app: app),
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('Close'),
+        ),
+      ],
+    ),
+  );
 }
 
 class PlaybackButtons extends StatelessWidget {
@@ -355,6 +446,11 @@ void showNowPlaying(BuildContext context, AppController app) {
                         PlaybackSeek(app: app),
                         const SizedBox(height: 8),
                         PlaybackButtons(app: app),
+                        if (_desktopVolume)
+                          Padding(
+                            padding: const EdgeInsets.only(top: 8),
+                            child: PlaybackVolume(app: app),
+                          ),
                         if (track != null)
                           Padding(
                             padding: const EdgeInsets.only(top: 16),

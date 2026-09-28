@@ -24,6 +24,59 @@ void main() {
   });
 
   test(
+    'volume delegates exact 0..100 values without activating audio focus',
+    () async {
+      await engine.initialize();
+      expect(player.volumeCalls, isEmpty);
+      for (final value in [100.0, 37.5, 0.0, 37.5]) {
+        await engine.setVolume(value);
+        expect(player.state.volume, value);
+      }
+      expect(player.volumeCalls, [100, 37.5, 0, 37.5]);
+      expect(player.plays, 0);
+      expect(session.activations, isEmpty);
+    },
+  );
+
+  test('volume clamps finite input and rejects nonfinite input', () async {
+    await engine.initialize();
+    await engine.setVolume(-20);
+    await engine.setVolume(120);
+    for (final value in [
+      double.nan,
+      double.infinity,
+      double.negativeInfinity,
+    ]) {
+      await expectLater(engine.setVolume(value), throwsArgumentError);
+    }
+    expect(player.volumeCalls, [0, 100]);
+  });
+
+  test('volume failures propagate and later commands can retry', () async {
+    await engine.initialize();
+    player.failVolume = true;
+    await expectLater(engine.setVolume(12), throwsStateError);
+    expect(player.state.volume, 100);
+    player.failVolume = false;
+    await engine.setVolume(12);
+    expect(player.volumeCalls, [12, 12]);
+    expect(player.state.volume, 12);
+  });
+
+  test(
+    'idle or disposed volume commands do not create a native player',
+    () async {
+      await engine.setVolume(25);
+      expect(session.configurations, 0);
+      expect(player.volumeCalls, isEmpty);
+      await engine.initialize();
+      await engine.dispose();
+      await engine.setVolume(25);
+      expect(player.volumeCalls, isEmpty);
+    },
+  );
+
+  test(
     'failed session configuration disposes partial player and retries',
     () async {
       session.failConfiguration = true;
@@ -141,7 +194,15 @@ class TestPlayer implements Player {
   @override
   final PlayerStream stream = TestPlayerStream();
   int plays = 0;
-  bool disposed = false;
+  bool disposed = false, failVolume = false;
+  final volumeCalls = <double>[];
+  @override
+  Future<void> setVolume(double volume) async {
+    volumeCalls.add(volume);
+    if (failVolume) throw StateError('Native volume failed');
+    state = state.copyWith(volume: volume);
+  }
+
   @override
   Future<void> play() async {
     plays++;

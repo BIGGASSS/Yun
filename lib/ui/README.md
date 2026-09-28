@@ -13,6 +13,10 @@ the specified major. Core dependencies must also be installed before running
 - Narrow windows: bottom destinations, mini-player, full now-playing sheet.
 - Wide windows: NavigationRail (extended at 1320px), persistent player, optional
   300px queue at 1180px and above. Large text falls back to simpler layouts.
+- Linux/macOS/Windows: app-local 0–100% volume and mute in the player and
+  now-playing sheet. Compact windows use a Volume button/dialog. Muting remembers
+  the previous positive level; sliders support keyboard input and spoken percent
+  values. Android keeps its existing system-volume controls, even on wide screens.
 - Library search, albums/artists, metadata and immediate artwork replacement.
 - Ordered playlists with unique entry IDs, explicit duplicates, drag handles
   and accessible move-up/down menus.

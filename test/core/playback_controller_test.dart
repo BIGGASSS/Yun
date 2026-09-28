@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:yun/core/playback_controller.dart';
 import 'package:yun/models/models.dart';
@@ -27,6 +29,227 @@ void main() {
     await player.shutdown();
     player.dispose();
   });
+  group('volume', () {
+    test(
+      'defaults do not override native volume even across track changes',
+      () async {
+        expect(player.volume, 100);
+        expect(player.isMuted, isFalse);
+        await player.playQueue(tracks);
+        await player.next();
+        await player.stop();
+        await player.playQueue(tracks);
+        expect(engine.volumeCalls, isEmpty);
+      },
+    );
+
+    test(
+      'idle changes clamp, mute and restore without initializing audio',
+      () async {
+        await player.toggleMute();
+        expect(player.volume, 0);
+        expect(player.isMuted, isTrue);
+        await player.toggleMute();
+        expect(player.volume, 100);
+        await player.setVolume(37.5);
+        await player.toggleMute();
+        expect(player.volume, 0);
+        await player.toggleMute();
+        expect(player.volume, 37.5);
+        await player.setVolume(-20);
+        expect(player.isMuted, isTrue);
+        await player.toggleMute();
+        expect(player.volume, 37.5);
+        await player.setVolume(120);
+        expect(player.volume, 100);
+        await player.setVolume(0);
+        await player.toggleMute();
+        expect(player.volume, 100);
+        expect(engine.initializations, 0);
+        expect(engine.volumeCalls, isEmpty);
+      },
+    );
+
+    test(
+      'nonfinite values fail without changing volume or poisoning commands',
+      () async {
+        await player.setVolume(42);
+        for (final value in [
+          double.nan,
+          double.infinity,
+          double.negativeInfinity,
+        ]) {
+          await expectLater(player.setVolume(value), throwsArgumentError);
+          expect(player.volume, 42);
+        }
+        await player.toggleMute();
+        await player.toggleMute();
+        expect(player.volume, 42);
+        expect(engine.initializations, 0);
+      },
+    );
+
+    test(
+      'latest idle volume is applied before the first open, including mute',
+      () async {
+        await player.setVolume(42);
+        await player.setVolume(0);
+        await player.playQueue(tracks);
+        expect(engine.calls.take(4), ['initialize', 'volume', 'stop', 'open']);
+        expect(engine.volumeCalls, [0]);
+        expect(engine.volume, 0);
+        await player.toggleMute();
+        expect(engine.volume, 42);
+        expect(player.volume, 42);
+      },
+    );
+
+    test('rapid commands compute mute and restore in serial order', () async {
+      await player.playQueue(tracks);
+      await Future.wait([
+        player.setVolume(25),
+        player.toggleMute(),
+        player.toggleMute(),
+        player.setVolume(60),
+        player.setVolume(0),
+        player.toggleMute(),
+        player.toggleMute(),
+        player.toggleMute(),
+      ]);
+      expect(engine.volumeCalls, [25, 0, 25, 60, 0, 60, 0, 60]);
+      expect(player.volume, 60);
+      expect(player.isMuted, isFalse);
+    });
+
+    test('native commands publish state only after success', () async {
+      await player.playQueue(tracks);
+      final pending = Completer<void>();
+      final started = Completer<void>();
+      engine.onSetVolume = (_) {
+        started.complete();
+        return pending.future;
+      };
+      final observed = <double>[];
+      player.addListener(() => observed.add(player.volume));
+      final change = player.setVolume(25);
+      await started.future;
+      expect(player.volume, 100);
+      expect(observed, isEmpty);
+      pending.complete();
+      await change;
+      expect(player.volume, 25);
+      expect(observed, [25]);
+    });
+
+    test(
+      'failed native volume and mute commands preserve state and restore level',
+      () async {
+        await player.playQueue(tracks);
+        await player.setVolume(35);
+        engine.onSetVolume = (_) async => throw StateError('Volume failed');
+        await expectLater(player.setVolume(75), throwsStateError);
+        expect(player.volume, 35);
+        expect(player.error, contains('Volume failed'));
+        await expectLater(player.toggleMute(), throwsStateError);
+        expect(player.isMuted, isFalse);
+        engine.onSetVolume = null;
+        await player.toggleMute();
+        expect(player.volume, 0);
+        engine.onSetVolume = (_) async => throw StateError('Volume failed');
+        await expectLater(player.toggleMute(), throwsStateError);
+        expect(player.isMuted, isTrue);
+        await expectLater(player.setVolume(90), throwsStateError);
+        engine.onSetVolume = null;
+        await player.toggleMute();
+        expect(player.volume, 35);
+        expect(engine.volume, 35);
+        await player.pause();
+        expect(player.isPlaying, isFalse);
+      },
+    );
+
+    test(
+      'failed preplay volume application can retry initialization',
+      () async {
+        await player.setVolume(23);
+        engine.onSetVolume = (_) async => throw StateError('Volume failed');
+        await expectLater(player.playQueue(tracks), throwsStateError);
+        expect(engine.opens, 0);
+        expect(player.currentTrack, isNull);
+        expect(player.volume, 23);
+        expect(engine.controller.hasListener, isFalse);
+        engine.onSetVolume = null;
+        await player.playQueue(tracks);
+        expect(engine.initializations, 2);
+        expect(engine.volumeCalls, [23, 23]);
+        expect(engine.controller.hasListener, isTrue);
+        expect(player.isPlaying, isTrue);
+      },
+    );
+
+    test('volume and mute restore survive track switches, stop and recording changes', () async {
+      await player.playQueue(tracks);
+      await player.setVolume(48);
+      await player.next();
+      expect(player.volume, 48);
+      await player.toggleMute();
+      await player.previous();
+      expect(player.isMuted, isTrue);
+      await player.stop();
+      player.configureRecording('new-account-device', (_) async {});
+      expect(player.isMuted, isTrue);
+      await player.playQueue(tracks, index: 2);
+      expect(player.isMuted, isTrue);
+      await player.toggleMute();
+      expect(player.volume, 48);
+      expect(engine.volumeCalls, [48, 0, 48]);
+      await player.stop();
+      await player.setVolume(27);
+      expect(engine.volume, 27);
+      await player.playQueue(tracks);
+      expect(player.volume, 27);
+    });
+
+    test('closing skips queued and subsequent volume commands', () async {
+      await player.playQueue(tracks);
+      await player.setVolume(40);
+      final queued = player.setVolume(20);
+      final closing = player.shutdown();
+      await Future.wait([
+        queued,
+        closing,
+        player.toggleMute(),
+        player.setVolume(10),
+      ]);
+      await player.setVolume(90);
+      await player.toggleMute();
+      expect(engine.volumeCalls, [40]);
+      expect(player.volume, 40);
+    });
+
+    test(
+      'shutdown waits for an in-flight volume command before disposal',
+      () async {
+        await player.playQueue(tracks);
+        final pending = Completer<void>();
+        final started = Completer<void>();
+        engine.onSetVolume = (_) {
+          started.complete();
+          return pending.future;
+        };
+        final change = player.setVolume(18);
+        await started.future;
+        final closing = player.shutdown();
+        final ignored = player.toggleMute();
+        pending.complete();
+        await Future.wait([change, closing, ignored]);
+        expect(player.volume, 18);
+        expect(engine.volumeCalls, [18]);
+        expect(engine.controller.isClosed, isTrue);
+      },
+    );
+  });
+
   test(
     'local sources and transport controls do not require native plugins',
     () async {
@@ -254,7 +477,6 @@ void main() {
 }
 
 class FlakyEngine extends FakeEngine {
-  int initializations = 0;
   @override
   Future<void> initialize() async {
     if (++initializations == 1) throw StateError('Native init failed');

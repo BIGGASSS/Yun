@@ -8,6 +8,8 @@ by an account-isolated Rust server. Flutter is pinned with FVM.
 
 - Adaptive mobile/desktop library, albums/artists/search, queue, shuffle/repeat,
   keyboard shortcuts, light/dark/system appearance, metadata and artwork editing.
+- Desktop app-volume slider and mute, including compact windows and now playing;
+  Android continues to use its existing volume controls.
 - Admin-created accounts, Argon2id passwords, rotating/revocable sessions,
   authenticated original-file streaming with byte-range seeking.
 - In-app file selection and desktop drop, durable resumable uploads, embedded

@@ -42,6 +42,10 @@ class PlaybackController extends ChangeNotifier {
       index >= 0 && index < _queue.length ? _queue[index] : null;
   bool isPlaying = false, isBuffering = false, shuffle = false;
   RepeatMode repeatMode = RepeatMode.off;
+  double _volume = 100, _lastPositiveVolume = 100;
+  bool _volumeOverridden = false;
+  double get volume => _volume;
+  bool get isMuted => _volume == 0;
   Duration position = Duration.zero, duration = Duration.zero;
   String? error;
   String? _playbackError;
@@ -82,6 +86,9 @@ class PlaybackController extends ChangeNotifier {
   Future<void> _initialize() async {
     if (_initialized) return;
     await _engine.initialize();
+    // Leave native defaults untouched until volume is explicitly adjusted.
+    // Apply before opening audio; a failure leaves initialization retryable.
+    if (_volumeOverridden) await _engine.setVolume(_volume);
     _subscription = _engine.states.listen(_onState);
     _initialized = true;
     try {
@@ -342,6 +349,27 @@ class PlaybackController extends ChangeNotifier {
     await checkpoint();
   });
   Future<void> toggle() => isPlaying ? pause() : play();
+
+  Future<void> setVolume(double value) => _enqueue(() async {
+    if (!value.isFinite) {
+      throw ArgumentError.value(value, 'volume', 'Must be finite');
+    }
+    await _setVolume(value.clamp(0.0, 100.0));
+  });
+
+  Future<void> toggleMute() =>
+      _enqueue(() => _setVolume(isMuted ? _lastPositiveVolume : 0));
+
+  Future<void> _setVolume(double value) async {
+    // Idle changes must not load native audio. Once initialized, publish only
+    // after the native command succeeds, including the remembered restore level.
+    if (_initialized) await _engine.setVolume(value);
+    _volumeOverridden = true;
+    _volume = value;
+    if (value > 0) _lastPositiveVolume = value;
+    _notify();
+  }
+
   Future<void> seek(Duration value) => _enqueue(() async {
     if (currentTrack == null) return;
     _seeking = true;

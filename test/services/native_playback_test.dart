@@ -16,7 +16,7 @@ import 'package:yun/services/playback_engine.dart';
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
   test(
-    'REAL native libmpv: decode, pause, seek, queue completion, accounting (NULL audio)',
+    'REAL native libmpv: volume, decode, pause, seek, queue completion, accounting (NULL audio)',
     () async {
       native.MediaKit.ensureInitialized(
         libmpv: Platform.environment['LIBMPV_PATH'],
@@ -28,9 +28,10 @@ void main() {
       await wav.writeAsBytes(_tone());
       final errors = <String>[];
       final events = <ListeningEvent>[];
+      late native.Player nativePlayer;
       final engine = MediaKitEngine(
         createPlayer: () async {
-          final player = native.Player();
+          final player = nativePlayer = native.Player();
           // Set before opening any media: no physical audio output is used.
           await (player.platform as native.NativePlayer).setProperty(
             'ao',
@@ -51,6 +52,7 @@ void main() {
             events.add(event);
           });
       try {
+        await controller.setVolume(37.5);
         await controller.playQueue(const [
           Track(id: 'tone-a', title: 'Generated PCM A', durationMs: 6000),
           Track(id: 'tone-b', title: 'Generated PCM B', durationMs: 6000),
@@ -58,6 +60,12 @@ void main() {
         await _until(() => controller.position.inMilliseconds >= 400);
         expect(controller.isPlaying, isTrue);
         expect(controller.duration.inMilliseconds, closeTo(6000, 100));
+        await _until(() => nativePlayer.state.volume == 37.5);
+        await controller.toggleMute();
+        await _until(() => nativePlayer.state.volume == 0);
+        expect(controller.isMuted, isTrue);
+        await controller.toggleMute();
+        await _until(() => nativePlayer.state.volume == 37.5);
         await controller.pause();
         await _until(() => !controller.isPlaying);
         final paused = controller.position;
@@ -72,6 +80,8 @@ void main() {
         await controller.seek(const Duration(milliseconds: 5700));
         await _until(() => controller.currentTrack?.id == 'tone-b');
         await _until(() => controller.position.inMilliseconds >= 300);
+        expect(nativePlayer.state.volume, 37.5);
+        expect(controller.volume, 37.5);
         await controller.seek(const Duration(milliseconds: 5800));
         await _until(() => controller.currentTrack == null);
         await controller.checkpoint();
@@ -85,6 +95,7 @@ void main() {
         // Seeking across twelve seconds of content must not count as listening.
         expect(listened, lessThan(5000));
         expect(controller.isPlaying, isFalse);
+        expect(controller.volume, 37.5);
       } finally {
         await controller.shutdown();
         controller.dispose();

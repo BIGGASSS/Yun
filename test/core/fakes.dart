@@ -56,7 +56,11 @@ class FakeEngine implements PlaybackEngine {
   final controller = StreamController<EngineState>.broadcast(sync: true);
   EngineState state = const EngineState();
   String? opened;
-  int opens = 0;
+  int opens = 0, initializations = 0;
+  double volume = 100;
+  final volumeCalls = <double>[];
+  final calls = <String>[];
+  Future<void> Function(double)? onSetVolume;
   void emit(EngineState value) {
     state = value;
     controller.add(value);
@@ -65,9 +69,14 @@ class FakeEngine implements PlaybackEngine {
   @override
   Stream<EngineState> get states => controller.stream;
   @override
-  Future<void> initialize() async {}
+  Future<void> initialize() async {
+    initializations++;
+    calls.add('initialize');
+  }
+
   @override
   Future<void> open(String uri, {Map<String, String>? headers}) async {
+    calls.add('open');
     opened = uri;
     opens++;
     emit(const EngineState(playing: true, duration: Duration(seconds: 120)));
@@ -101,7 +110,16 @@ class FakeEngine implements PlaybackEngine {
   }
 
   @override
+  Future<void> setVolume(double value) async {
+    calls.add('volume');
+    volumeCalls.add(value);
+    await onSetVolume?.call(value);
+    volume = value;
+  }
+
+  @override
   Future<void> stop() async {
+    calls.add('stop');
     emit(const EngineState());
   }
 

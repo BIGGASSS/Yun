@@ -24,6 +24,14 @@ Import `package:yun/core/app_controller.dart` (re-exports models). `AppControlle
 `Track? currentTrack`; `List<Track> queue`; `int index`; `bool isPlaying, isBuffering, shuffle`; `Duration position, duration`; `RepeatMode repeatMode` (`off`, `all`, `one`); `String? error`.
 `Future<void> playQueue(List<Track> tracks, {int index = 0})`, `play()`, `pause()`, `toggle()`, `next()`, `previous()`, `seek(Duration position)`, `stop()`, `checkpoint()`, `shutdown()`; `void setShuffle(bool)`, `setRepeat(RepeatMode)`. UI may listen directly or via app. `checkpoint()` persists measured time without pausing (useful on application lifecycle transitions). The controller also checkpoints automatically every 10 seconds and on pause/buffering/seek/track transitions.
 
+`double volume` (0–100, initially 100), `bool isMuted`, `Future<void> setVolume(double)`,
+`toggleMute()`: serialized app-local gain; mute restores the last positive level.
+Finite input is clamped; nonfinite input is rejected. Before first playback these
+commands update memory only, then apply before audio opens. Native failures do not
+publish an unapplied value. Volume survives stop/track/account changes within this
+app session, but is not persisted across restarts. No native volume override is
+sent unless requested, leaving Android's existing behavior untouched.
+
 ## Models
 Track: id/title/artist/album/albumArtist/trackNumber/discNumber/durationMs/sizeBytes/sha256/mimeType/hasArtwork/revision/createdAt; `Duration duration`.
 Playlist: id/name/revision/entries/updatedAt. PlaylistEntry: id/trackId; constructors and JSON converters supplied.

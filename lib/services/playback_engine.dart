@@ -25,6 +25,7 @@ abstract interface class PlaybackEngine {
   Future<void> play();
   Future<void> pause();
   Future<void> seek(Duration position);
+  Future<void> setVolume(double volume);
   Future<void> stop();
   Future<void> dispose();
 }
@@ -206,6 +207,14 @@ class MediaKitEngine implements PlaybackEngine {
   @override
   Future<void> seek(Duration position) async {
     await _player?.seek(position);
+  }
+
+  @override
+  Future<void> setVolume(double volume) async {
+    if (!volume.isFinite) {
+      throw ArgumentError.value(volume, 'volume', 'Must be finite');
+    }
+    await _player?.setVolume(volume.clamp(0.0, 100.0));
   }
 
   @override
