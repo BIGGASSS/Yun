@@ -87,6 +87,36 @@ void main() {
     addTearDown(tester.view.resetDevicePixelRatio);
   }
 
+  for (final width in [390.0, 1000.0, 1400.0]) {
+    testWidgets('app branding at ${width.toInt()}px', (tester) async {
+      final app = _TestApp();
+      addTearDown(app.dispose);
+      await size(tester, Size(width, 900));
+      await tester.pumpWidget(YunApp(controller: app));
+      await tester.pumpAndSettle();
+
+      expect(tester.widget<MaterialApp>(find.byType(MaterialApp)).title, '韵');
+      final logo = find.byWidgetPredicate(
+        (widget) =>
+            widget is Image &&
+            widget.image is AssetImage &&
+            (widget.image as AssetImage).assetName == 'assets/icon.png',
+      );
+      expect(logo, findsOneWidget);
+      expect(tester.widget<Image>(logo).semanticLabel, '韵');
+      expect(tester.getSize(logo), Size.square(width >= 840 ? 48 : 32));
+      if (width >= 840) {
+        expect(
+          find.descendant(of: find.byType(NavigationRail), matching: logo),
+          findsOneWidget,
+        );
+      }
+      expect(find.text('yun'), findsNothing);
+      expect(find.text('Yun'), findsNothing);
+      expect(tester.takeException(), isNull);
+    });
+  }
+
   testWidgets('mobile offers five destinations and a real connection form', (
     tester,
   ) async {

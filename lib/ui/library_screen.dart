@@ -189,7 +189,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
               child: EmptyState(
                 icon: Icons.library_music_outlined,
                 title: 'A home for your music',
-                message: 'Connect to your Yun server to listen, organize, and keep favorites offline.',
+                message: 'Connect to your 韵 server to listen, organize, and keep favorites offline.',
                 action: FilledButton(
                   onPressed: widget.onSignIn,
                   child: const Text('Connect to server'),
@@ -202,7 +202,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
               child: EmptyState(
                 icon: Icons.audio_file_outlined,
                 title: 'Start with a song',
-                message: 'Upload audio files from this device. On desktop, you can also drop files anywhere in Yun.',
+                message: 'Upload audio files from this device. On desktop, you can also drop files anywhere in 韵.',
                 action: FilledButton.tonalIcon(
                   onPressed: widget.onUpload,
                   icon: const Icon(Icons.upload_file_rounded),

@@ -33,7 +33,7 @@ class _YunAppState extends State<YunApp> {
 
   @override
   Widget build(BuildContext context) => MaterialApp(
-    title: 'Yun',
+    title: '韵',
     debugShowCheckedModeBanner: false,
     theme: YunTheme.light(),
     darkTheme: YunTheme.dark(),
@@ -285,10 +285,11 @@ class _AppShellState extends State<_AppShell> {
     onDestinationSelected: (value) => setState(() => _destination = value),
     leading: Padding(
       padding: const EdgeInsets.fromLTRB(12, 24, 12, 28),
-      child: Text(
-        'yun',
-        style: Theme.of(context).textTheme.headlineMedium
-            ?.copyWith(fontWeight: FontWeight.w300, letterSpacing: 4),
+      child: Image.asset(
+        'assets/icon.png',
+        width: 48,
+        height: 48,
+        semanticLabel: '韵',
       ),
     ),
     destinations: [
@@ -317,10 +318,11 @@ class _AppShellState extends State<_AppShell> {
       child: Row(
         children: [
           if (!desktop)
-            Text(
-              'yun',
-              style: Theme.of(context).textTheme.titleLarge
-                  ?.copyWith(letterSpacing: 3),
+            Image.asset(
+              'assets/icon.png',
+              width: 32,
+              height: 32,
+              semanticLabel: '韵',
             ),
           const Spacer(),
           if (app.isOffline && app.isAuthenticated)

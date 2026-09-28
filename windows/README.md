@@ -27,7 +27,7 @@ Secure storage uses Windows Credential Manager and encrypted per-user files.
 Native media controls and secure storage must be smoke-tested in a real Windows
 user session. A build alone does not verify them.
 
-The window/resource display name is Yun. `runner/resources/app_icon.ico` contains
+The window/resource display name is 韵. `runner/resources/app_icon.ico` contains
 16–256px images generated from the unchanged `assets/icon.png`.
 
 Requirements above come from the installed `smtc_windows`,

@@ -7,7 +7,7 @@
     <!-- Imports use the system document picker, never broad storage permissions.
          Media-session notifications do not require POST_NOTIFICATIONS. -->
     <application
-        android:label="Yun"
+        android:label="韵"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher"
         android:allowBackup="false"

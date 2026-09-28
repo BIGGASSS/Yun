@@ -67,7 +67,7 @@ void showUploads(BuildContext context, AppController app) {
               return const EmptyState(
                 icon: Icons.upload_file_outlined,
                 title: 'Ready when you are',
-                message: 'Choose audio files or drop them into Yun. Uploads can be retried after a connection interruption.',
+                message: 'Choose audio files or drop them into 韵. Uploads can be retried after a connection interruption.',
               );
             }
             return ListView.separated(

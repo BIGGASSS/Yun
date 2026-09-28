@@ -29,7 +29,7 @@ permission or the iOS-only `UIBackgroundModes` key. Although media_kit's generic
 README suggests disabling sandboxing for unrestricted file paths, Yun uses the
 scoped picker and app container instead; no blanket filesystem access is granted.
 
-The app and window display name is Yun; executable/bundle product paths remain
+The app and window display name is 韵; executable/bundle product paths remain
 `yun` to preserve the generated Xcode scheme. AppIcon images are generated from
 the unchanged `assets/icon.png`. Playback, system controls, picker import and
 Keychain access still require on-device smoke tests.

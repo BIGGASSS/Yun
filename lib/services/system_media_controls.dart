@@ -92,7 +92,7 @@ class NativeSystemMediaControls implements SystemMediaControls {
         builder: () => _YunAudioHandler(commands),
         config: const AudioServiceConfig(
           androidNotificationChannelId: 'org.yun.audio',
-          androidNotificationChannelName: 'Yun playback',
+          androidNotificationChannelName: '韵 playback',
           androidNotificationOngoing: false,
           // Keep the service foreground while paused so headset/lock-screen
           // resume does not illegally restart a background FGS on Android 12+.

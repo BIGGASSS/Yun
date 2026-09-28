@@ -19,6 +19,8 @@ void main() {
       ),
     );
     await tester.pumpAndSettle();
+    expect(tester.widget<MaterialApp>(find.byType(MaterialApp)).title, '韵');
+    expect(find.text('韵'), findsOneWidget);
     expect(find.text('Your library could not be opened.'), findsOneWidget);
     expect(find.widgetWithText(FilledButton, 'Retry'), findsOneWidget);
     expect(tester.takeException(), isNull);

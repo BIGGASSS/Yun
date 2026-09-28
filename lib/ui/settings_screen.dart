@@ -177,7 +177,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                           crossAxisAlignment: CrossAxisAlignment.stretch,
                           children: [
                             const Text(
-                              'Use your own Yun server. Your library, uploads, and listening history stay with that server.',
+                              'Use your own 韵 server. Your library, uploads, and listening history stay with that server.',
                             ),
                             const SizedBox(height: 20),
                             TextFormField(
@@ -314,7 +314,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     padding: EdgeInsets.symmetric(vertical: 24),
                     child: Divider(),
                   ),
-                  Text('Yun', style: Theme.of(context).textTheme.titleMedium),
+                  Text('韵', style: Theme.of(context).textTheme.titleMedium),
                   const SizedBox(height: 4),
                   const Text(
                     'A quiet place for your own music. Listening statistics are personal; no third-party tracking service is used.',

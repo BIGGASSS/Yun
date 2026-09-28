@@ -45,11 +45,11 @@ static void my_application_activate(GApplication* application) {
   if (use_header_bar) {
     GtkHeaderBar* header_bar = GTK_HEADER_BAR(gtk_header_bar_new());
     gtk_widget_show(GTK_WIDGET(header_bar));
-    gtk_header_bar_set_title(header_bar, "Yun");
+    gtk_header_bar_set_title(header_bar, "韵");
     gtk_header_bar_set_show_close_button(header_bar, TRUE);
     gtk_window_set_titlebar(window, GTK_WIDGET(header_bar));
   }
-  gtk_window_set_title(window, "Yun");
+  gtk_window_set_title(window, "韵");
 
   // Embed the icon so an unpacked bundle works from any working directory.
   g_autoptr(GdkPixbuf) icon = gdk_pixbuf_new_from_resource(
@@ -146,7 +146,7 @@ MyApplication* my_application_new() {
   // corresponding .desktop file. This ensures better integration by allowing
   // the application to be recognized beyond its binary name.
   g_set_prgname(APPLICATION_ID);
-  g_set_application_name("Yun");
+  g_set_application_name("韵");
 
   return MY_APPLICATION(g_object_new(my_application_get_type(),
                                      "application-id", APPLICATION_ID, "flags",

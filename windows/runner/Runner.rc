@@ -90,12 +90,12 @@ BEGIN
         BLOCK "040904e4"
         BEGIN
             VALUE "CompanyName", "app.yun" "\0"
-            VALUE "FileDescription", "Yun" "\0"
+            VALUE "FileDescription", "韵" "\0"
             VALUE "FileVersion", VERSION_AS_STRING "\0"
             VALUE "InternalName", "yun" "\0"
             VALUE "LegalCopyright", "Copyright (C) 2026 app.yun. All rights reserved." "\0"
             VALUE "OriginalFilename", "yun.exe" "\0"
-            VALUE "ProductName", "Yun" "\0"
+            VALUE "ProductName", "韵" "\0"
             VALUE "ProductVersion", VERSION_AS_STRING "\0"
         END
     END

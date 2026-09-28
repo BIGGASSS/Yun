@@ -109,7 +109,7 @@ class _YunBootstrapState extends State<YunBootstrap> {
       );
     }
     return MaterialApp(
-      title: 'Yun',
+      title: '韵',
       debugShowCheckedModeBanner: false,
       theme: YunTheme.light(),
       darkTheme: YunTheme.dark(),
@@ -122,10 +122,7 @@ class _YunBootstrapState extends State<YunBootstrap> {
               child: Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  const Text(
-                    'yun',
-                    style: TextStyle(fontSize: 40, letterSpacing: 6),
-                  ),
+                  const Text('韵', style: TextStyle(fontSize: 40)),
                   const SizedBox(height: 24),
                   if (_failure == null)
                     const Text('Opening your library…')
