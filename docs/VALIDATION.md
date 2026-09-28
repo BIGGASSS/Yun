@@ -4,6 +4,22 @@ This document separates implemented automation from executed evidence. A green
 compiler/unit-test run does not certify audio playback, background behavior,
 secure storage, recovery, signing, or third-party redistribution rights.
 
+## Desktop volume follow-up
+
+**All nine hosted CI jobs passed** for code commit `0c08d86`:
+[CI run 36492699251](https://github.com/BIGGASSS/Yun/actions/runs/36492699251).
+This run includes all four native packages, 143 Flutter tests, 10 Rust tests,
+and the real libmpv/null-output smoke exercising gain, mute/unmute, and volume
+retention across track changes. Download this run's artifacts for volume controls.
+The concurrent app-branding changes were retained before validation.
+
+Widget tests cover Linux/macOS/Windows controls, keyboard input, compact windows
+with large text, now-playing state, and failed native writes. Android at phone
+and tablet widths has no new controls and sends no native volume override.
+Core tests cover lazy pre-play settings, clamping/nonfinite input, ordered writes,
+mute restoration, failures/retries, and shutdown. Physical output on real desktop
+hardware remains a manual acceptance check; the native smoke uses null output.
+
 ## KDE keyring follow-up
 
 **All nine hosted CI jobs passed** for code commit `2b65696`, including the new

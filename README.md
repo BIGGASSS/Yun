@@ -25,9 +25,9 @@ by an account-isolated Rust server. Flutter is pinned with FVM.
   real Rust↔Dart TCP integration tests, CI and private evaluation packaging.
 
 **This is an evaluation candidate, not a certified four-platform release.**
-[Hosted CI](https://github.com/BIGGASSS/Yun/actions/runs/36478678901) passed all
-four native builds/packages, 115 Flutter tests, 10 Rust tests, TCP integration,
-null-output libmpv decoding, the container backup/restore smoke, and 27 isolated
+[Hosted CI](https://github.com/BIGGASSS/Yun/actions/runs/36492699251) passed all
+four native builds/packages, 143 Flutter tests, 10 Rust tests, TCP integration,
+null-output libmpv decoding and volume control, the container backup/restore smoke, and 27 isolated
 keyring tests on each of Ubuntu 22.04 and 24.04. Download
 private evaluation artifacts from that run (14-day retention).
 
