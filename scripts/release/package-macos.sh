@@ -4,7 +4,7 @@ apps=(build/macos/Build/Products/Release/*.app)
 [[ ${#apps[@]} == 1 && -d "${apps[0]}" ]] || { echo 'Expected exactly one built macOS app' >&2; exit 1; }
 app=${apps[0]}
 executable=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$app/Contents/Info.plist")
-lipo -verify_arch arm64 "$app/Contents/MacOS/$executable"
+lipo "$app/Contents/MacOS/$executable" -verify_arch arm64
 stage=$(mktemp -d)
 trap 'rm -rf "$stage"' EXIT
 ditto "$app" "$stage/Yun.app"

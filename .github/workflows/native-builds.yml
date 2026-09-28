@@ -64,7 +64,11 @@ jobs:
       - if: matrix.target == 'windows-x64-unsigned'
         shell: pwsh
         run: |
-          fvm flutter build windows --release --target-platform windows-x64
+          if ([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture -ne 'X64') {
+            throw 'Windows artifacts must be built on an x64 host'
+          }
+          # Flutter 3.47 derives Windows architecture from the build host.
+          fvm flutter build windows --release
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           ./scripts/release/package-windows.ps1
       - name: Checksums
