@@ -1,0 +1,15 @@
+Yun private evaluation build — dependency license review NOT completed.
+
+This file is a review warning, NOT a replacement for upstream licenses/notices.
+Do not redistribute these archives until the checklist in RELEASE.md is completed.
+The dependency inventory and lockfile identify Dart package versions, not every
+native transitive binary, source obligation, or applicable patent permission.
+
+Review Flutter/Dart, every plugin, OS libraries and bundled native libraries.
+In particular, media_kit/native media runtimes may include mpv and FFmpeg:
+mpv's effective GPL/LGPL status depends on its exact build; FFmpeg can be LGPL,
+GPL, or nonredistributable with certain nonfree build combinations. Inspect the
+actual bundled/downloaded binaries and build flags, not only package metadata.
+Retain required licenses/copyrights, provide corresponding source/build scripts
+or offers as applicable, and satisfy LGPL relinking/modification requirements.
+Review codec patents and distribution jurisdiction separately. See RELEASE.md.

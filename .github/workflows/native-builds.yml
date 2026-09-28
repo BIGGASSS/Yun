@@ -1,0 +1,130 @@
+name: Native client artifacts
+on:
+  workflow_call:
+    inputs:
+      android_signing:
+        description: 'debug-signed evaluation or manual release-signed APK'
+        type: string
+        default: debug-signed
+    secrets:
+      ANDROID_KEYSTORE_BASE64:
+        required: false
+      ANDROID_KEYSTORE_PASSWORD:
+        required: false
+      ANDROID_KEY_ALIAS:
+        required: false
+      ANDROID_KEY_PASSWORD:
+        required: false
+permissions:
+  contents: read
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: linux-x64
+            os: ubuntu-24.04
+          - target: macos-arm64-unsigned
+            os: macos-15
+          - target: windows-x64-unsigned
+            os: windows-2022
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y clang cmake ninja-build pkg-config libgtk-3-dev libmpv-dev libsecret-1-dev liblzma-dev
+      # smtc_windows builds Rust via Cargokit. Do not rely on a preinstalled toolchain.
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+      - uses: ./.github/actions/flutter
+      - name: Dependency inventory (not a completed license audit)
+        shell: bash
+        run: |
+          mkdir -p dist
+          dart pub global run fvm:fvm flutter pub deps --style=compact > dist/flutter-dependencies.txt
+          cp pubspec.lock dist/pubspec.lock
+          cp docs/RELEASE.md docs/VALIDATION.md scripts/release/NOTICES.txt dist/
+          printf '%s\n' "Commit: $GITHUB_SHA" "Target: ${{ matrix.target }}" > dist/BUILD.txt
+          dart pub global run fvm:fvm flutter --version >> dist/BUILD.txt
+          rustc --version >> dist/BUILD.txt
+      - if: matrix.target == 'linux-x64'
+        shell: bash
+        run: |
+          fvm flutter build linux --release --target-platform linux-x64
+          bash scripts/release/package-linux.sh
+      - if: matrix.target == 'macos-arm64-unsigned'
+        shell: bash
+        run: |
+          test "$(uname -m)" = arm64
+          fvm flutter config --enable-macos-arm64-only
+          fvm flutter build macos --release
+          bash scripts/release/package-macos.sh
+      - if: matrix.target == 'windows-x64-unsigned'
+        shell: pwsh
+        run: |
+          fvm flutter build windows --release --target-platform windows-x64
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          ./scripts/release/package-windows.ps1
+      - name: Checksums
+        shell: bash
+        run: python scripts/release/checksums.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: yun-${{ matrix.target }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 14
+  android:
+    runs-on: ubuntu-24.04
+    # Configure required reviewers + restricted branches for release-signing.
+    # CI evaluation jobs receive no signing credentials.
+    environment: ${{ inputs.android_signing == 'release-signed' && 'release-signing' || 'native-evaluation' }}
+    steps:
+      - name: Validate signing request
+        env:
+          MODE: ${{ inputs.android_signing }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          case "$MODE" in
+            debug-signed) ;;
+            release-signed) test "$EVENT" = workflow_dispatch ;;
+            *) echo 'Unknown Android signing mode' >&2; exit 1 ;;
+          esac
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+      - uses: ./.github/actions/flutter
+      - name: Dependency inventory (not a completed license audit)
+        env:
+          MODE: ${{ inputs.android_signing }}
+        run: |
+          mkdir -p dist
+          fvm flutter pub deps --style=compact > dist/flutter-dependencies.txt
+          cp pubspec.lock dist/pubspec.lock
+          cp docs/RELEASE.md docs/VALIDATION.md scripts/release/NOTICES.txt dist/
+          printf '%s\n' "Commit: $GITHUB_SHA" "Target: android-arm64-$MODE" > dist/BUILD.txt
+          fvm flutter --version >> dist/BUILD.txt
+      - name: Build explicitly debug-signed evaluation APK
+        if: inputs.android_signing == 'debug-signed'
+        run: bash scripts/release/build-android.sh debug-signed
+      - name: Build and verify release-signed APK (no fallback)
+        if: inputs.android_signing == 'release-signed'
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: bash scripts/release/build-android.sh release-signed
+      - name: Checksums
+        run: python3 scripts/release/checksums.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: yun-android-arm64-${{ inputs.android_signing }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 14

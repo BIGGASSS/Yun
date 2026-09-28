@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Yun
+Comment=Personal music library
+Exec=yun
+Icon=yun
+Terminal=false
+Categories=AudioVideo;Audio;Player;
+StartupWMClass=yun

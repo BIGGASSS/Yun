@@ -1,0 +1,67 @@
+name: yun
+services:
+  server:
+    image: yun-server:local
+    build:
+      context: ../server
+      dockerfile: ../deploy/Dockerfile
+    user: "10001:10001"
+    restart: unless-stopped
+    stop_grace_period: 90s
+    read_only: true
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,noexec,size=256m
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    environment:
+      RUST_LOG: yun_server=info,tower_http=info
+    volumes:
+      - yun_data:/var/lib/yun
+    networks: [origin]
+    # Deliberately NO published origin port, including on loopback.
+  caddy:
+    image: caddy:2.10.2-alpine
+    user: "10001:10001"
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    environment:
+      YUN_DOMAIN: ${YUN_DOMAIN:?Set YUN_DOMAIN in deploy/.env}
+      ACME_EMAIL: ${ACME_EMAIL:?Set ACME_EMAIL in deploy/.env}
+      XDG_DATA_HOME: /data
+      XDG_CONFIG_HOME: /config
+    ports:
+      - "80:8080"
+      - "443:8443"
+      - "443:8443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    tmpfs: [/tmp]
+    networks: [edge, origin]
+    depends_on:
+      server:
+        condition: service_healthy
+  # One-shot ownership initialization, never a privileged long-running process.
+  init:
+    image: caddy:2.10.2-alpine
+    profiles: [tools]
+    user: "0:0"
+    entrypoint: /bin/sh
+    command: ["-ec", "chown 10001:10001 /data /config /yun; chmod 700 /data /config /yun"]
+    network_mode: none
+    volumes:
+      - yun_data:/yun
+      - caddy_data:/data
+      - caddy_config:/config
+networks:
+  edge: {}
+  origin:
+    internal: true
+volumes:
+  yun_data:
+    name: ${YUN_DATA_VOLUME:-yun_data}
+  caddy_data: {}
+  caddy_config: {}

@@ -1,3 +1,43 @@
+# Flutter / Dart generated files
+.dart_tool/
+.packages
+.pub/
+.pub-cache/
+build/
+coverage/
+.flutter-plugins
+.flutter-plugins-dependencies
+**/doc/api/
 
-# FVM Version Cache
+# SDKs and editor state (keep exact .fvmrc)
 .fvm/
+.idea/
+*.iml
+.vscode/
+
+# Build/distribution outputs
+server/target/
+dist/
+
+# Local media, server state, private configuration, signing credentials
+.env
+.env.*
+!.env.example
+**/yun-data/
+**/yun.sqlite3*
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.jks
+*.keystore
+**/key.properties
+*.p12
+*.mobileprovision
+
+# OS/editor debris
+.DS_Store
+Thumbs.db
+*.swp
+*.log
+__pycache__/
+*.pyc

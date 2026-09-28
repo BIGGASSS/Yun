@@ -1,0 +1,8 @@
+# Dockerfile-specific ignore rules, relative to the server/ build context.
+*
+!Cargo.toml
+!Cargo.lock
+!src/
+!src/**
+!migrations/
+!migrations/**

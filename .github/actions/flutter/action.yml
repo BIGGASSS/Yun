@@ -1,0 +1,24 @@
+name: Exact FVM Flutter
+description: Bootstrap Dart, install pinned FVM, then use the exact SDK from .fvmrc
+runs:
+  using: composite
+  steps:
+    - id: version
+      shell: bash
+      run: python -c 'import json; print("version=" + json.load(open(".fvmrc"))["flutter"])' >> "$GITHUB_OUTPUT"
+    # FVM is a Dart program: install Flutter/Dart BEFORE activating it.
+    - uses: subosito/flutter-action@v2
+      with:
+        flutter-version: ${{ steps.version.outputs.version }}
+        channel: stable
+        cache: true
+    - shell: bash
+      run: |
+        dart pub global activate fvm 4.3.1
+        python -c 'import os; root=os.environ.get("PUB_CACHE") or (os.path.join(os.environ["LOCALAPPDATA"], "Pub", "Cache") if os.name == "nt" else os.path.expanduser("~/.pub-cache")); print(os.path.join(root,"bin"))' >> "$GITHUB_PATH"
+        dart pub global run fvm:fvm install --skip-pub-get
+    - shell: bash
+      run: |
+        # Direct Dart invocation also works in Windows Git Bash (which may not resolve fvm.bat).
+        dart pub global run fvm:fvm flutter --version
+        dart pub global run fvm:fvm flutter pub get

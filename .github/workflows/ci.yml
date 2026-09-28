@@ -1,0 +1,64 @@
+name: CI
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  rust:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: server
+      - run: cargo fmt --manifest-path server/Cargo.toml --check
+      - run: cargo test --manifest-path server/Cargo.toml --locked
+      - run: cargo clippy --manifest-path server/Cargo.toml --locked --all-targets --all-features -- -D warnings
+      - run: cargo build --manifest-path server/Cargo.toml --release --locked
+      - uses: actions/upload-artifact@v4
+        with:
+          name: yun-server-linux-x64
+          path: server/target/release/yun-server
+          if-no-files-found: error
+          retention-days: 14
+  flutter:
+    needs: rust
+    runs-on: ubuntu-24.04
+    env:
+      YUN_SERVER_BINARY: ${{ github.workspace }}/server/target/release/yun-server
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y clang cmake ninja-build pkg-config libgtk-3-dev libmpv-dev libsecret-1-dev liblzma-dev
+      - uses: ./.github/actions/flutter
+      - uses: actions/download-artifact@v4
+        with:
+          name: yun-server-linux-x64
+          path: server/target/release
+      - run: chmod +x "$YUN_SERVER_BINARY"
+      - run: fvm dart format --output=none --set-exit-if-changed lib test
+      - run: fvm flutter analyze
+      - run: fvm flutter test
+      - run: RUN_NATIVE_PLAYBACK=1 fvm flutter test test/services/native_playback_test.dart
+      - run: python3 scripts/api_smoke.py --binary "$YUN_SERVER_BINARY"
+  deployment:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: for script in scripts/*.sh scripts/release/*.sh; do bash -n "$script"; done
+      - run: shellcheck scripts/*.sh scripts/release/*.sh
+      - run: python3 scripts/test-release-tooling.py
+      - run: python3 scripts/release/test-android-signing.py
+      - run: YUN_DOMAIN=music.example.com ACME_EMAIL=ci@example.com docker compose -f deploy/compose.yaml config --quiet
+      - run: docker build -f deploy/Dockerfile -t yun-server:ci server
+      - run: bash scripts/test-container.sh
+  native:
+    uses: ./.github/workflows/native-builds.yml
