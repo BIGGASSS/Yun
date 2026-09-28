@@ -9,6 +9,17 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 jobs:
+  linux-keyring:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, ubuntu-24.04]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y g++ pkg-config libsecret-1-dev dbus
+      - name: Isolated Secret Service / KDE alias integration tests
+        run: bash packages/flutter_secure_storage_linux/linux/test/run_private_bus_tests.sh
   rust:
     runs-on: ubuntu-24.04
     steps:

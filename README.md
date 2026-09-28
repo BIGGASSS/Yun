@@ -61,7 +61,10 @@ global cleartext or bypass certificate validation.
 Native prerequisites and caveats: [Linux](linux/README.md),
 [Android](android/README.md), [macOS](macos/README.md),
 [Windows](windows/README.md). Linux needs libmpv at runtime and an unlocked Secret
-Service keyring for credentials. The Windows SMTC bridge requires Rust; its Dart
+Service keyring for credentials. KWallet's `org.kde.secretservicecompat` endpoint
+is supported when the standard `org.freedesktop.secrets` name is absent—no separate
+GNOME Keyring installation is required. See [Linux setup](linux/README.md).
+The Windows SMTC bridge requires Rust; its Dart
 bridge version is deliberately pinned to the matching native generator.
 
 ## Verify

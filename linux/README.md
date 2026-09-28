@@ -15,10 +15,26 @@ cannot. Distribution packages must depend on the appropriate libmpv runtime
 The runner links the plugin-provided mimalloc object as recommended by media_kit;
 the default plugin build downloads its pinned source archive.
 
-Secure storage needs an **unlocked Secret Service keyring** (GNOME Keyring,
-KWallet with Secret Service support, or equivalent), not merely libsecret.
-MPRIS media controls need a desktop D-Bus session. A headless build does not test
-either integration; never replace unavailable secure storage with plaintext.
+Secure storage needs a Secret Service provider (KWallet, GNOME Keyring, or
+an equivalent), not merely libsecret. Yun first checks the session bus for a
+running or activatable `org.freedesktop.secrets`. If that name is absent, it uses
+KWallet's `org.kde.secretservicecompat` instead, including read/write/unlock/delete.
+Normal D-Bus activation may start the installed KDE provider when necessary;
+Yun runs no daemon commands, requires no second keyring installation, and does
+not modify your wallet configuration or use a plaintext/session-only fallback.
+A locked or failing standard provider is not silently replaced with another store.
+
+The Linux plugin is patched locally in
+[`packages/flutter_secure_storage_linux`](../packages/flutter_secure_storage_linux/YUN_FORK.md);
+other platforms still use the upstream packages. Run the isolated tests with:
+
+```sh
+bash packages/flutter_secure_storage_linux/linux/test/run_private_bus_tests.sh
+```
+
+These tests exercise libsecret against a private mock D-Bus service, not your
+wallet. MPRIS media controls still need a desktop D-Bus session; a headless build
+is not a test of the real desktop's unlock prompts or media controls.
 
 Ship the whole `build/linux/x64/release/bundle/`, not just `yun`. Its `share/`
 contains a desktop entry and icon. A system packager should install those into

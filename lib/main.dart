@@ -133,8 +133,8 @@ class _YunBootstrapState extends State<YunBootstrap> {
                     const Text('Your library could not be opened.'),
                     const SizedBox(height: 12),
                     const Text(
-                      'On Linux, unlock your Secret Service keyring. '
-                      'Also check that your application storage is writable. '
+                      'Check that your secure credential store is available '
+                      'and your application storage is writable. '
                       'Your music and pending history have not been deleted.',
                     ),
                     const SizedBox(height: 12),

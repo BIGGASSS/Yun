@@ -29,6 +29,12 @@ dependencies:
   sqlite3: ^3.1.0
   uuid: ^4.5.2
 
+# Linux-only patch: retain libsecret encryption and support KDE's advertised
+# org.kde.secretservicecompat endpoint when the standard name is absent.
+dependency_overrides:
+  flutter_secure_storage_linux:
+    path: packages/flutter_secure_storage_linux
+
 dev_dependencies:
   flutter_test:
     sdk: flutter

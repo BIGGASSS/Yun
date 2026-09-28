@@ -4,6 +4,24 @@ This document separates implemented automation from executed evidence. A green
 compiler/unit-test run does not certify audio playback, background behavior,
 secure storage, recovery, signing, or third-party redistribution rights.
 
+## KDE keyring follow-up
+
+The Linux-only secure-storage fork now supports `org.kde.secretservicecompat`
+when `org.freedesktop.secrets` is neither running nor activatable. Local validation:
+27 isolated real-libsecret/private-D-Bus tests passed, including the plugin's
+exact registration sequence, read/write/delete, provider discovery/activation,
+standard-provider preference, account isolation, locked/failed providers, and
+ambiguous-write handling. The suite passed against libsecret 0.20.5, 0.21.4, and
+0.21.8.2. Flutter analysis, all 115 Flutter tests, and the Linux release build also
+passed. CI now runs these native tests on Ubuntu 22.04 and 24.04.
+
+No real user wallet was opened or modified during these tests; the mocks run on
+private buses with no host activation directories. Actual desktop unlock prompts
+remain a manual acceptance check. See the fork's
+[provenance and compatibility notes](../packages/flutter_secure_storage_linux/YUN_FORK.md).
+The historical hosted evidence below applies to the explicitly identified earlier
+code commit, not this follow-up.
+
 ## Hosted evidence — 2026-09-28
 
 **All seven CI jobs passed** for code commit
