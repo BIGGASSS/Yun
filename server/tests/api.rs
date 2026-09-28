@@ -1340,10 +1340,7 @@ async fn concurrent_chunks_and_playlist_writes_have_one_winner_and_completion_re
 #[tokio::test]
 async fn expiry_and_authentication_rate_limits() {
     let dir = tempfile::tempdir().unwrap();
-    let mut config = Config::new(dir.path());
-    config.access_ttl_ms = 50;
-    config.refresh_ttl_ms = 300;
-    let state = AppState::open(config).await.unwrap();
+    let state = AppState::open(Config::new(dir.path())).await.unwrap();
     yun_server::create_user(&state, "alice", "alice-password-long")
         .await
         .unwrap();
@@ -1356,7 +1353,34 @@ async fn expiry_and_authentication_rate_limits() {
         json!({"username":"alice","password":"alice-password-long","device_id":uid()}),
     )
     .await;
-    tokio::time::sleep(std::time::Duration::from_millis(70)).await;
+    assert_eq!(
+        json_request(
+            &app,
+            "GET",
+            "/api/v1/library",
+            login["access_token"].as_str(),
+            json!({})
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    // Expire the sole session explicitly: millisecond TTLs and sleeps race with
+    // database I/O and scheduling on loaded CI runners.
+    let pool = sqlx::sqlite::SqlitePoolOptions::new()
+        .connect_with(
+            sqlx::sqlite::SqliteConnectOptions::new().filename(dir.path().join("yun.sqlite3")),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        sqlx::query("UPDATE sessions SET access_expires=0")
+            .execute(&pool)
+            .await
+            .unwrap()
+            .rows_affected(),
+        1
+    );
     assert_eq!(
         json_request(
             &app,
@@ -1390,7 +1414,27 @@ async fn expiry_and_authentication_rate_limits() {
         .0,
         StatusCode::OK
     );
-    tokio::time::sleep(std::time::Duration::from_millis(320)).await;
+    assert_eq!(
+        sqlx::query("UPDATE sessions SET refresh_expires=0")
+            .execute(&pool)
+            .await
+            .unwrap()
+            .rows_affected(),
+        1
+    );
+    assert_eq!(
+        json_request(
+            &app,
+            "GET",
+            "/api/v1/library",
+            rotated["access_token"].as_str(),
+            json!({})
+        )
+        .await
+        .0,
+        StatusCode::UNAUTHORIZED
+    );
+    pool.close().await;
     assert_eq!(
         json_request(
             &app,
