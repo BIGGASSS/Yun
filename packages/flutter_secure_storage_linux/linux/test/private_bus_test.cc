@@ -413,7 +413,7 @@ static void scenario(gconstpointer data) {
   // Each case gets a fresh process: libsecret and GLib cache bus connections
   // and backend selection. A 20s deadline catches accidental host-bus use.
   if (!g_test_subprocess()) {
-    g_test_trap_subprocess(nullptr, 20 * G_USEC_PER_SEC, G_TEST_SUBPROCESS_DEFAULT);
+    g_test_trap_subprocess(nullptr, 20 * G_USEC_PER_SEC, static_cast<GTestSubprocessFlags>(0));
     g_test_trap_assert_passed();
     return;
   }
