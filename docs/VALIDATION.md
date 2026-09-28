@@ -4,6 +4,29 @@ This document separates implemented automation from executed evidence. A green
 compiler/unit-test run does not certify audio playback, background behavior,
 secure storage, recovery, signing, or third-party redistribution rights.
 
+## Hosted evidence — 2026-09-28
+
+**All seven CI jobs passed** for code commit
+[`bc3a93d`](https://github.com/BIGGASSS/Yun/commit/bc3a93d):
+[CI run 36472384273](https://github.com/BIGGASSS/Yun/actions/runs/36472384273).
+Subsequent evidence-only documentation updates do not change that tested code.
+
+- Rust: format, 10 tests, strict Clippy, release build.
+- Flutter: format, analysis, 115 tests including actual Rust↔Dart TCP regressions,
+  separate real libmpv/null-output test, and the 65-request TCP API smoke.
+- Deployment: image build, Compose validation, non-root container health/locking,
+  real stopped-server backup and restore, Caddy configuration, and host tooling tests.
+- Native builds and packaging: Linux x64 tar archive, macOS ARM64 DMG,
+  Windows x64 ZIP, and Android ARM64 debug-signed APK.
+
+Five private artifacts are attached to that run: `yun-server-linux-x64`,
+`yun-linux-x64`, `yun-macos-arm64-unsigned`, `yun-windows-x64-unsigned`, and
+`yun-android-arm64-debug-signed`. Client artifacts include checksums and dependency
+inventories. Artifacts expire after 14 days; the workflows can reproduce them.
+
+This is compilation/automated evidence, **not** audible-device, native system-
+controls, production-signing, public TLS, or license-review certification.
+
 ## Integrated local evidence — 2026-09-28
 
 Executed against the integrated implementation on Linux x64 (Flutter 3.47.5,
@@ -46,12 +69,10 @@ Executed locally in this Linux workspace:
   build/signature-verification errors never package an APK. Flutter and `apksigner`
   are **test doubles**: this verifies control flow, not actual Gradle/signing.
 
-**Not executed here:** Docker image/Compose runtime (no Docker Engine/daemon available),
-public DNS/ACME certificate issuance or renewal, hosted Actions jobs, macOS/Windows/
-Android native packaging, production signing/notarization, and real-device audio
-or hardware controls. The workflows implement these build checks; their existence
-is not a report that the hosted jobs passed. Flutter/server application verification
-must be recorded separately with the actual command, source commit, and result.
+**Not executed locally:** Docker runtime or non-Linux packaging; these were
+subsequently executed by the hosted CI run recorded above. **Still not executed:**
+public DNS/ACME issuance/renewal, production signing/notarization, real-device audio,
+native hardware controls, and redistribution-license review.
 
 ## Automated checks to run on the final integrated tree
 
@@ -141,8 +162,9 @@ do not publish credentials, listening history, personal library files, or tokens
 
 ### Packaging and distribution
 
-- [ ] All target workflows pass on the **same final commit**; inspect dependency
-  inventories and full archives, not just the main executable.
+- [x] All target workflows pass on the **same code commit**, `bc3a93d` (linked above).
+- [ ] Inspect dependency inventories and full archives and complete the license
+  review before distributing them; build success alone is not this review.
 - [ ] Verify Linux installer/desktop launch, macOS DMG install/Gatekeeper behavior,
   Windows portable launch/SMTC, and Android ARM64 sideload on real target hardware.
 - [ ] Configure and independently review the `release-signing` environment's

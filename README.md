@@ -23,9 +23,13 @@ by an account-isolated Rust server. Flutter is pinned with FVM.
   real Rust↔Dart TCP integration tests, CI and private evaluation packaging.
 
 **This is an evaluation candidate, not a certified four-platform release.**
-Linux compilation and null-output libmpv decoding have been exercised locally.
+[Hosted CI](https://github.com/BIGGASSS/Yun/actions/runs/36472384273) passed all
+four native builds/packages, 115 Flutter tests, 10 Rust tests, TCP integration,
+null-output libmpv decoding, and the container backup/restore smoke. Download
+private evaluation artifacts from that run (14-day retention).
+
 Hardware playback, Android/macOS/Windows runtime behavior, production signing,
-TLS deployment and redistribution-license review require the acceptance gates in
+public TLS deployment and redistribution-license review still require the gates in
 [docs/VALIDATION.md](docs/VALIDATION.md). No transcoding, public signup, social
 features, DRM, or stats.fm service integration is included.
 
