@@ -4,6 +4,40 @@ This document separates implemented automation from executed evidence. A green
 compiler/unit-test run does not certify audio playback, background behavior,
 secure storage, recovery, signing, or third-party redistribution rights.
 
+## Desktop minimize-to-tray follow-up
+
+Local validation: formatting/analysis clean, **316 Flutter tests passed** (one
+opt-in native-audio smoke skipped), **12 Rust tests passed**, release-tooling
+checks passed, and the Linux release build passed. Flutter TCP tests used the
+release server binary, with temporary files isolated under the user cache.
+
+The 108 new Flutter tests cover settings persistence and failed writes, all three
+desktop bootstrap paths, unchanged wide Android/iOS, close versus explicit quit,
+playback preservation while hidden, ordered shutdown and Retry races, duplicate
+requests, tray loss/restore, native failures, and preventing further hiding after
+failed shutdown. Native adapter tests mock platform channels; Linux availability
+tests use private D-Bus servers, never the real session bus or wallet. Windows
+channel tests include a fresh checked shell-icon probe, not just plugin success.
+
+Manual acceptance remains required on each desktop:
+- Default close quits; saved minimize-on-close survives restart and keeps music
+  playing. Settings and tray Quit exit after history/settings are saved.
+- Tray Show restores/focuses a hidden or OS-minimized window. On macOS, Dock reopen
+  works repeatedly and Cmd-Q/Dock Quit never minimize instead of quitting.
+- Windows close interception does not shut down the player before hiding. Explorer
+  tray loss/restart leaves a recovery window rather than an inaccessible process.
+- KDE/other Linux StatusNotifier hosts show the icon/menu; missing hosts keep Yun
+  visible, and host disappearance while hidden restores the window.
+
+A headless build, mocked native channel, or advertised tray host does not certify
+actual icon rendering, native focus policy (including Wayland), or physical audio.
+The last confirmed hosted baseline before this feature is
+[de35996 / run 36552642043](https://github.com/BIGGASSS/Yun/actions/runs/36552642043):
+all nine jobs green, including the logout HTTP-body fix, playback preferences, and
+all four native packages. It does **not** contain tray support; use a successful
+[CI run](https://github.com/BIGGASSS/Yun/actions/workflows/ci.yml) containing this
+feature for tray artifacts.
+
 ## Playback preference persistence follow-up
 
 Local validation: formatting and analysis clean, **208 Flutter tests passed**

@@ -83,6 +83,14 @@ set_target_properties(${BINARY_NAME}
 # them to the application.
 include(flutter/generated_plugins.cmake)
 
+# tray_manager 0.5.3 still uses app_indicator_new, deprecated by newer Ayatana.
+# Retain the warning without failing the dependency build under Flutter's Werror;
+# do not weaken warning policy for Yun or other plugins.
+if(TARGET tray_manager_plugin)
+  target_compile_options(tray_manager_plugin PRIVATE
+    -Wno-error=deprecated-declarations)
+endif()
+
 # media_kit recommends mimalloc to avoid native allocator leaks.
 if(MIMALLOC_LIB)
   target_link_libraries(${BINARY_NAME} PRIVATE ${MIMALLOC_LIB})

@@ -48,7 +48,7 @@ jobs:
       YUN_SERVER_BINARY: ${{ github.workspace }}/server/target/release/yun-server
     steps:
       - uses: actions/checkout@v4
-      - run: sudo apt-get update && sudo apt-get install -y clang cmake ninja-build pkg-config libgtk-3-dev libmpv-dev libsecret-1-dev liblzma-dev
+      - run: sudo apt-get update && sudo apt-get install -y clang cmake ninja-build pkg-config libgtk-3-dev libmpv-dev libsecret-1-dev liblzma-dev libayatana-appindicator3-dev
       - uses: ./.github/actions/flutter
       - uses: actions/download-artifact@v4
         with:

@@ -9,6 +9,7 @@ import 'package:yun/main.dart';
 import 'package:yun/services/api_client.dart';
 import 'package:yun/services/playback_settings_store.dart';
 
+import 'core/fake_desktop_host.dart';
 import 'core/fakes.dart';
 import 'ui/player_test_app.dart' show mockDesktopDrop;
 
@@ -108,6 +109,7 @@ void main() {
             repeatMode: RepeatMode.all,
           );
           Widget bootstrap() => YunBootstrap(
+            desktopHostFactory: () => FakeDesktopHost([]),
             controllerFactory:
                 ({required playbackSettings, required savePlaybackSettings}) {
                   expect(playbackSettings.toJson(), expected.toJson());

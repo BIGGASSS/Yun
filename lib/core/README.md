@@ -46,6 +46,29 @@ Storage errors appear in `playback.error` without reverting successful audio
 changes; another setting command retries (including the same value). Malformed
 stored fields fall back safely. Preferences contain no track/account information.
 
+## DesktopController
+
+Bootstrap owns a separate desktop-only `DesktopController`, injected into YunApp.
+It serializes window visibility, close requests, preference writes and shutdown.
+`desktop.closeBehavior` is an account-independent SharedPreferences enum name;
+missing/unknown values default to `quit`. Writes publish only after success.
+
+`requestWindowClose()` applies that preference. `minimizeToTray()` checkpoints
+without stopping playback, closing databases, or changing credentials/queues.
+`showWindow()` restores/focuses. `quit()` and `requestApplicationExit()` always
+await account shutdown and pending settings, regardless of close preference.
+Failed shutdown leaves the window visible and prohibits further hiding; it does
+not pretend the core's memoized shutdown can be retried. OS force termination
+remains outside orderly-shutdown guarantees.
+
+`DesktopHost` isolates native APIs. The adapter uses pinned `window_manager` and
+`tray_manager`, a Windows pre-engine WM_CLOSE bridge and checked shell icon probe,
+and Linux watcher/host checks over D-Bus. Loss monitoring restores hidden windows.
+Windows probes intentionally match tray_manager 0.5.3's root-window/icon ID pair;
+revalidate that contract before upgrading the plugin. macOS Dock reopening
+reconciles hidden state through native focus events. Touch/web never construct
+this adapter. Retry retains interception until old-account shutdown completes.
+
 ## Models
 Track: id/title/artist/album/albumArtist/trackNumber/discNumber/durationMs/sizeBytes/sha256/mimeType/hasArtwork/revision/createdAt; `Duration duration`.
 Playlist: id/name/revision/entries/updatedAt. PlaylistEntry: id/trackId; constructors and JSON converters supplied.

@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../core/app_controller.dart';
+import '../core/desktop_controller.dart';
 import 'downloads_screen.dart';
 import 'library_screen.dart';
 import 'player.dart';
@@ -17,10 +18,12 @@ class YunApp extends StatefulWidget {
   const YunApp({
     super.key,
     required this.controller,
+    this.desktop,
     this.initialThemeMode = ThemeMode.system,
     this.onThemeChanged,
   });
   final AppController controller;
+  final DesktopController? desktop;
   final ThemeMode initialThemeMode;
   final ValueChanged<ThemeMode>? onThemeChanged;
 
@@ -40,6 +43,7 @@ class _YunAppState extends State<YunApp> {
     themeMode: _themeMode,
     home: _AppShell(
       app: widget.controller,
+      desktop: widget.desktop,
       themeMode: _themeMode,
       onThemeChanged: (mode) {
         setState(() => _themeMode = mode);
@@ -52,10 +56,12 @@ class _YunAppState extends State<YunApp> {
 class _AppShell extends StatefulWidget {
   const _AppShell({
     required this.app,
+    required this.desktop,
     required this.themeMode,
     required this.onThemeChanged,
   });
   final AppController app;
+  final DesktopController? desktop;
   final ThemeMode themeMode;
   final ValueChanged<ThemeMode> onThemeChanged;
 
@@ -173,6 +179,44 @@ class _AppShellState extends State<_AppShell> {
                                       CrossAxisAlignment.stretch,
                                   children: [
                                     _statusBar(desktop),
+                                    if (isDesktopPlatform &&
+                                        widget.desktop != null)
+                                      ListenableBuilder(
+                                        listenable: widget.desktop!,
+                                        builder: (context, _) {
+                                          final controller = widget.desktop!;
+                                          if (controller.error == null) {
+                                            return const SizedBox.shrink();
+                                          }
+                                          return ConstrainedBox(
+                                            constraints: BoxConstraints(
+                                              maxHeight:
+                                                  (constraints.maxHeight * .25)
+                                                      .clamp(0, 180),
+                                            ),
+                                            child: SingleChildScrollView(
+                                              child: MaterialBanner(
+                                                forceActionsBelow: true,
+                                                content: Semantics(
+                                                  liveRegion: true,
+                                                  child: Text(
+                                                    controller.error!,
+                                                  ),
+                                                ),
+                                                actions: [
+                                                  TextButton(
+                                                    onPressed:
+                                                        controller.clearError,
+                                                    child: const Text(
+                                                      'Dismiss',
+                                                    ),
+                                                  ),
+                                                ],
+                                              ),
+                                            ),
+                                          );
+                                        },
+                                      ),
                                     if (app.error != null)
                                       MaterialBanner(
                                         content: Text(
@@ -210,6 +254,7 @@ class _AppShellState extends State<_AppShell> {
                                           3 => StatsScreen(app: app),
                                           _ => SettingsScreen(
                                             app: app,
+                                            desktop: widget.desktop,
                                             themeMode: widget.themeMode,
                                             onThemeChanged:
                                                 widget.onThemeChanged,

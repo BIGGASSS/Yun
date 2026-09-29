@@ -5,15 +5,36 @@ On Debian/Ubuntu, install the Flutter native toolchain and plugin dependencies:
 
 ```sh
 sudo apt install clang cmake ninja-build pkg-config libgtk-3-dev \
-  libglib2.0-dev libsecret-1-dev libmpv-dev mpv
+  libglib2.0-dev libsecret-1-dev libmpv-dev mpv libayatana-appindicator3-dev
 ```
 
 `media_kit_libs_linux` does **not** bundle libmpv: playback dynamically loads the
 system `libmpv.so.2` (or `.so.1`). A build can succeed without it, but playback
 cannot. Distribution packages must depend on the appropriate libmpv runtime
-(e.g. `libmpv2`), GTK 3 and `libsecret-1-0`, plus their transitive dependencies.
+(e.g. `libmpv2`), GTK 3, `libsecret-1-0`, and `libayatana-appindicator3-1`, plus
+their transitive dependencies.
 The runner links the plugin-provided mimalloc object as recommended by media_kit;
 the default plugin build downloads its pinned source archive.
+
+## System tray
+
+**Settings → Window behavior** controls whether closing quits (default) or hides
+Yun to the tray while playback and transfers continue. Settings also offers
+explicit Minimize to tray and Quit actions; the tray menu has Show Yun / Quit Yun.
+The title-bar Minimize button keeps its ordinary window-manager behavior.
+
+Tray display requires a StatusNotifier host (provided by KDE Plasma; GNOME may
+need its AppIndicator extension). Yun does not install or start one. Before
+hiding, it checks the watcher and host on the session bus; when unavailable it
+keeps the window visible and reports an error. Watcher/host loss restores a
+hidden window, with polling for implementations missing loss signals. These
+checks are conservative, not proof that every desktop rendered the icon.
+
+The pinned tray plugin's deprecated Ayatana constructor still emits a build
+warning on newer systems; only that plugin is exempt from treating deprecation
+warnings as errors. No other warning policy is weakened.
+
+## Secure storage
 
 Secure storage needs a Secret Service provider (KWallet, GNOME Keyring, or
 an equivalent), not merely libsecret. Yun first checks the session bus for a
@@ -42,7 +63,8 @@ contains a desktop entry and icon. A system packager should install those into
 and expose `yun` on PATH (or update the desktop entry's `Exec` to its installed
 absolute path). The application ID and desktop filename are `app.yun.yun`.
 The GTK window icon is also embedded as a GResource, so it does not depend on the
-working directory. Icons are derived from the unchanged `assets/icon.png`.
+working directory. Application icons are derived from the unchanged
+`assets/icon.png`; small tray glyphs are bundled separately in `assets/tray_icons/`.
 
 This setup follows the installed `media_kit`, `media_kit_libs_linux`,
 `flutter_secure_storage_linux`, and `audio_service_mpris` READMEs.
