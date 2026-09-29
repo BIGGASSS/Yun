@@ -17,7 +17,14 @@ import 'real_server.dart';
 void main() {
   final server = RealServer();
   setUpAll(
-    () => server.start(['transfers', 'offline', 'other', 'stats', 'refresh']),
+    () => server.start([
+      'transfers',
+      'offline',
+      'other',
+      'stats',
+      'refresh',
+      'pages',
+    ]),
   );
   tearDownAll(server.close);
 
@@ -100,6 +107,69 @@ void main() {
       );
     },
   );
+
+  test('real TCP: client negotiates pagination and merges playlist fragments atomically', () async {
+    final api = await server.login('pages', const Uuid().v4());
+    final root = await Directory.systemTemp.createTemp('yun-pages-tcp-');
+    final app = AppController(
+      api: api,
+      storageDirectory: () async => root,
+      playbackEngine: FakeEngine(),
+      automaticRefresh: false,
+      enableSystemControls: false,
+    );
+    addTearDown(() async {
+      await app.shutdown();
+      app.dispose();
+      api.dio.close(force: true);
+      await root.delete(recursive: true);
+    });
+    final (_, track) = await uploadWav(api);
+    final playlist = await api.json(
+      '/playlists',
+      method: 'POST',
+      data: {'name': 'Large'},
+    );
+    final entries = List.generate(
+      300,
+      (_) => {'id': const Uuid().v4(), 'track_id': track.id},
+    );
+    final updated = await api.json(
+      '/playlists/${playlist['id']}',
+      method: 'PUT',
+      data: {
+        'revision': playlist['revision'],
+        'name': 'Large',
+        'entries': entries,
+      },
+    );
+    var pages = 0;
+    api.dio.interceptors.add(
+      InterceptorsWrapper(
+        onRequest: (request, handler) {
+          if (request.path.endsWith('/library')) {
+            expect(request.queryParameters['paged'], isTrue);
+            pages++;
+          }
+          handler.next(request);
+        },
+      ),
+    );
+    await app.initialize();
+    await app.refresh();
+    expect(pages, greaterThan(1));
+    expect(app.tracks.single.id, track.id);
+    expect(app.playlists.single.revision, updated['revision']);
+    expect(
+      app.playlists.single.entries.map((e) => e.id),
+      entries.map((e) => e['id']),
+    );
+    final snapshot = app.playlists;
+    pages = 0;
+    await app.refresh();
+    expect(pages, 1);
+    expect(identical(app.playlists, snapshot), isTrue);
+  });
 
   test('real TCP: tracker events and stats JSON agree; replay never doubles totals', () async {
     final device = const Uuid().v4();

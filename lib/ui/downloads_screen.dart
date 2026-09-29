@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 
 import '../core/app_controller.dart';
 import 'track_widgets.dart';
+import 'selected_builder.dart';
 import 'widgets.dart';
 
 class DownloadsScreen extends StatelessWidget {
@@ -11,49 +12,66 @@ class DownloadsScreen extends StatelessWidget {
   final AppController app;
 
   @override
-  Widget build(BuildContext context) {
-    final downloaded = app.tracks
-        .where((track) => app.downloadedTrackIds.contains(track.id))
+  Widget build(BuildContext context) => SelectedBuilder(
+    listenable: Listenable.merge([app, app.downloadChanges]),
+    select: () => (
+      app.tracks,
+      app.pins,
+      app.playlists,
+      app.downloadedTrackIds,
+      app.busy,
+      app.isAuthenticated,
+    ),
+    builder: (context, _, child) => _build(context),
+  );
+
+  Widget _build(BuildContext context) {
+    final tracks = app.tracks;
+    final pins = app.pins;
+    final playlists = app.playlists;
+    final downloadedIds = app.downloadedTrackIds;
+    final downloaded = tracks
+        .where((track) => downloadedIds.contains(track.id))
         .toList();
     final bytes = downloaded.fold<int>(
       0,
       (total, track) => total + track.sizeBytes,
     );
     final wanted = <String>{};
-    for (final pin in app.pins) {
+    final albumPins = <String>{};
+    final playlistPins = <String>{};
+    for (final pin in pins) {
       switch (pin.type) {
         case 'track':
           wanted.add(pin.id);
         case 'playlist':
-          for (final playlist in app.playlists.where(
-            (item) => item.id == pin.id,
-          )) {
-            wanted.addAll(playlist.entries.map((entry) => entry.trackId));
-          }
+          playlistPins.add(pin.id);
         case 'album':
-          wanted.addAll(
-            app.tracks
-                .where(
-                  (track) =>
-                      albumPinId(
-                        track.album,
-                        track.albumArtist.isEmpty
-                            ? track.artist
-                            : track.albumArtist,
-                      ) ==
-                      pin.id,
-                )
-                .map((track) => track.id),
-          );
+          albumPins.add(pin.id);
       }
     }
-    wanted.retainAll(app.tracks.map((track) => track.id));
-    final ready = wanted.intersection(app.downloadedTrackIds).length;
-    final pending = app.tracks
+    for (final playlist in playlists) {
+      if (playlistPins.contains(playlist.id)) {
+        wanted.addAll(playlist.entries.map((entry) => entry.trackId));
+      }
+    }
+    for (final track in tracks) {
+      if (albumPins.isNotEmpty &&
+          albumPins.contains(
+            albumPinId(
+              track.album,
+              track.albumArtist.isEmpty ? track.artist : track.albumArtist,
+            ),
+          )) {
+        wanted.add(track.id);
+      }
+    }
+    wanted.retainAll(tracks.map((track) => track.id));
+    final ready = wanted.intersection(downloadedIds).length;
+    final pending = tracks
         .where(
           (track) =>
-              wanted.contains(track.id) &&
-              !app.downloadedTrackIds.contains(track.id),
+              wanted.contains(track.id) && !downloadedIds.contains(track.id),
         )
         .toList();
     return Column(
@@ -108,11 +126,11 @@ class DownloadsScreen extends StatelessWidget {
                   ),
                 ),
               ),
-              if (app.pins.isNotEmpty)
+              if (pins.isNotEmpty)
                 SliverList.builder(
-                  itemCount: app.pins.length,
+                  itemCount: pins.length,
                   itemBuilder: (context, index) {
-                    final pin = app.pins[index];
+                    final pin = pins[index];
                     return ListTile(
                       leading: Icon(switch (pin.type) {
                         'album' => Icons.album_outlined,
@@ -157,39 +175,43 @@ class DownloadsScreen extends StatelessWidget {
                   itemCount: pending.length,
                   itemBuilder: (context, index) {
                     final track = pending[index];
-                    final progress = app.downloadProgress(track);
-                    return ListTile(
-                      leading: TrackArtwork(app: app, track: track),
-                      title: Text(track.title),
-                      subtitle: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(downloadLabel(progress)),
-                          if (progress.status == DownloadStatus.downloading ||
-                              progress.status == DownloadStatus.verifying)
-                            LinearProgressIndicator(
-                              value: progress.status == DownloadStatus.verifying
-                                  ? null
-                                  : progress.fraction,
-                              semanticsLabel:
-                                  'Download progress for ${track.title}',
-                            ),
-                          if (progress.error != null)
-                            Text(
-                              progress.error!,
-                              maxLines: 3,
-                              overflow: TextOverflow.ellipsis,
-                            ),
-                        ],
+                    return DownloadProgressBuilder(
+                      app: app,
+                      track: track,
+                      builder: (context, progress) => ListTile(
+                        leading: TrackArtwork(app: app, track: track),
+                        title: Text(track.title),
+                        subtitle: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(downloadLabel(progress)),
+                            if (progress.status == DownloadStatus.downloading ||
+                                progress.status == DownloadStatus.verifying)
+                              LinearProgressIndicator(
+                                value:
+                                    progress.status == DownloadStatus.verifying
+                                    ? null
+                                    : progress.fraction,
+                                semanticsLabel:
+                                    'Download progress for ${track.title}',
+                              ),
+                            if (progress.error != null)
+                              Text(
+                                progress.error!,
+                                maxLines: 3,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                          ],
+                        ),
+                        trailing: progress.status == DownloadStatus.failed
+                            ? IconButton(
+                                tooltip: 'Retry download',
+                                onPressed: () =>
+                                    runUiAction(context, app.retryDownloads),
+                                icon: const Icon(Icons.refresh_rounded),
+                              )
+                            : const Icon(Icons.download_rounded),
                       ),
-                      trailing: progress.status == DownloadStatus.failed
-                          ? IconButton(
-                              tooltip: 'Retry download',
-                              onPressed: () =>
-                                  runUiAction(context, app.retryDownloads),
-                              icon: const Icon(Icons.refresh_rounded),
-                            )
-                          : const Icon(Icons.download_rounded),
                     );
                   },
                 ),

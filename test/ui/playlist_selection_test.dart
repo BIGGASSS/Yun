@@ -842,7 +842,7 @@ void main() {
       await tester.pumpAndSettle();
       expect(_picker('a'), findsNothing);
       expect(find.text('Add 2'), findsOneWidget);
-      app.library.removeWhere((track) => track.id == 'b');
+      app.library = app.library.where((track) => track.id != 'b').toList();
       app.notifyListeners();
       await tester.pumpAndSettle();
       expect(_picker('b'), findsNothing);

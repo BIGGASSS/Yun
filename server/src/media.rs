@@ -5,7 +5,7 @@ use crate::{
     library::{self, Track},
 };
 use axum::{
-    Json,
+    Extension, Json,
     body::{Body, Bytes},
     extract::{Path, State},
     http::{HeaderMap, Method, StatusCode},
@@ -77,11 +77,15 @@ impl Seek for LimitedReader {
     }
 }
 pub(crate) fn parse(path: &FsPath, filename: &str) -> Result<Metadata, ApiError> {
+    let deadline = Instant::now() + Duration::from_secs(20);
     let mut file = std::fs::File::open(path)?;
     let length = file.metadata()?.len();
     let mut digest = Sha256::new();
     let mut buffer = [0u8; 64 * 1024];
     loop {
+        if Instant::now() > deadline {
+            return Err(ApiError::bad("hash/parser budget exceeded"));
+        }
         let n = file.read(&mut buffer)?;
         if n == 0 {
             break;
@@ -96,7 +100,6 @@ pub(crate) fn parse(path: &FsPath, filename: &str) -> Result<Metadata, ApiError>
             .preserve_format_specific_items(false),
     );
     let failed = Arc::new(AtomicBool::new(false));
-    let deadline = Instant::now() + Duration::from_secs(20);
     let reader = BufReader::new(LimitedReader {
         file,
         length,
@@ -221,25 +224,63 @@ pub(crate) async fn sync_dir(path: &FsPath) -> Result<(), ApiError> {
         .map_err(|_| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "directory sync failed"))??;
     Ok(())
 }
-pub(crate) async fn store_art(state: &AppState, bytes: &[u8]) -> Result<String, ApiError> {
+pub(crate) struct StagedArt {
+    name: String,
+    path: std::path::PathBuf,
+    guard: Option<tokio::sync::OwnedMutexGuard<()>>,
+}
+impl StagedArt {
+    // Call with global publication lock held. Only a rename and directory sync,
+    // never image decoding or multi-megabyte writes, happen in this phase.
+    pub(crate) async fn publish(&self, state: &AppState) -> Result<String, ApiError> {
+        tokio::fs::rename(
+            &self.path,
+            state.0.config.data_dir.join("media").join(&self.name),
+        )
+        .await?;
+        sync_dir(&state.0.config.data_dir.join("media")).await?;
+        Ok(self.name.clone())
+    }
+}
+impl Drop for StagedArt {
+    fn drop(&mut self) {
+        let path = self.path.clone();
+        let guard = self.guard.take();
+        tokio::spawn(async move {
+            let _guard = guard;
+            let _ = tokio::fs::remove_file(path).await;
+        });
+    }
+}
+pub(crate) async fn stage_art(state: &AppState, bytes: &[u8]) -> Result<StagedArt, ApiError> {
     let name = format!("{}.art", crate::id());
+    let guard = state.upload_lock(&name).await.lock_owned().await;
+    let staged = StagedArt {
+        path: state.0.config.data_dir.join("uploads").join(&name),
+        name,
+        guard: Some(guard),
+    };
     let mut file = tokio::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
-        .open(state.0.config.data_dir.join("media").join(&name))
+        .open(&staged.path)
         .await?;
     file.write_all(bytes).await?;
     file.sync_all().await?;
-    sync_dir(&state.0.config.data_dir.join("media")).await?;
-    Ok(name)
+    Ok(staged)
 }
 pub(crate) async fn put_artwork(
     State(state): State<AppState>,
     auth: Auth,
     Path(id): Path<String>,
     headers: HeaderMap,
+    Extension(admission): Extension<crate::admission::Admission>,
     bytes: Bytes,
 ) -> Result<Json<Track>, ApiError> {
+    // Keep reservations and file/commit exclusion until work actually finishes,
+    // even if the HTTP request times out or disconnects.
+    tokio::spawn(async move {
+    let _admission = admission.0;
     let revision = headers
         .get("if-match")
         .and_then(|v| v.to_str().ok())
@@ -264,7 +305,8 @@ pub(crate) async fn put_artwork(
     })
     .await
     .map_err(|_| ApiError::bad("image parser failed"))??;
-    let _guard = state.0.writes.lock().await;
+    let staged = stage_art(&state, &bytes).await?;
+    let guard = state.0.writes.lock().await;
     let mut tx = state.0.pool.begin().await?;
     let old = library::track(&mut tx, &auth.user, &id).await?;
     if old.revision != revision {
@@ -285,22 +327,25 @@ pub(crate) async fn put_artwork(
             "artwork exceeds account quota",
         ));
     }
-    let path = store_art(&state, &bytes).await?;
+    let path = staged.publish(&state).await?;
     let revision = bump(&mut tx, &auth.user).await?;
     sqlx::query("UPDATE tracks SET artwork_path=?,artwork_mime=?,artwork_size_bytes=?,revision=? WHERE user_id=? AND id=? AND deleted=0")
         .bind(path).bind(mime).bind(bytes.len() as i64).bind(revision).bind(&auth.user).bind(&id).execute(&mut *tx).await?;
     let result = library::track(&mut tx, &auth.user, &id).await?;
     tx.commit().await?;
+    drop(guard);
     if let Some(path) = old_path {
         let _ = tokio::fs::remove_file(state.0.config.data_dir.join("media").join(path)).await;
     }
     Ok(Json(result))
+    }).await.map_err(|_| ApiError::bad("artwork worker failed"))?
 }
 pub(crate) async fn artwork(
     State(state): State<AppState>,
     auth: Auth,
     Path(id): Path<String>,
 ) -> Result<Response, ApiError> {
+    let permit = crate::admission::stream_permit(&state)?;
     // Synchronize opening with GC; the file descriptor then survives unlink on Unix.
     let guard = state.0.writes.lock().await;
     let row = sqlx::query("SELECT artwork_path,artwork_mime FROM tracks WHERE user_id=? AND id=? AND deleted=0 AND artwork_path IS NOT NULL")
@@ -316,7 +361,9 @@ pub(crate) async fn artwork(
     .await?;
     let length = file.metadata().await?.len();
     drop(guard);
-    let mut response = Body::from_stream(ReaderStream::new(file)).into_response();
+    let mut response =
+        crate::admission::with_permit(Body::from_stream(ReaderStream::new(file)), permit)
+            .into_response();
     let headers = response.headers_mut();
     headers.insert(
         "content-type",
@@ -369,6 +416,7 @@ pub(crate) async fn audio(
     method: Method,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
+    let permit = crate::admission::stream_permit(&state)?;
     let guard = state.0.writes.lock().await;
     let row = sqlx::query("SELECT audio_path,size_bytes,sha256,mime_type FROM tracks WHERE user_id=? AND id=? AND deleted=0")
         .bind(auth.user).bind(id).fetch_optional(&state.0.pool).await?.ok_or_else(ApiError::not_found)?;
@@ -415,7 +463,10 @@ pub(crate) async fn audio(
     let body = if method == Method::HEAD {
         Body::empty()
     } else {
-        Body::from_stream(ReaderStream::new(file.take(length)))
+        crate::admission::with_permit(
+            Body::from_stream(ReaderStream::new(file.take(length))),
+            permit,
+        )
     };
     let mut response = (status, body).into_response();
     let h = response.headers_mut();

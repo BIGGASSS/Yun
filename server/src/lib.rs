@@ -1,8 +1,12 @@
+mod admission;
 mod auth;
 mod error;
 mod events;
 mod library;
+mod locks;
 mod media;
+#[cfg(test)]
+mod performance_tests;
 mod playlists;
 mod uploads;
 
@@ -54,8 +58,12 @@ pub(crate) struct Inner {
     pub config: Config,
     // Serializes mutations involving database + filesystem. SQL transactions remain the
     // authority for atomicity; one server process per data directory is required.
-    pub writes: Arc<Mutex<()>>,
+    pub writes: locks::WriteLock,
     pub parsers: Arc<Semaphore>,
+    pub upload_locks: Mutex<HashMap<String, std::sync::Weak<Mutex<()>>>>,
+    pub requests: Arc<Semaphore>,
+    pub body_bytes: Arc<Semaphore>,
+    pub streams: Arc<Semaphore>,
     pub passwords: Arc<Semaphore>,
     pub login_limits: Mutex<HashMap<String, (i64, u32)>>,
 }
@@ -99,11 +107,25 @@ impl AppState {
             pool,
             _lock: lock,
             config,
-            writes: Arc::new(Mutex::new(())),
+            writes: locks::WriteLock::default(),
             parsers: Arc::new(Semaphore::new(2)),
+            upload_locks: Mutex::new(HashMap::new()),
+            requests: Arc::new(Semaphore::new(32)),
+            body_bytes: Arc::new(Semaphore::new(1024)), // 64 MiB, in 64 KiB units
+            streams: Arc::new(Semaphore::new(32)),
             passwords: Arc::new(Semaphore::new(4)),
             login_limits: Mutex::new(HashMap::new()),
         })))
+    }
+    pub(crate) async fn upload_lock(&self, id: &str) -> Arc<Mutex<()>> {
+        let mut locks = self.0.upload_locks.lock().await;
+        if let Some(lock) = locks.get(id).and_then(std::sync::Weak::upgrade) {
+            return lock;
+        }
+        locks.retain(|_, lock| lock.strong_count() > 0);
+        let lock = Arc::new(Mutex::new(()));
+        locks.insert(id.to_owned(), Arc::downgrade(&lock));
+        lock
     }
     pub async fn cleanup(&self) -> anyhow::Result<()> {
         uploads::cleanup(self).await
@@ -201,7 +223,10 @@ pub fn router(state: AppState) -> Router {
             )
         })
         .layer(DefaultBodyLimit::max(2 * 1024 * 1024))
-        .layer(tower::limit::ConcurrencyLimitLayer::new(128))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            admission::admit,
+        ))
         .layer(tower_http::timeout::TimeoutLayer::with_status_code(
             axum::http::StatusCode::REQUEST_TIMEOUT,
             Duration::from_secs(60),

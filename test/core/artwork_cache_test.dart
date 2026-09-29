@@ -181,6 +181,121 @@ void main() {
   });
 
   test(
+    'network concurrency and pending prefetch are bounded; visible work wins',
+    () async {
+      await cache.close();
+      cache = ArtworkCache(
+        api: api,
+        account: owner,
+        directory: root,
+        maxConcurrentRequests: 2,
+        maxPendingRequests: 3,
+      );
+      final tracks = List.generate(
+        4,
+        (i) => Track(id: 't$i', title: 'T', hasArtwork: true),
+      );
+      cache.updateTracks(tracks);
+      final started = List.generate(4, (_) => Completer<void>());
+      final release = List.generate(4, (_) => Completer<void>());
+      final order = <int>[];
+      var active = 0, peak = 0;
+      api.dio.httpClientAdapter = FakeAdapter((options, _) async {
+        final id = int.parse(
+          RegExp(r'/tracks/t(\d)/artwork').firstMatch(options.path)!.group(1)!,
+        );
+        order.add(id);
+        active++;
+        if (active > peak) peak = active;
+        started[id].complete();
+        await release[id].future;
+        active--;
+        return ResponseBody.fromBytes(bytes, 200);
+      });
+      final first = cache.get(tracks[0], background: true);
+      final second = cache.get(tracks[1], background: true);
+      await Future.wait([started[0].future, started[1].future]);
+      final dropped = cache.get(tracks[2], background: true);
+      final visible = cache.get(tracks[3]);
+      expect(await dropped, isNull);
+      release[1].complete();
+      expect(await second, isNotNull);
+      await started[3].future;
+      expect(order, [0, 1, 3]);
+      release[3].complete();
+      release[0].complete();
+      expect(await visible, isNotNull);
+      expect(await first, isNotNull);
+      expect(peak, 2);
+      expect(started[2].isCompleted, isFalse);
+    },
+  );
+
+  test(
+    'build-time path reads use memory; get repairs external deletions',
+    () async {
+      final stored = await cache.put(track, bytes);
+      await File(stored!).delete();
+      // A synchronous filesystem check would already return null here.
+      expect(cache.path(track), stored);
+      expect(await cache.get(track, online: false), isNull);
+      expect(cache.path(track), isNull);
+      expect(await cache.put(track, bytes), stored);
+    },
+  );
+
+  test(
+    'disk index and orphan cleanup run at startup, not on every store',
+    () async {
+      await cache.put(track, bytes);
+      final orphan = File('${cache.directory.path}/${'0' * 64}.image.part');
+      await orphan.writeAsBytes([1]);
+      cache.updateTracks([track, revised]);
+      await cache.put(revised, bytes);
+      expect(await orphan.exists(), isTrue);
+      await cache.close();
+      cache = open(owner)..updateTracks([revised]);
+      expect(await cache.get(revised, online: false), isNotNull);
+      expect(await orphan.exists(), isFalse);
+    },
+  );
+
+  test(
+    'closing settles queued requests without starting more network work',
+    () async {
+      await cache.close();
+      cache = ArtworkCache(
+        api: api,
+        account: owner,
+        directory: root,
+        maxConcurrentRequests: 1,
+        maxPendingRequests: 3,
+      );
+      const second = Track(id: 'second', title: 'T', hasArtwork: true);
+      cache.updateTracks([track, second]);
+      final started = Completer<void>();
+      final release = Completer<void>();
+      var requests = 0;
+      api.dio.httpClientAdapter = FakeAdapter((_, _) async {
+        requests++;
+        started.complete();
+        await release.future;
+        return ResponseBody.fromBytes(bytes, 200);
+      });
+      final active = cache.get(track);
+      await started.future;
+      final queued = cache.get(second);
+      final closing = cache.close();
+      expect(await queued, isNull);
+      release.complete();
+      expect(await active, isNull);
+      await closing;
+      expect(requests, 1);
+      expect(cache.path(track), isNull);
+    },
+  );
+
+  test(
     'cache evicts oldest entries to enforce per-account byte budget',
     () async {
       await cache.close();

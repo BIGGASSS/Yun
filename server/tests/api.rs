@@ -254,6 +254,486 @@ fn event(device: &str, session: &str, track: &str, start: i64, ms: i64) -> Value
 }
 
 #[tokio::test]
+async fn legacy_library_requests_succeed_when_small_and_require_upgrade_when_large() {
+    let h = Harness::new().await;
+    let (code, playlist) = json_request(
+        &h.app,
+        "POST",
+        "/api/v1/playlists",
+        Some(h.a()),
+        json!({"name":"small"}),
+    )
+    .await;
+    assert_eq!(code, StatusCode::OK);
+    for query in ["", "?paged=false", "?cursor=0", "?cursor=99"] {
+        let (code, library) = json_request(
+            &h.app,
+            "GET",
+            &format!("/api/v1/library{query}"),
+            Some(h.a()),
+            json!({}),
+        )
+        .await;
+        assert_eq!(code, StatusCode::OK, "{library}");
+        assert_eq!(library["cursor"], 1);
+        assert_eq!(library["playlists"], json!([playlist.clone()]));
+        assert!(library.get("next_page_token").is_none());
+    }
+    let pool = sqlx::sqlite::SqlitePoolOptions::new()
+        .connect_with(
+            sqlx::sqlite::SqliteConnectOptions::new().filename(h.dir.path().join("yun.sqlite3")),
+        )
+        .await
+        .unwrap();
+    let user = h.a["user"]["id"].as_str().unwrap();
+    let mut tx = pool.begin().await.unwrap();
+    for _ in 0..128 {
+        sqlx::query("INSERT INTO playlists(id,user_id,name,revision,updated_at,deleted) VALUES(?,?,'seed',1,0,0)")
+            .bind(uid()).bind(user).execute(&mut *tx).await.unwrap();
+    }
+    tx.commit().await.unwrap();
+    for query in ["", "?paged=false", "?cursor=0", "?cursor=99"] {
+        let (code, error) = json_request(
+            &h.app,
+            "GET",
+            &format!("/api/v1/library{query}"),
+            Some(h.a()),
+            json!({}),
+        )
+        .await;
+        assert_eq!(code, StatusCode::BAD_REQUEST, "{error}");
+        let message = error["error"].as_str().unwrap();
+        assert!(message.contains("client upgrade required"), "{message}");
+        assert!(message.contains("paged=true"), "{message}");
+        assert!(error.get("cursor").is_none());
+        assert!(error.get("playlists").is_none());
+    }
+    // A small delta remains compatible even when the complete library is large.
+    let (code, delta) = json_request(
+        &h.app,
+        "GET",
+        "/api/v1/library?cursor=1",
+        Some(h.a()),
+        json!({}),
+    )
+    .await;
+    assert_eq!(code, StatusCode::OK, "{delta}");
+    assert_eq!(delta["playlists"], json!([]));
+    assert!(delta.get("next_page_token").is_none());
+    let (code, first) = json_request(
+        &h.app,
+        "GET",
+        "/api/v1/library?paged=true",
+        Some(h.a()),
+        json!({}),
+    )
+    .await;
+    assert_eq!(code, StatusCode::OK, "{first}");
+    assert_eq!(first["playlists"].as_array().unwrap().len(), 128);
+    let (code, last) = json_request(
+        &h.app,
+        "GET",
+        &format!(
+            "/api/v1/library?page_token={}",
+            first["next_page_token"].as_str().unwrap()
+        ),
+        Some(h.a()),
+        json!({}),
+    )
+    .await;
+    assert_eq!(code, StatusCode::OK, "{last}");
+    assert_eq!(last["playlists"].as_array().unwrap().len(), 1);
+    assert!(last.get("next_page_token").is_none());
+    pool.close().await;
+}
+
+#[tokio::test]
+async fn bounded_library_pages_fragment_large_playlists_and_reject_changed_revisions() {
+    use std::collections::{HashMap, HashSet};
+    let h = Harness::new().await;
+    let track = h.upload(h.a(), &wav(1)).await;
+    let tid = track["id"].as_str().unwrap();
+    let (_, playlist) = json_request(
+        &h.app,
+        "POST",
+        "/api/v1/playlists",
+        Some(h.a()),
+        json!({"name":"large"}),
+    )
+    .await;
+    let entries: Vec<Value> = (0..10000)
+        .map(|_| json!({"id":uid(),"track_id":tid}))
+        .collect();
+    let path = format!("/api/v1/playlists/{}", playlist["id"].as_str().unwrap());
+    let (code, updated) = json_request(
+        &h.app,
+        "PUT",
+        &path,
+        Some(h.a()),
+        json!({"revision":playlist["revision"],"name":"large","entries":entries}),
+    )
+    .await;
+    assert_eq!(code, StatusCode::OK, "{updated}");
+    let pool = sqlx::sqlite::SqlitePoolOptions::new()
+        .connect_with(
+            sqlx::sqlite::SqliteConnectOptions::new().filename(h.dir.path().join("yun.sqlite3")),
+        )
+        .await
+        .unwrap();
+    let user = h.a["user"]["id"].as_str().unwrap();
+    let mut tx = pool.begin().await.unwrap();
+    for deleted in [0, 1] {
+        for i in 0..140 {
+            let id = uid();
+            sqlx::query("INSERT INTO tracks(id,user_id,title,artist,album,album_artist,duration_ms,size_bytes,sha256,mime_type,audio_path,revision,created_at,deleted) VALUES(?,?,'seed','','','',1000,1,?,'audio/wav',?,3,0,?)")
+                .bind(&id).bind(user).bind(&id).bind(&id).bind(deleted).execute(&mut *tx).await.unwrap();
+            if deleted == 1 || i < 2 {
+                sqlx::query("INSERT INTO playlists(id,user_id,name,revision,updated_at,deleted) VALUES(?,?,'seed',3,0,?)")
+                    .bind(uid()).bind(user).bind(deleted).execute(&mut *tx).await.unwrap();
+            }
+        }
+    }
+    tx.commit().await.unwrap();
+    for cursor in [None, Some(1)] {
+        let mut url = cursor.map_or_else(
+            || "/api/v1/library?paged=true".to_string(),
+            |c| format!("/api/v1/library?cursor={c}&paged=true"),
+        );
+        let mut tracks = HashSet::new();
+        let mut deleted_tracks = HashSet::new();
+        let mut deleted_playlists = HashSet::new();
+        let mut lists: HashMap<String, Vec<Value>> = HashMap::new();
+        let mut metadata = HashMap::new();
+        let mut pages = 0;
+        loop {
+            let (code, page) = json_request(&h.app, "GET", &url, Some(h.a()), json!({})).await;
+            assert_eq!(code, StatusCode::OK, "{page}");
+            assert_eq!(page["cursor"], 3);
+            assert_eq!(page["reset"], cursor.is_none());
+            let mut records = 0;
+            for (field, set) in [
+                ("tracks", &mut tracks),
+                ("deleted_track_ids", &mut deleted_tracks),
+                ("deleted_playlist_ids", &mut deleted_playlists),
+            ] {
+                for value in page[field].as_array().unwrap() {
+                    records += 1;
+                    let id = if field == "tracks" {
+                        value["id"].as_str().unwrap()
+                    } else {
+                        value.as_str().unwrap()
+                    };
+                    assert!(set.insert(id.to_string()), "duplicate {field} {id}");
+                }
+            }
+            for list in page["playlists"].as_array().unwrap() {
+                let id = list["id"].as_str().unwrap().to_string();
+                let fragment = list["entries"].as_array().unwrap();
+                records += 1 + fragment.len();
+                lists
+                    .entry(id.clone())
+                    .or_default()
+                    .extend(fragment.iter().cloned());
+                let mut meta = list.clone();
+                meta.as_object_mut().unwrap().remove("entries");
+                if let Some(previous) = metadata.insert(id, meta.clone()) {
+                    assert_eq!(previous, meta);
+                }
+            }
+            assert!(records <= 256, "unbounded page: {records}");
+            pages += 1;
+            assert!(pages < 100, "pagination did not terminate");
+            if let Some(token) = page["next_page_token"].as_str() {
+                url = format!("/api/v1/library?page_token={token}");
+            } else {
+                break;
+            }
+        }
+        assert!(pages > 50);
+        assert_eq!(tracks.len(), if cursor.is_none() { 141 } else { 140 });
+        assert_eq!(deleted_tracks.len(), if cursor.is_none() { 0 } else { 140 });
+        assert_eq!(
+            deleted_playlists.len(),
+            if cursor.is_none() { 0 } else { 140 }
+        );
+        assert_eq!(lists.len(), 3);
+        assert_eq!(lists[playlist["id"].as_str().unwrap()], entries);
+    }
+    let (_, first) = json_request(
+        &h.app,
+        "GET",
+        "/api/v1/library?paged=true",
+        Some(h.a()),
+        json!({}),
+    )
+    .await;
+    let next = format!(
+        "/api/v1/library?page_token={}",
+        first["next_page_token"].as_str().unwrap()
+    );
+    assert_eq!(
+        json_request(&h.app, "GET", &next, Some(h.b()), json!({}))
+            .await
+            .0,
+        StatusCode::BAD_REQUEST
+    );
+    json_request(
+        &h.app,
+        "POST",
+        "/api/v1/playlists",
+        Some(h.a()),
+        json!({"name":"mutation"}),
+    )
+    .await;
+    assert_eq!(
+        json_request(&h.app, "GET", &next, Some(h.a()), json!({}))
+            .await
+            .0,
+        StatusCode::CONFLICT
+    );
+    assert_eq!(
+        json_request(
+            &h.app,
+            "GET",
+            "/api/v1/library?page_token=garbage",
+            Some(h.a()),
+            json!({})
+        )
+        .await
+        .0,
+        StatusCode::BAD_REQUEST
+    );
+    pool.close().await;
+}
+
+#[tokio::test]
+async fn media_stream_capacity_is_shared_and_held_until_body_drop_or_eof() {
+    let h = Harness::new().await;
+    let track = h.upload(h.a(), &wav(1)).await;
+    let path = format!("/api/v1/tracks/{}/audio", track["id"].as_str().unwrap());
+    let request = || {
+        Request::builder()
+            .uri(&path)
+            .header("authorization", format!("Bearer {}", h.a()))
+            .body(Body::empty())
+            .unwrap()
+    };
+    let mut responses = Vec::new();
+    for _ in 0..32 {
+        let response = h.app.clone().oneshot(request()).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        responses.push(response);
+    }
+    // A new router shares limits through AppState, not a per-service semaphore.
+    assert_eq!(
+        yun_server::router(h.state.clone())
+            .oneshot(request())
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::TOO_MANY_REQUESTS
+    );
+    drop(responses.pop());
+    let response = h.app.clone().oneshot(request()).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    response.into_body().collect().await.unwrap();
+    assert_eq!(
+        h.app.clone().oneshot(request()).await.unwrap().status(),
+        StatusCode::OK
+    );
+}
+
+struct PendingReader(Arc<AtomicBool>);
+impl AsyncRead for PendingReader {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        _: &mut Context<'_>,
+        _: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        self.0.store(true, Ordering::SeqCst);
+        Poll::Pending
+    }
+}
+#[tokio::test]
+async fn byte_admission_rejects_before_polling_unknown_length_bodies() {
+    let h = Harness::new().await;
+    let path = format!("/api/v1/tracks/{}/artwork", uid());
+    let mut tasks = Vec::new();
+    for _ in 0..6 {
+        let polled = Arc::new(AtomicBool::new(false));
+        let request = Request::builder()
+            .method("PUT")
+            .uri(&path)
+            .header("authorization", format!("Bearer {}", h.a()))
+            .body(Body::from_stream(ReaderStream::new(PendingReader(
+                polled.clone(),
+            ))))
+            .unwrap();
+        tasks.push(tokio::spawn(h.app.clone().oneshot(request)));
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while !polled.load(Ordering::SeqCst) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+    let (body, progress) = fragmented_body(vec![1; 100], 10);
+    let response = yun_server::router(h.state.clone())
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(&path)
+                .header("authorization", format!("Bearer {}", h.a()))
+                .body(body)
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(progress.bytes_read.load(Ordering::SeqCst), 0);
+    for task in tasks {
+        task.abort();
+        let _ = task.await;
+    }
+    // Cancellation returns the full reservation, allowing a normal request.
+    let (code, _) = json_request(&h.app, "GET", "/api/v1/library", Some(h.a()), json!({})).await;
+    assert_eq!(code, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn late_offline_events_move_threshold_crossing_without_double_counting() {
+    let h = Harness::new().await;
+    let track = h.upload(h.a(), &wav(60)).await;
+    let tid = track["id"].as_str().unwrap();
+    let session = uid();
+    let later = event(&h.device_a, &session, tid, 40000, 20000);
+    assert_eq!(
+        json_request(
+            &h.app,
+            "POST",
+            "/api/v1/listening-events",
+            Some(h.a()),
+            json!({"events":[later.clone(),later]})
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        json_request(
+            &h.app,
+            "GET",
+            "/api/v1/stats?from=40000",
+            Some(h.a()),
+            json!({})
+        )
+        .await
+        .1["play_count"],
+        0
+    );
+    let earlier = event(&h.device_a, &session, tid, 0, 20000);
+    assert_eq!(
+        json_request(
+            &h.app,
+            "POST",
+            "/api/v1/listening-events",
+            Some(h.a()),
+            json!({"events":[earlier]})
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    let (_, stats) = json_request(
+        &h.app,
+        "GET",
+        "/api/v1/stats?from=40000",
+        Some(h.a()),
+        json!({}),
+    )
+    .await;
+    assert_eq!(stats["listened_ms"], 20000);
+    assert_eq!(stats["play_count"], 1);
+    let shifted = event(&h.device_a, &session, tid, 20000, 10000);
+    json_request(
+        &h.app,
+        "POST",
+        "/api/v1/listening-events",
+        Some(h.a()),
+        json!({"events":[shifted]}),
+    )
+    .await;
+    assert_eq!(
+        json_request(
+            &h.app,
+            "GET",
+            "/api/v1/stats?from=40000",
+            Some(h.a()),
+            json!({})
+        )
+        .await
+        .1["play_count"],
+        0
+    );
+    assert_eq!(
+        json_request(
+            &h.app,
+            "GET",
+            "/api/v1/stats?from=20000&to=40000",
+            Some(h.a()),
+            json!({})
+        )
+        .await
+        .1["play_count"],
+        1
+    );
+    assert_eq!(
+        json_request(&h.app, "GET", "/api/v1/stats", Some(h.a()), json!({}))
+            .await
+            .1["play_count"],
+        1
+    );
+    // Duplicate IDs with different payloads in a single batch are atomic too.
+    let a = event(&h.device_a, &uid(), tid, 100000, 1000);
+    let mut b = a.clone();
+    b["listened_ms"] = json!(500);
+    assert_eq!(
+        json_request(
+            &h.app,
+            "POST",
+            "/api/v1/listening-events",
+            Some(h.a()),
+            json!({"events":[a,b]})
+        )
+        .await
+        .0,
+        StatusCode::CONFLICT
+    );
+    let batch: Vec<Value> = (0..500)
+        .map(|i| event(&h.device_a, &uid(), tid, 100000 + i * 2000, 1000))
+        .collect();
+    for _ in 0..2 {
+        let (code, ack) = json_request(
+            &h.app,
+            "POST",
+            "/api/v1/listening-events",
+            Some(h.a()),
+            json!({"events":batch}),
+        )
+        .await;
+        assert_eq!(code, StatusCode::OK, "{ack}");
+        assert_eq!(ack["acknowledged_ids"].as_array().unwrap().len(), 500);
+    }
+    assert_eq!(
+        json_request(&h.app, "GET", "/api/v1/stats", Some(h.a()), json!({}))
+            .await
+            .1["listened_ms"],
+        550000
+    );
+}
+
+#[tokio::test]
 async fn expired_logout_consumes_streamed_json_before_401_and_allows_refresh() {
     let h = Harness::new().await;
     let pool = sqlx::sqlite::SqlitePoolOptions::new()

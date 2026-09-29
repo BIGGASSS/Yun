@@ -427,7 +427,23 @@ class _PlaylistsScreenState extends State<PlaylistsScreen> {
     );
   }
 
+  Object? _entriesKey;
+  List<PlaylistEntry> _cachedEntries = const [];
+  List<Track> _cachedQueue = const [];
+
   List<PlaylistEntry> _displayEntries(Playlist playlist) {
+    final key = (playlist, widget.app.tracks, _trackSort, _trackDescending);
+    if (_entriesKey == key) return _cachedEntries;
+    _entriesKey = key;
+    _cachedEntries = _sortEntries(playlist);
+    _cachedQueue = [
+      for (final entry in _cachedEntries)
+        if (widget.app.trackById(entry.trackId) case final Track track) track,
+    ];
+    return _cachedEntries;
+  }
+
+  List<PlaylistEntry> _sortEntries(Playlist playlist) {
     final entries = [...playlist.entries];
     if (_trackSort == TrackSort.original) {
       return _trackDescending ? entries.reversed.toList() : entries;
@@ -478,10 +494,7 @@ class _PlaylistsScreenState extends State<PlaylistsScreen> {
     final app = widget.app;
     _selectedEntries.retainAll(playlist.entries.map((entry) => entry.id));
     final entries = _displayEntries(playlist);
-    final queue = [
-      for (final entry in entries)
-        if (app.trackById(entry.trackId) case final Track track) track,
-    ];
+    final queue = _cachedQueue;
     final selectedQueue = [
       for (final entry in entries)
         if (_selectedEntries.contains(entry.id))

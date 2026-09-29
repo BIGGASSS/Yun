@@ -94,6 +94,7 @@ class TransferService {
     required this.onTrack,
     required this.onError,
     this.onDownloadChanged,
+    this.onFilesChanged,
     this.onDownloaded,
     Directory? importsDirectory,
   }) : importsDirectory =
@@ -255,6 +256,7 @@ class TransferService {
   final Future<void> Function(Track) onTrack;
   final void Function(Object) onError;
   final void Function()? onDownloadChanged;
+  final void Function()? onFilesChanged;
   final Future<void> Function(Track)? onDownloaded;
   final Map<String, DownloadProgress> _downloads = {};
   Map<String, DownloadProgress> get downloads => Map.unmodifiable(_downloads);
@@ -286,12 +288,20 @@ class TransferService {
     }
   }
 
-  void _progress(
+  bool _progress(
     Track track,
     DownloadStatus status,
     int bytes, {
     String? error,
   }) {
+    final previous = _downloads[track.id];
+    if (previous != null &&
+        previous.status == status &&
+        previous.totalBytes == track.sizeBytes &&
+        previous.receivedBytes == bytes &&
+        previous.error == error) {
+      return false;
+    }
     _downloads[track.id] = DownloadProgress(
       trackId: track.id,
       totalBytes: track.sizeBytes,
@@ -300,6 +310,7 @@ class TransferService {
       error: error,
     );
     (onDownloadChanged ?? onChanged)();
+    return true;
   }
 
   Future<void> _saveDownload(String id) =>
@@ -574,16 +585,18 @@ class TransferService {
   ) {
     if (_closed) return Future.value();
     _nextReconciliation = (List.of(tracks), List.of(playlists), List.of(pins));
-    return _downloadsRunning ??= _drainReconciliations().whenComplete(
-      () => _downloadsRunning = null,
-    );
+    return _downloadsRunning ??= _drainReconciliations();
   }
 
   Future<void> _drainReconciliations() async {
-    while (!_closed && _nextReconciliation != null) {
-      final (tracks, playlists, pins) = _nextReconciliation!;
-      _nextReconciliation = null;
-      await _reconcile(tracks, playlists, pins);
+    try {
+      while (!_closed && _nextReconciliation != null) {
+        final (tracks, playlists, pins) = _nextReconciliation!;
+        _nextReconciliation = null;
+        await _reconcile(tracks, playlists, pins);
+      }
+    } finally {
+      _downloadsRunning = null;
     }
   }
 
@@ -598,7 +611,9 @@ class TransferService {
       final id = record['id'] as String;
       if (!refs.containsKey(id)) await database.remove('download', id);
     }
+    final removedProgress = _downloads.keys.any((id) => !refs.containsKey(id));
     _downloads.removeWhere((id, _) => !refs.containsKey(id));
+    if (removedProgress) (onDownloadChanged ?? onChanged)();
     for (final track in tracks.where((t) => refs.containsKey(t.id))) {
       if (!_downloads.containsKey(track.id)) {
         _progress(track, DownloadStatus.queued, 0);
@@ -614,31 +629,41 @@ class TransferService {
         await file.delete();
       }
     }
-    for (final record in await database.list('file')) {
+    final files = {
+      for (final record in await database.list('file'))
+        record['id'] as String: record,
+    };
+    var removedFiles = false;
+    for (final record in files.values) {
       final id = record['id'] as String;
       if (!refs.containsKey(id)) {
         final file = File(record['path'] as String);
         if (await file.exists()) await file.delete();
         await database.remove('file', id);
-      } else {
+        removedFiles = true;
+      } else if (record['references'] != refs[id]) {
         await database.put('file', id, {...record, 'references': refs[id]});
       }
     }
-    onChanged();
+    if (removedFiles) (onFilesChanged ?? onChanged)();
     for (final track in tracks.where((t) => refs.containsKey(t.id))) {
       if (_closed) break;
       try {
-        final record = await database.get('file', track.id);
+        final record = files[track.id];
         if (record != null &&
             record['sha256'] == track.sha256 &&
             await File(record['path'] as String).exists()) {
-          _progress(track, DownloadStatus.downloaded, track.sizeBytes);
-          await _saveDownload(track.id);
-          await onDownloaded?.call(track);
+          if (_progress(track, DownloadStatus.downloaded, track.sizeBytes)) {
+            await _saveDownload(track.id);
+            await onDownloaded?.call(track);
+          }
           continue;
         }
         // A stale verified record must not expose old audio after a failure.
-        if (record != null) await database.remove('file', track.id);
+        if (record != null) {
+          await database.remove('file', track.id);
+          (onFilesChanged ?? onChanged)();
+        }
         final file = await _download(track);
         await database.put('file', track.id, {
           'id': track.id,
@@ -648,7 +673,7 @@ class TransferService {
         });
         _progress(track, DownloadStatus.downloaded, track.sizeBytes);
         await _saveDownload(track.id);
-        onChanged();
+        (onFilesChanged ?? onChanged)();
         await onDownloaded?.call(track);
       } catch (e) {
         final partial = File(

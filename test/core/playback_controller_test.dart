@@ -3,6 +3,7 @@ import 'dart:math';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:yun/core/playback_controller.dart';
+import 'package:yun/core/app_controller.dart' show AppController;
 import 'package:yun/models/models.dart';
 import 'package:yun/services/playback_engine.dart';
 
@@ -11,16 +12,19 @@ import 'fakes.dart';
 void main() {
   late FakeEngine engine;
   late PlaybackController player;
+  var monotonicMs = 0;
   const tracks = [
     Track(id: 'a', title: 'A'),
     Track(id: 'b', title: 'B'),
     Track(id: 'c', title: 'C'),
   ];
   setUp(() {
+    monotonicMs = 0;
     engine = FakeEngine();
     player = PlaybackController(
       engine: engine,
       random: Random(42),
+      monotonicMs: () => monotonicMs,
       enableSystemControls: false,
       resolveSource: (track, local) async =>
           AudioSource('/cache/${track.id}', local: true),
@@ -31,6 +35,52 @@ void main() {
     await player.shutdown();
     player.dispose();
   });
+  test('playback preferences do not notify the general app channel', () async {
+    final app = AppController(
+      playbackEngine: FakeEngine(),
+      enableSystemControls: false,
+      automaticRefresh: false,
+    );
+    var appChanges = 0, playbackChanges = 0;
+    app.addListener(() => appChanges++);
+    app.playback.addListener(() => playbackChanges++);
+    await app.playback.setVolume(42);
+    app.playback.setShuffle(true);
+    app.playback.setRepeat(RepeatMode.all);
+    expect(playbackChanges, 3);
+    expect(appChanges, 0);
+    await app.shutdown();
+    app.dispose();
+  });
+
+  test(
+    'queue snapshots are immutable and stable across playback ticks',
+    () async {
+      final input = tracks.toList();
+      await player.playQueue(input);
+      final snapshot = player.queue;
+      input.clear();
+      expect(snapshot, tracks);
+      expect(() => snapshot.clear(), throwsUnsupportedError);
+      for (var i = 0; i < 100; i++) {
+        engine.emit(
+          EngineState(playing: true, position: Duration(milliseconds: i)),
+        );
+        expect(identical(player.queue, snapshot), isTrue);
+      }
+      await player.next();
+      expect(identical(player.queue, snapshot), isTrue);
+      await player.playQueue(tracks, index: 2);
+      expect(identical(player.queue, snapshot), isTrue);
+      await player.playQueue([tracks.last, tracks.first]);
+      expect(identical(player.queue, snapshot), isFalse);
+      expect(snapshot, tracks);
+      await player.stop();
+      expect(player.queue, isEmpty);
+      expect(identical(player.queue, player.queue), isTrue);
+    },
+  );
+
   group('volume', () {
     test(
       'defaults do not override native volume even across track changes',
@@ -416,13 +466,14 @@ void main() {
       final local =
           PlaybackController(
             engine: localEngine,
+            monotonicMs: () => monotonicMs,
             enableSystemControls: false,
             resolveSource: (_, _) async => const AudioSource('/test'),
           )..configureRecording('device', (_) async {
             throw StateError('Disk full');
           });
       await local.playQueue(tracks);
-      await Future<void>.delayed(const Duration(milliseconds: 20));
+      monotonicMs += 1000;
       await expectLater(local.shutdown(), throwsStateError);
       expect(localEngine.controller.isClosed, isTrue);
       expect(local.currentTrack, isNull);
@@ -461,7 +512,7 @@ void main() {
         saved.add(event);
       });
       await player.playQueue(tracks);
-      await Future<void>.delayed(const Duration(milliseconds: 20));
+      monotonicMs += 1000;
       await expectLater(player.stop(), throwsStateError);
       expect(engine.state.playing, isFalse);
       expect(player.currentTrack, isNull);
@@ -473,6 +524,139 @@ void main() {
       expect(saved.map((e) => e.id).toSet().length, saved.length);
     },
   );
+
+  testWidgets('detached failures do not retry on ticks or other accounts', (
+    tester,
+  ) async {
+    final player = PlaybackController(
+      engine: FakeEngine(),
+      enableSystemControls: false,
+      monotonicMs: () => monotonicMs,
+      resolveSource: (_, _) async => const AudioSource('/test'),
+    );
+    addTearDown(() async {
+      await tester.runAsync(player.shutdown);
+      player.dispose();
+    });
+    final failed = <ListeningEvent>[];
+    player.configureRecording('device', (event) async {
+      failed.add(event);
+      throw StateError('Disk full');
+    }, accountKey: 'server/user');
+    await player.playQueue(tracks);
+    monotonicMs += 1000;
+    await expectLater(player.stop(), throwsStateError);
+    expect(player.error, contains('Disk full'));
+    final original = failed.first;
+    await player.detachRecording();
+    final attempts = failed.length;
+    await tester.pump(const Duration(seconds: 30));
+    await player.checkpoint();
+    expect(failed, hasLength(attempts));
+
+    final other = <ListeningEvent>[];
+    player.configureRecording('device', (event) async {
+      other.add(event);
+    }, accountKey: 'server/other-user');
+    await player.checkpoint();
+    await tester.pump(const Duration(seconds: 30));
+    expect(other, isEmpty);
+    expect(failed, hasLength(attempts));
+
+    final recovered = <ListeningEvent>[];
+    player.configureRecording('device', (event) async {
+      recovered.add(event);
+    }, accountKey: 'server/user');
+    await player.checkpoint();
+    await player.checkpoint();
+    expect(recovered, [same(original)]);
+    expect(recovered.single.listenedMs, 1000);
+    await tester.runAsync(player.shutdown);
+  });
+
+  test(
+    'detaching drains only the accepted callback, not its pending tail',
+    () async {
+      final entered = Completer<void>(), release = Completer<void>();
+      final oldWrites = <ListeningEvent>[];
+      player.configureRecording('device', (event) async {
+        oldWrites.add(event);
+        entered.complete();
+        await release.future;
+      }, accountKey: 'a');
+      await player.playQueue(tracks);
+      monotonicMs += 1000;
+      final first = player.checkpoint();
+      await entered.future;
+      monotonicMs += 1000;
+      final second = player.checkpoint();
+      var detached = false;
+      final drain = player.detachRecording().then((_) => detached = true);
+      final otherWrites = <ListeningEvent>[];
+      player.configureRecording('device', (event) async {
+        otherWrites.add(event);
+      }, accountKey: 'b');
+      await player.checkpoint();
+      expect(detached, isFalse);
+      expect(otherWrites, isEmpty);
+      release.complete();
+      await Future.wait([first, second, drain]);
+      expect(detached, isTrue);
+      expect(oldWrites, hasLength(1));
+
+      final recovered = <ListeningEvent>[];
+      player.configureRecording('device', (event) async {
+        recovered.add(event);
+      }, accountKey: 'a');
+      await player.checkpoint();
+      expect(recovered, hasLength(1));
+      expect(recovered.single.id, isNot(oldWrites.single.id));
+      expect(recovered.single.listenedMs, 1000);
+      expect(otherWrites, isEmpty);
+    },
+  );
+
+  for (final fails in [false, true]) {
+    test(
+      'same-account reconfiguration serializes in-flight save (failure=$fails)',
+      () async {
+        final entered = Completer<void>(), release = Completer<void>();
+        final oldWrites = <ListeningEvent>[];
+        player.configureRecording('device', (event) async {
+          oldWrites.add(event);
+          entered.complete();
+          await release.future;
+          if (fails) throw StateError('Disk full');
+        }, accountKey: 'a');
+        await player.playQueue(tracks);
+        monotonicMs += 1000;
+        final first = player.checkpoint();
+        final observed = fails ? expectLater(first, throwsStateError) : first;
+        await entered.future;
+        monotonicMs += 1000;
+        final recovered = <ListeningEvent>[];
+        player.configureRecording('device', (event) async {
+          recovered.add(event);
+        }, accountKey: 'a');
+        final retry = player.checkpoint();
+        await Future<void>.delayed(Duration.zero);
+        expect(recovered, isEmpty);
+        release.complete();
+        await observed;
+        await retry;
+        expect(oldWrites, hasLength(1));
+        expect(recovered, hasLength(fails ? 2 : 1));
+        if (fails) expect(recovered.first, same(oldWrites.single));
+        expect(
+          recovered.map((event) => event.id).toSet(),
+          hasLength(recovered.length),
+        );
+        expect(recovered.every((event) => event.listenedMs == 1000), isTrue);
+        await player.checkpoint();
+        expect(recovered, hasLength(fails ? 2 : 1));
+      },
+    );
+  }
 
   test(
     'shuffle previous retraces history and next returns to same entry',

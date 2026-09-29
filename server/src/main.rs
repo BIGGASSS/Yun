@@ -111,7 +111,10 @@ async fn main() -> anyhow::Result<()> {
             state.cleanup().await?;
             let cleanup_state = state.clone();
             let cleanup = tokio::spawn(async move {
-                let mut interval = tokio::time::interval(Duration::from_secs(3600));
+                let period = Duration::from_secs(3600);
+                let mut interval =
+                    tokio::time::interval_at(tokio::time::Instant::now() + period, period);
+                interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
                 loop {
                     interval.tick().await;
                     if let Err(error) = cleanup_state.cleanup().await {

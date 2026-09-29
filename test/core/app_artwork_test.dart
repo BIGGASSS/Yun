@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
@@ -88,8 +89,22 @@ void main() {
   test(
     'pinning proactively caches art, then restart uses it with no network',
     () async {
-      await app.pinTrack(track.id);
-      await app.retryDownloads();
+      // Audio reconciliation intentionally does not wait for artwork I/O.
+      final cached = Completer<void>();
+      void artworkChanged() {
+        if (app.artworkPath(track) != null && !cached.isCompleted) {
+          cached.complete();
+        }
+      }
+
+      app.artworkChanges.addListener(artworkChanged);
+      try {
+        await app.pinTrack(track.id);
+        await app.retryDownloads();
+        await cached.future.timeout(const Duration(seconds: 5));
+      } finally {
+        app.artworkChanges.removeListener(artworkChanged);
+      }
       expect(artworkRequests, 1);
       final path = app.artworkPath(track);
       expect(path, isNotNull);
@@ -120,6 +135,9 @@ void main() {
         ),
       ),
     );
+    // Settle the FutureBuilder first: a pending completion would otherwise
+    // accidentally repaint after logout even without an account subscription.
+    await tester.pumpAndSettle();
     expect(find.byType(Image), findsOneWidget);
     final imageWidget = tester.widget<Image>(find.byType(Image));
     expect((imageWidget.image as ResizeImage).imageProvider, isA<FileImage>());

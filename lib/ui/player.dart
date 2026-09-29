@@ -5,6 +5,7 @@ import 'package:flutter/material.dart' hide RepeatMode;
 
 import '../core/app_controller.dart';
 import 'player_icons.dart';
+import 'selected_builder.dart';
 import 'track_widgets.dart';
 import 'widgets.dart';
 
@@ -35,7 +36,12 @@ class PlayerBar extends StatelessWidget {
   final VoidCallback onQueue;
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context) => ListenableBuilder(
+    listenable: app.playback,
+    builder: (context, _) => _build(context),
+  );
+
+  Widget _build(BuildContext context) {
     final player = app.playback;
     if (player.currentTrack == null && compact) return const SizedBox.shrink();
     final scheme = Theme.of(context).colorScheme;
@@ -174,7 +180,12 @@ class DesktopPlayerBar extends StatelessWidget {
   static const double maxSeekColumnWidth = 640;
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context) => ListenableBuilder(
+    listenable: app.playback,
+    builder: (context, _) => _build(context),
+  );
+
+  Widget _build(BuildContext context) {
     final player = app.playback;
     final scheme = Theme.of(context).colorScheme;
     return Column(
@@ -460,7 +471,7 @@ void _showVolume(BuildContext context, AppController app) {
       content: SizedBox(
         width: 280,
         child: ListenableBuilder(
-          listenable: app,
+          listenable: app.playback,
           builder: (context, _) => PlaybackVolume(app: app),
         ),
       ),
@@ -602,7 +613,7 @@ void showNowPlaying(BuildContext context, AppController app) {
     builder: (context) => FractionallySizedBox(
       heightFactor: .94,
       child: ListenableBuilder(
-        listenable: app,
+        listenable: Listenable.merge([app, app.playback, app.downloadChanges]),
         builder: (context, _) {
           final track = app.playback.currentTrack;
           return LayoutBuilder(
@@ -740,13 +751,8 @@ void showQueue(BuildContext context, AppController app) {
     isScrollControlled: true,
     useSafeArea: true,
     showDragHandle: true,
-    builder: (context) => FractionallySizedBox(
-      heightFactor: .8,
-      child: ListenableBuilder(
-        listenable: app,
-        builder: (context, _) => QueuePanel(app: app),
-      ),
-    ),
+    builder: (context) =>
+        FractionallySizedBox(heightFactor: .8, child: QueuePanel(app: app)),
   );
 }
 
@@ -755,65 +761,70 @@ class QueuePanel extends StatelessWidget {
   final AppController app;
   final VoidCallback? onClose;
   @override
-  Widget build(BuildContext context) => Column(
-    crossAxisAlignment: CrossAxisAlignment.stretch,
-    children: [
-      Padding(
-        padding: const EdgeInsets.fromLTRB(20, 16, 8, 12),
-        child: Row(
-          children: [
-            Expanded(
-              child: Text(
-                'Play queue',
-                style: Theme.of(context).textTheme.titleLarge,
-              ),
-            ),
-            if (onClose != null)
-              IconButton(
-                tooltip: 'Hide queue',
-                onPressed: onClose,
-                icon: const Icon(Icons.close_rounded),
-              ),
-          ],
-        ),
-      ),
-      Expanded(
-        child: app.playback.queue.isEmpty
-            ? const EmptyState(
-                icon: Icons.queue_music_rounded,
-                title: 'A quiet queue',
-                message: 'Play a track or playlist to get started.',
-              )
-            : ListView.builder(
-                itemCount: app.playback.queue.length,
-                itemBuilder: (context, index) {
-                  final track = app.playback.queue[index];
-                  return ListTile(
-                    selected: index == app.playback.index,
-                    leading: index == app.playback.index
-                        ? const Icon(Icons.graphic_eq_rounded)
-                        : Text('${index + 1}'),
-                    title: Text(
-                      track.title,
-                      maxLines: 2,
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                    subtitle: Text(
-                      track.artist,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                    onTap: () => runUiAction(
-                      context,
-                      () => app.playback.playQueue(
-                        app.playback.queue,
-                        index: index,
-                      ),
-                    ),
-                  );
-                },
-              ),
-      ),
-    ],
+  Widget build(BuildContext context) => SelectedBuilder(
+    listenable: app.playback,
+    select: () => (app.playback.queue, app.playback.index),
+    builder: (context, snapshot, _) =>
+        _build(context, snapshot.$1, snapshot.$2),
   );
+
+  Widget _build(BuildContext context, List<Track> queue, int currentIndex) =>
+      Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(20, 16, 8, 12),
+            child: Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    'Play queue',
+                    style: Theme.of(context).textTheme.titleLarge,
+                  ),
+                ),
+                if (onClose != null)
+                  IconButton(
+                    tooltip: 'Hide queue',
+                    onPressed: onClose,
+                    icon: const Icon(Icons.close_rounded),
+                  ),
+              ],
+            ),
+          ),
+          Expanded(
+            child: queue.isEmpty
+                ? const EmptyState(
+                    icon: Icons.queue_music_rounded,
+                    title: 'A quiet queue',
+                    message: 'Play a track or playlist to get started.',
+                  )
+                : ListView.builder(
+                    itemCount: queue.length,
+                    itemBuilder: (context, index) {
+                      final track = queue[index];
+                      return ListTile(
+                        selected: index == currentIndex,
+                        leading: index == currentIndex
+                            ? const Icon(Icons.graphic_eq_rounded)
+                            : Text('${index + 1}'),
+                        title: Text(
+                          track.title,
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                        subtitle: Text(
+                          track.artist,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                        onTap: () => runUiAction(
+                          context,
+                          () => app.playback.playQueue(queue, index: index),
+                        ),
+                      );
+                    },
+                  ),
+          ),
+        ],
+      );
 }

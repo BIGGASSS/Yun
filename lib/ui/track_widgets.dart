@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 
 import '../core/app_controller.dart';
 import 'widgets.dart';
+import 'selected_builder.dart';
 
 class TrackArtwork extends StatefulWidget {
   const TrackArtwork({
@@ -39,7 +40,7 @@ class _TrackArtworkState extends State<TrackArtwork> {
     );
     final track = widget.track;
     return AnimatedBuilder(
-      animation: widget.app,
+      animation: Listenable.merge([widget.app, widget.app.artworkChanges]),
       builder: (context, _) {
         final app = widget.app;
         // A future's old snapshot must never paint another account/revision.
@@ -54,7 +55,12 @@ class _TrackArtworkState extends State<TrackArtwork> {
         );
         if (_requestKey != key) {
           _requestKey = key;
-          _request = track == null ? null : app.getArtwork(track);
+          final cached = track == null ? null : app.artworkPath(track);
+          _request = track == null
+              ? null
+              : cached != null
+              ? Future.value(cached)
+              : app.getArtwork(track);
         }
         return ExcludeSemantics(
           child: ClipRRect(
@@ -119,9 +125,10 @@ class TrackTile extends StatelessWidget {
   final ValueChanged<bool?>? onSelectionChanged;
 
   @override
-  Widget build(BuildContext context) {
-    final current = app.playback.currentTrack?.id == track.id;
-    return ListTile(
+  Widget build(BuildContext context) => SelectedBuilder(
+    listenable: app.playback,
+    select: () => selected == null && app.playback.currentTrack?.id == track.id,
+    builder: (context, current, _) => ListTile(
       selected: selected ?? current,
       leading: selected == null
           ? TrackArtwork(app: app, track: track)
@@ -135,10 +142,14 @@ class TrackTile extends StatelessWidget {
         maxLines: 2,
         overflow: TextOverflow.ellipsis,
       ),
-      subtitle: Text(
-        '${track.artist.isEmpty ? 'Unknown artist' : track.artist} · ${downloadLabel(app.downloadProgress(track))}',
-        maxLines: 2,
-        overflow: TextOverflow.ellipsis,
+      subtitle: DownloadProgressBuilder(
+        app: app,
+        track: track,
+        builder: (context, progress) => Text(
+          '${track.artist.isEmpty ? 'Unknown artist' : track.artist} · ${downloadLabel(progress)}',
+          maxLines: 2,
+          overflow: TextOverflow.ellipsis,
+        ),
       ),
       onTap: selected == null
           ? onTap ??
@@ -147,8 +158,37 @@ class TrackTile extends StatelessWidget {
           ? null
           : () => onSelectionChanged!(!selected!),
       trailing: trailing ?? TrackMenu(app: app, track: track),
-    );
-  }
+    ),
+  );
+}
+
+/// Byte ticks rebuild only the indicator belonging to the changed track.
+class DownloadProgressBuilder extends StatelessWidget {
+  const DownloadProgressBuilder({
+    super.key,
+    required this.app,
+    required this.track,
+    required this.builder,
+  });
+  final AppController app;
+  final Track track;
+  final Widget Function(BuildContext, DownloadProgress) builder;
+
+  @override
+  Widget build(BuildContext context) => SelectedBuilder(
+    listenable: Listenable.merge([app, app.downloadChanges]),
+    select: () {
+      final progress = app.downloadProgress(track);
+      return (
+        progress.status,
+        progress.receivedBytes,
+        progress.totalBytes,
+        progress.error,
+      );
+    },
+    builder: (context, _, child) =>
+        builder(context, app.downloadProgress(track)),
+  );
 }
 
 class TrackMenu extends StatelessWidget {

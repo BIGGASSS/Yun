@@ -12,7 +12,7 @@ class CacheDatabase extends GeneratedDatabase {
   CacheDatabase(File file) : super(NativeDatabase.createInBackground(file));
   CacheDatabase.memory() : super(NativeDatabase.memory());
   @override
-  int get schemaVersion => 1;
+  int get schemaVersion => 2;
   @override
   Iterable<TableInfo<Table, Object?>> get allTables => const [];
   @override
@@ -23,11 +23,20 @@ class CacheDatabase extends GeneratedDatabase {
       await customStatement(
         'CREATE TABLE documents (kind TEXT NOT NULL, id TEXT NOT NULL, body TEXT NOT NULL, PRIMARY KEY(kind,id))',
       );
+      await _createKindIndex();
+    },
+    onUpgrade: (_, from, _) async {
+      if (from < 2) await _createKindIndex();
     },
   );
+
+  // SQLite indexes implicitly end in rowid: a fixed kind can be walked in
+  // insertion order without sorting the entire outbox before applying LIMIT.
+  Future<void> _createKindIndex() =>
+      customStatement('CREATE INDEX documents_kind_order ON documents(kind)');
   Future<void> put(String kind, String id, Map<String, dynamic> value) =>
       customStatement(
-        'INSERT INTO documents(kind,id,body) VALUES(?,?,?) ON CONFLICT(kind,id) DO UPDATE SET body=excluded.body',
+        'INSERT INTO documents(kind,id,body) VALUES(?,?,?) ON CONFLICT(kind,id) DO UPDATE SET body=excluded.body WHERE body<>excluded.body',
         [kind, id, jsonEncode(value)],
       );
   Future<void> remove(String kind, String id) => customStatement(
@@ -45,6 +54,28 @@ class CacheDatabase extends GeneratedDatabase {
             ),
           )
           .toList();
+
+  /// Count without reading or decoding the durable outbox.
+  Future<int> eventCount() async => (await customSelect(
+    "SELECT COUNT(*) AS count FROM documents WHERE kind='event'",
+  ).getSingle()).read<int>('count');
+
+  /// Stable insertion order, bounded in SQL rather than after JSON decoding.
+  Future<List<Map<String, dynamic>>> eventBatch({int limit = 500}) async {
+    if (limit < 1 || limit > 500) throw RangeError.range(limit, 1, 500);
+    final rows = await customSelect(
+      "SELECT body FROM documents WHERE kind='event' ORDER BY rowid LIMIT ?",
+      variables: [Variable.withInt(limit)],
+    ).get();
+    return rows
+        .map(
+          (r) => Map<String, dynamic>.from(
+            jsonDecode(r.read<String>('body')) as Map,
+          ),
+        )
+        .toList();
+  }
+
   Future<Map<String, dynamic>?> get(String kind, String id) async {
     final rows = await customSelect(
       'SELECT body FROM documents WHERE kind=? AND id=?',

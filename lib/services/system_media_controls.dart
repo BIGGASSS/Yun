@@ -41,7 +41,10 @@ abstract interface class SystemMediaControls {
 }
 
 class NativeSystemMediaControls implements SystemMediaControls {
-  NativeSystemMediaControls({@visibleForTesting this._handler});
+  NativeSystemMediaControls({
+    @visibleForTesting this._handler,
+    @visibleForTesting this._windows,
+  });
 
   BaseAudioHandler? _handler;
   win.SMTCWindows? _windows;
@@ -49,7 +52,13 @@ class NativeSystemMediaControls implements SystemMediaControls {
   Track? _lastTrack;
   List<Track> _lastQueue = [];
   Future<void> _updates = Future.value();
-  bool _disposed = false;
+  Future<void> Function()? _pendingUpdate;
+  Completer<void>? _drain;
+  Future<void>? _disposal;
+  bool _disposed = false, _forceUpdate = false;
+  bool? _lastEnabled, _lastPlaying, _lastShuffle;
+  int? _lastRepeat;
+  Duration? _lastPosition;
   @override
   Future<void> initialize(MediaCommands commands) async {
     if (Platform.isWindows) {
@@ -114,23 +123,51 @@ class NativeSystemMediaControls implements SystemMediaControls {
     required bool shuffle,
     required int repeat,
   }) {
-    // Windows calls cross an asynchronous native bridge. Serialize snapshots so
-    // a slow metadata update cannot overwrite a subsequent stop/new track.
-    final next = _updates.then((_) async {
-      if (_disposed) return;
-      await _update(
-        track: track,
-        queue: queue,
-        index: index,
-        playing: playing,
-        buffering: buffering,
-        position: position,
-        shuffle: shuffle,
-        repeat: repeat,
-      );
-    });
-    _updates = next.catchError((Object _) {});
-    return next;
+    if (_disposed) return Future.value();
+    // At most one bridge call and one latest snapshot are retained. All callers
+    // in a burst wait for the same drain, including its final/latest state.
+    // PlaybackController supplies an immutable, stable queue snapshot.
+    _pendingUpdate = () => _update(
+      track: track,
+      queue: queue,
+      index: index,
+      playing: playing,
+      buffering: buffering,
+      position: position,
+      shuffle: shuffle,
+      repeat: repeat,
+    );
+    if (_drain == null) {
+      final drain = _drain = Completer<void>();
+      _updates = drain.future.catchError((Object _) {});
+      scheduleMicrotask(() => _drainUpdates(drain));
+    }
+    return _drain!.future;
+  }
+
+  Future<void> _drainUpdates(Completer<void> drain) async {
+    Object? failure;
+    StackTrace? failureStack;
+    while (_pendingUpdate != null) {
+      final update = _pendingUpdate!;
+      _pendingUpdate = null;
+      try {
+        await update();
+      } catch (error, stack) {
+        failure ??= error;
+        failureStack ??= stack;
+        // A failed call may already have changed some native properties.
+        // Replay all fields of the next snapshot instead of trusting old diffs.
+        _forceUpdate = true;
+        _lastEnabled = null;
+      }
+    }
+    _drain = null;
+    if (failure == null) {
+      drain.complete();
+    } else {
+      drain.completeError(failure, failureStack);
+    }
   }
 
   Future<void> _update({
@@ -144,7 +181,10 @@ class NativeSystemMediaControls implements SystemMediaControls {
     required int repeat,
   }) async {
     final handler = _handler;
-    final metadataChanged = !mapEquals(_lastTrack?.toJson(), track?.toJson());
+    final metadataChanged =
+        _forceUpdate ||
+        (!identical(_lastTrack, track) &&
+            !mapEquals(_lastTrack?.toJson(), track?.toJson()));
     MediaItem item(Track t) => MediaItem(
       id: t.id,
       title: t.title,
@@ -159,7 +199,7 @@ class NativeSystemMediaControls implements SystemMediaControls {
       // Queue identity is independent of the current song: replacing [A, B]
       // with [A, C], or visiting duplicate A entries, must not leave stale data.
       // Tracks are immutable; position-only updates reuse these same objects.
-      if (!listEquals(_lastQueue, queue)) {
+      if (_forceUpdate || !listEquals(_lastQueue, queue)) {
         handler.queue.add(queue.map(item).toList());
       }
       handler.playbackState.add(
@@ -194,10 +234,12 @@ class NativeSystemMediaControls implements SystemMediaControls {
     final windows = _windows;
     if (windows != null) {
       if (track == null) {
-        await windows.clearMetadata();
-        await windows.disableSmtc();
+        if (_lastEnabled != false) {
+          await windows.clearMetadata();
+          await windows.disableSmtc();
+        }
       } else {
-        await windows.enableSmtc();
+        if (_lastEnabled != true) await windows.enableSmtc();
         if (metadataChanged) {
           await windows.updateMetadata(
             win.MusicMetadata(
@@ -208,36 +250,53 @@ class NativeSystemMediaControls implements SystemMediaControls {
             ),
           );
         }
-        await windows.setPlaybackStatus(
-          playing ? win.PlaybackStatus.playing : win.PlaybackStatus.paused,
-        );
-        await windows.updateTimeline(
-          win.PlaybackTimeline(
-            startTimeMs: 0,
-            endTimeMs: track.durationMs,
-            positionMs: position.inMilliseconds,
-            minSeekTimeMs: 0,
-            maxSeekTimeMs: track.durationMs,
-          ),
-        );
-        await windows.setShuffleEnabled(shuffle);
-        await windows.setRepeatMode(
-          repeat == 0
-              ? win.RepeatMode.none
-              : repeat == 1
-              ? win.RepeatMode.list
-              : win.RepeatMode.track,
-        );
+        if (_lastEnabled != true || _lastPlaying != playing) {
+          await windows.setPlaybackStatus(
+            playing ? win.PlaybackStatus.playing : win.PlaybackStatus.paused,
+          );
+        }
+        if (metadataChanged || _lastPosition != position) {
+          await windows.updateTimeline(
+            win.PlaybackTimeline(
+              startTimeMs: 0,
+              endTimeMs: track.durationMs,
+              positionMs: position.inMilliseconds,
+              minSeekTimeMs: 0,
+              maxSeekTimeMs: track.durationMs,
+            ),
+          );
+        }
+        if (_lastEnabled != true || _lastShuffle != shuffle) {
+          await windows.setShuffleEnabled(shuffle);
+        }
+        if (_lastEnabled != true || _lastRepeat != repeat) {
+          await windows.setRepeatMode(
+            repeat == 0
+                ? win.RepeatMode.none
+                : repeat == 1
+                ? win.RepeatMode.list
+                : win.RepeatMode.track,
+          );
+        }
       }
     }
+    _forceUpdate = false;
     _lastTrack = track;
-    _lastQueue = List.of(queue);
+    _lastQueue = queue;
+    _lastEnabled = track != null;
+    _lastPlaying = playing;
+    _lastPosition = position;
+    _lastShuffle = shuffle;
+    _lastRepeat = repeat;
   }
 
   @override
-  Future<void> dispose() async {
-    await _updates;
+  Future<void> dispose() => _disposal ??= _dispose();
+
+  Future<void> _dispose() async {
+    // Refuse new snapshots immediately, but drain the accepted latest state.
     _disposed = true;
+    await _updates;
     for (final sub in _subscriptions) {
       await sub.cancel();
     }

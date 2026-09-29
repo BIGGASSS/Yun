@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:collection';
 import 'dart:math';
 
 import 'package:flutter/foundation.dart';
@@ -28,6 +29,7 @@ class PlaybackController extends ChangeNotifier {
     Random? random,
     PlaybackSettings initialSettings = const PlaybackSettings(),
     this._saveSettings,
+    this._monotonicMs,
   }) : _engine = engine ?? MediaKitEngine(),
        _controls = enableSystemControls
            ? (controls ?? NativeSystemMediaControls())
@@ -48,8 +50,10 @@ class PlaybackController extends ChangeNotifier {
   final Future<void> Function(PlaybackSettings)? _saveSettings;
   Future<void>? _settingsWrites;
   String? _settingsError;
-  List<Track> _queue = [];
-  List<Track> get queue => List.unmodifiable(_queue);
+  List<Track> _queue = const [];
+
+  /// Immutable snapshot, replaced only when queue membership/order changes.
+  List<Track> get queue => _queue;
   int index = -1;
   Track? get currentTrack =>
       index >= 0 && index < _queue.length ? _queue[index] : null;
@@ -62,10 +66,11 @@ class PlaybackController extends ChangeNotifier {
   Duration position = Duration.zero, duration = Duration.zero;
   String? error;
   String? _playbackError;
-  ListeningTracker? _tracker;
-  Future<void> Function(ListeningEvent)? _saveEvent;
-  final _pending = <ListeningEvent>[];
-  Future<void>? _persisting, _shutdownFuture;
+  _Recording? _recording;
+  ListeningTracker? get _tracker => _recording?.tracker;
+  final _recordingBuffers = <Object, _RecordingBuffer>{};
+  final int Function()? _monotonicMs;
+  Future<void>? _shutdownFuture, _controlsUpdate;
   final Stopwatch _clock = Stopwatch()..start();
   StreamSubscription<EngineState>? _subscription;
   Timer? _timer;
@@ -83,17 +88,62 @@ class PlaybackController extends ChangeNotifier {
   Future<void> _operations = Future.value();
   final List<int> _shuffleHistory = [];
   final List<int> _shuffleRemaining = [];
+
+  /// Bind recording to a normalized server/user scope, not a device or track.
+  /// Without [accountKey], only the identical callback can reclaim its buffer.
+  /// Reconfiguration detaches immediately; checkpoints wait for earlier writes
+  /// in the same scope before retrying with the new callback.
   void configureRecording(
     String deviceId,
-    Future<void> Function(ListeningEvent) saveEvent,
-  ) {
-    _saveEvent = saveEvent;
-    _tracker = ListeningTracker(
-      deviceId: deviceId,
-      newId: () => const Uuid().v4(),
-      monotonicMs: () => _clock.elapsedMilliseconds,
-      wallNow: DateTime.now,
+    Future<void> Function(ListeningEvent) saveEvent, {
+    String? accountKey,
+  }) {
+    _detachRecording();
+    final key = accountKey ?? saveEvent;
+    final buffer = _recordingBuffers.putIfAbsent(
+      key,
+      () => _RecordingBuffer(key),
     );
+    _recording = _Recording(
+      buffer,
+      saveEvent,
+      ListeningTracker(
+        deviceId: deviceId,
+        newId: () => const Uuid().v4(),
+        monotonicMs: _monotonicMs ?? () => _clock.elapsedMilliseconds,
+        wallNow: DateTime.now,
+      ),
+    );
+  }
+
+  /// Stop recording/retries synchronously, then await any accepted DB write.
+  /// Call after stop, and await even on failure BEFORE closing the account DB.
+  /// Failed segments remain quarantined in memory until that account returns.
+  /// Unlike the durable database outbox, these cannot survive process exit.
+  Future<void> detachRecording() {
+    final buffer = _detachRecording();
+    return buffer?.persisting ?? Future<void>.value();
+  }
+
+  _RecordingBuffer? _detachRecording() {
+    final recording = _recording;
+    if (recording == null) return null;
+    _recording = null;
+    recording.tracker.setActive(false);
+    recording.buffer.pending.addAll(recording.tracker.flush());
+    recording.tracker.clear();
+    // Release the database closure; a running save holds its own snapshot.
+    recording.saveEvent = null;
+    _discardEmptyBuffer(recording.buffer);
+    return recording.buffer;
+  }
+
+  void _discardEmptyBuffer(_RecordingBuffer buffer) {
+    if (!identical(buffer, _recording?.buffer) &&
+        buffer.pending.isEmpty &&
+        buffer.persisting == null) {
+      _recordingBuffers.remove(buffer.key);
+    }
   }
 
   Future<void> _initialize() async {
@@ -154,23 +204,32 @@ class PlaybackController extends ChangeNotifier {
     if (_disposed || _notifierDisposed) return;
     notifyListeners();
     if (_initialized) {
-      unawaited(
-        _controls
-                ?.update(
-                  track: currentTrack,
-                  queue: queue,
-                  index: index,
-                  playing: isPlaying,
-                  buffering: isBuffering,
-                  position: position,
-                  shuffle: shuffle,
-                  repeat: repeatMode.index,
-                )
-                .catchError((Object e) {
-                  error = 'System media controls: $e';
-                }) ??
-            Future.value(),
+      final update = _controls?.update(
+        track: currentTrack,
+        queue: queue,
+        index: index,
+        playing: isPlaying,
+        buffering: isBuffering,
+        position: position,
+        shuffle: shuffle,
+        repeat: repeatMode.index,
       );
+      // Native controls return one shared future for a coalesced burst. Avoid
+      // attaching an unbounded number of error handlers to that same drain.
+      if (update != null && !identical(update, _controlsUpdate)) {
+        _controlsUpdate = update;
+        unawaited(
+          update.then(
+            (_) {
+              if (identical(_controlsUpdate, update)) _controlsUpdate = null;
+            },
+            onError: (Object e) {
+              if (identical(_controlsUpdate, update)) _controlsUpdate = null;
+              error = 'System media controls: $e';
+            },
+          ),
+        );
+      }
     }
   }
 
@@ -227,25 +286,40 @@ class PlaybackController extends ChangeNotifier {
     _notify();
   }
 
-  Future<void> checkpoint() async {
-    _pending.addAll(_tracker?.flush() ?? []);
-    if (_persisting != null) {
-      await _persisting;
-      return;
-    }
-    _persisting = _persist();
-    try {
-      await _persisting;
-    } finally {
-      _persisting = null;
-    }
+  Future<void> checkpoint() {
+    final recording = _recording;
+    if (recording == null) return Future<void>.value();
+    recording.buffer.pending.addAll(recording.tracker.flush());
+    return recording.persisting ??= _persist(recording).whenComplete(() {
+      recording.persisting = null;
+    });
   }
 
-  Future<void> _persist() async {
-    while (_pending.isNotEmpty && _saveEvent != null) {
-      await _saveEvent!(_pending.first);
-      _pending.removeAt(0);
-    }
+  Future<void> _persist(_Recording recording) {
+    final buffer = recording.buffer;
+    final previous = buffer.persisting;
+    late final Future<void> operation;
+    operation =
+        () async {
+          // Only a previous recording can reach this branch: checkpoints within
+          // one recording share its future and preserve its persistence errors.
+          try {
+            await previous;
+          } catch (_) {
+            // Its caller receives the error; this recording may retry the same
+            // scope once that write settles, never concurrently or under a new ID.
+          }
+          while (buffer.pending.isNotEmpty && recording.saveEvent != null) {
+            final save = recording.saveEvent!;
+            await save(buffer.pending.first);
+            buffer.pending.removeFirst();
+          }
+        }().whenComplete(() {
+          if (identical(buffer.persisting, operation)) buffer.persisting = null;
+          _discardEmptyBuffer(buffer);
+        });
+    buffer.persisting = operation;
+    return operation;
   }
 
   /// Start a collection using shuffle unless a specific [index] is requested.
@@ -261,7 +335,7 @@ class PlaybackController extends ChangeNotifier {
         }
         await _initialize();
         await _haltForTransition();
-        _queue = List.of(tracks);
+        if (!listEquals(_queue, tracks)) _queue = List.unmodifiable(tracks);
         this.index = index ?? (shuffle ? _random.nextInt(tracks.length) : 0);
         _resetShuffle();
         await _openCurrent();
@@ -550,7 +624,7 @@ class PlaybackController extends ChangeNotifier {
       isPlaying = false;
       isBuffering = false;
       position = duration = Duration.zero;
-      _queue = [];
+      _queue = const [];
       index = -1;
       _notify();
     }
@@ -588,4 +662,19 @@ class PlaybackController extends ChangeNotifier {
     );
     super.dispose();
   }
+}
+
+class _RecordingBuffer {
+  _RecordingBuffer(this.key);
+  final Object key;
+  final pending = ListQueue<ListeningEvent>();
+  Future<void>? persisting;
+}
+
+class _Recording {
+  _Recording(this.buffer, this.saveEvent, this.tracker);
+  final _RecordingBuffer buffer;
+  final ListeningTracker tracker;
+  Future<void> Function(ListeningEvent)? saveEvent;
+  Future<void>? persisting;
 }

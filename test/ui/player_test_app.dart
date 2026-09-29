@@ -17,9 +17,12 @@ class PlayerTestApp extends ChangeNotifier implements AppController {
             const AudioSource('fake.audio', local: true),
         engine: engine,
         enableSystemControls: false,
-      ) {
-    playback.addListener(notifyListeners);
-  }
+      );
+
+  @override
+  final downloadChanges = ChangeNotifier();
+  @override
+  final artworkChanges = ChangeNotifier();
 
   final FakeEngine engine;
 
@@ -57,7 +60,8 @@ class PlayerTestApp extends ChangeNotifier implements AppController {
 
   @override
   void dispose() {
-    playback.removeListener(notifyListeners);
+    downloadChanges.dispose();
+    artworkChanges.dispose();
     playback.dispose();
     super.dispose();
   }

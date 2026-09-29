@@ -36,6 +36,7 @@ class AppController extends ChangeNotifier {
     bool enableSystemControls = true,
     PlaybackSettings playbackSettings = const PlaybackSettings(),
     Future<void> Function(PlaybackSettings)? savePlaybackSettings,
+    int Function()? listeningMonotonicMs,
     this.automaticRefresh = true,
   }) : _api = api ?? ApiClient(),
        _storageDirectory = storageDirectory ?? getApplicationSupportDirectory,
@@ -47,8 +48,8 @@ class AppController extends ChangeNotifier {
       enableSystemControls: enableSystemControls,
       initialSettings: playbackSettings,
       saveSettings: savePlaybackSettings,
+      monotonicMs: listeningMonotonicMs,
     );
-    playback.addListener(_playbackChanged);
   }
   final ApiClient _api;
   final Future<Directory> Function() _storageDirectory;
@@ -64,33 +65,42 @@ class AppController extends ChangeNotifier {
   bool initialized = false, busy = false, isOffline = false;
   String? error;
   bool get isAuthenticated => account != null;
-  List<Track> _tracks = [];
-  List<Playlist> _playlists = [];
-  List<UploadJob> _uploads = [];
-  List<PinSelection> _pins = [];
+  List<Track> _tracks = const [];
+  List<Playlist> _playlists = const [];
+  List<UploadJob> _uploads = const [];
+  List<PinSelection> _pins = const [];
+  Map<String, Track> _tracksById = const {};
   Map<String, String> _files = {};
+  Set<String> _downloadedTrackIds = const {};
   Set<String> _wantedDownloads = {};
-  List<Track> get tracks => List.unmodifiable(_tracks);
-  List<Playlist> get playlists => List.unmodifiable(_playlists);
-  List<UploadJob> get uploads => List.unmodifiable(_uploads);
-  List<PinSelection> get pins => List.unmodifiable(_pins);
-  Set<String> get downloadedTrackIds => Set.unmodifiable(_files.keys);
+  List<Track> get tracks => _tracks;
+  List<Playlist> get playlists => _playlists;
+  List<UploadJob> get uploads => _uploads;
+  List<PinSelection> get pins => _pins;
+  Set<String> get downloadedTrackIds => _downloadedTrackIds;
+  final ChangeNotifier downloadChanges = ChangeNotifier();
+  final ChangeNotifier artworkChanges = ChangeNotifier();
   int pendingEventCount = 0;
   ServerStats? stats;
-  Timer? _retryTimer;
+  Timer? _retryTimer, _integrityTimer;
   Future<void>? _initializing, _refreshing, _outboxRunning, _shutdownFuture;
   bool _disposed = false, _locking = false, _notifierDisposed = false;
   final Set<Future<dynamic>> _onlineOperations = {};
   final Set<Future<void>> _uploadOperations = {};
-  Future<void> _reloadTail = Future.value();
+  Future<void>? _reloadRunning;
+  bool _reloadRequested = false,
+      _uploadsRequested = false,
+      _filesRequested = false;
   int _generation = 0;
   String newId() => const Uuid().v4();
   void _notify() {
     if (!_disposed && !_notifierDisposed) notifyListeners();
   }
 
-  void _playbackChanged() {
-    _notify();
+  void _notifyDownloads() {
+    if (!_disposed && !_notifierDisposed && !_locking) {
+      downloadChanges.notifyListeners();
+    }
   }
 
   void clearError() {
@@ -145,6 +155,11 @@ class AppController extends ChangeNotifier {
         _retryTimer = Timer.periodic(const Duration(seconds: 30), (_) {
           if (isAuthenticated && !_locking) unawaited(_background(refresh()));
         });
+        _integrityTimer = Timer.periodic(const Duration(minutes: 5), (_) {
+          if (isAuthenticated && !_locking) {
+            unawaited(_background(retryDownloads()));
+          }
+        });
         if (isAuthenticated) unawaited(_background(refresh()));
       }
     } catch (e) {
@@ -158,7 +173,11 @@ class AppController extends ChangeNotifier {
 
   Future<void> _openAccount(Account value) async {
     final key = sha256
-        .convert(utf8.encode(jsonEncode([value.server, value.userId])))
+        .convert(
+          utf8.encode(
+            jsonEncode([normalizeServer(value.server), value.userId]),
+          ),
+        )
         .toString();
     final directory = Directory(p.join(_root!.path, 'accounts', key));
     await directory.create(recursive: true);
@@ -169,15 +188,20 @@ class AppController extends ChangeNotifier {
     final generation = _generation;
     playback.configureRecording(_deviceId!, (event) async {
       await db.enqueueEvent(event);
-      pendingEventCount = (await db.list('event')).length;
-      _notify();
-    });
+      final pending = await db.eventCount();
+      if (generation == _generation) {
+        pendingEventCount = pending;
+        _notify();
+      }
+    }, accountKey: key);
     _artwork = ArtworkCache(
       api: _api,
       account: value,
       directory: Directory(p.join(_root!.path, 'artwork')),
       onChanged: () {
-        if (generation == _generation && !_locking) _notify();
+        if (generation == _generation && !_locking && !_notifierDisposed) {
+          artworkChanges.notifyListeners();
+        }
       },
     );
     _transfers = TransferService(
@@ -187,7 +211,7 @@ class AppController extends ChangeNotifier {
       importsDirectory: Directory(p.join(directory.path, 'imports')),
       onChanged: () {
         if (generation == _generation && !_locking) {
-          unawaited(_background(_reloadCache()));
+          unawaited(_background(_reloadUploads()));
         }
       },
       onTrack: (track) async {
@@ -196,23 +220,93 @@ class AppController extends ChangeNotifier {
       },
       onError: _backgroundError,
       onDownloadChanged: () {
-        if (generation == _generation && !_locking) _notify();
+        if (generation == _generation) _notifyDownloads();
+      },
+      onFilesChanged: () {
+        if (generation == _generation && !_locking) {
+          unawaited(_background(_reloadFiles()));
+        }
       },
       onDownloaded: (track) async {
-        if (generation == _generation && !_locking) await getArtwork(track);
+        // The cache bounds/deduplicates work; images cannot stall audio.
+        if (generation == _generation && !_locking) {
+          unawaited(
+            _background(
+              _artwork!
+                  .get(track, online: !isOffline, background: true)
+                  .then<void>((_) {}),
+            ),
+          );
+        }
       },
     );
     await _transfers!.restoreUploads();
     await _transfers!.restoreDownloads();
+    // Only this account's quarantined, non-durable segments can reenter its
+    // durable outbox. A disk failure must not turn successful auth into logout.
+    try {
+      await playback.checkpoint();
+    } catch (e) {
+      error = e.toString();
+    }
     await _reloadCache();
   }
 
   Future<void> _reloadCache() {
-    final next = _reloadTail.then((_) => _loadCache());
-    _reloadTail = next.catchError((Object e) {
-      _backgroundError(e);
-    });
-    return next;
+    _reloadRequested = true;
+    return _scheduleReload();
+  }
+
+  Future<void> _reloadUploads() {
+    _uploadsRequested = true;
+    return _scheduleReload();
+  }
+
+  Future<void> _reloadFiles() {
+    _filesRequested = true;
+    return _scheduleReload();
+  }
+
+  Future<void> _scheduleReload() => _reloadRunning ??= _drainReloads();
+
+  Future<void> _drainReloads() async {
+    try {
+      while (_reloadRequested || _uploadsRequested || _filesRequested) {
+        final full = _reloadRequested;
+        final uploads = _uploadsRequested;
+        final files = _filesRequested;
+        _reloadRequested = _uploadsRequested = _filesRequested = false;
+        if (full) {
+          await _loadCache();
+        } else {
+          final db = _database;
+          final generation = _generation;
+          if (db == null) continue;
+          final jobs = uploads ? await db.list('upload') : null;
+          final records = files ? await db.list('file') : null;
+          if (generation != _generation || _disposed) continue;
+          if (jobs != null) {
+            _uploads = List.unmodifiable(jobs.map(UploadJob.fromJson));
+          }
+          if (records != null) {
+            _setFiles({
+              for (final record in records)
+                if (_tracksById[record['id']]?.sha256 == record['sha256'])
+                  record['id'] as String: record['path'] as String,
+            });
+          }
+          _notifyDownloads();
+        }
+      }
+    } finally {
+      _reloadRunning = null;
+    }
+  }
+
+  void _setFiles(Map<String, String> files) {
+    if (mapEquals(_files, files)) return;
+    _files = files;
+    _downloadedTrackIds = Set.unmodifiable(files.keys);
   }
 
   Future<void> _loadCache() async {
@@ -235,15 +329,16 @@ class AppController extends ChangeNotifier {
         files[record['id'] as String] = path;
       }
     }
-    final pending = (await db.list('event')).length;
+    final pending = await db.eventCount();
     if (generation != _generation || _disposed) return;
-    _tracks = tracks;
+    _tracks = List.unmodifiable(tracks);
+    _tracksById = {for (final track in tracks) track.id: track};
     _artwork?.updateTracks(tracks);
-    _playlists = playlists;
-    _uploads = uploads;
-    _pins = pins;
+    _playlists = List.unmodifiable(playlists);
+    _uploads = List.unmodifiable(uploads);
+    _pins = List.unmodifiable(pins);
     _wantedDownloads = pinReferences(pins, tracks, playlists).keys.toSet();
-    _files = files;
+    _setFiles(files);
     pendingEventCount = pending;
     _notify();
   }
@@ -257,8 +352,11 @@ class AppController extends ChangeNotifier {
     _notify();
     try {
       if (account != null) {
-        await _closeAccount();
-        await _api.logout();
+        try {
+          await _closeAccount();
+        } finally {
+          await _api.logout();
+        }
       }
       final value = await _api.login(server, username, password, _deviceId!);
       await _openAccount(value);
@@ -276,12 +374,32 @@ class AppController extends ChangeNotifier {
   }
 
   Future<void> _closeAccount() async {
-    // Lock local image access and cancel requests before any account can change.
-    final closingArtwork = _artwork?.close();
+    Object? failure;
+    StackTrace? failureStack;
+    Future<void> cleanup(Future<void> Function() action) async {
+      try {
+        await action();
+      } catch (e, stack) {
+        failure ??= e;
+        failureStack ??= stack;
+      }
+    }
+
+    // Lock local access immediately. A failed listening checkpoint must not
+    // prevent cancellation, database closure or native-resource disposal.
+    final artwork = _artwork;
+    final closingArtwork = cleanup(() async {
+      await artwork?.close();
+    });
     _artwork = null;
-    await playback.stop();
+    await cleanup(playback.stop);
+    // Stop timer retries even after a failed checkpoint, and drain the captured
+    // callback before closing its DB. Unsaved segments stay account-scoped.
+    await cleanup(playback.detachRecording);
     await closingArtwork;
-    await _transfers?.close();
+    await cleanup(() async {
+      await _transfers?.close();
+    });
     try {
       await _refreshing;
     } catch (_) {}
@@ -294,20 +412,26 @@ class AppController extends ChangeNotifier {
         ..._uploadOperations,
       ].map((f) => f.then<void>((_) {}, onError: (Object _, StackTrace _) {})),
     );
-    await _reloadTail;
+    try {
+      await _reloadRunning;
+    } catch (_) {}
     _generation++;
-    await _database?.close();
+    await cleanup(() async {
+      await _database?.close();
+    });
     _database = null;
     _transfers = null;
     account = null;
-    _tracks = [];
-    _playlists = [];
-    _uploads = [];
-    _pins = [];
+    _tracks = const [];
+    _tracksById = const {};
+    _playlists = const [];
+    _uploads = const [];
+    _pins = const [];
     _wantedDownloads = {};
-    _files = {};
+    _setFiles({});
     stats = null;
     pendingEventCount = 0;
+    if (failure != null) Error.throwWithStackTrace(failure!, failureStack!);
   }
 
   Future<void> logout() async {
@@ -316,8 +440,13 @@ class AppController extends ChangeNotifier {
     busy = true;
     _notify();
     try {
-      await _closeAccount();
-      await _api.logout();
+      try {
+        await _closeAccount();
+      } finally {
+        // Cleanup may report a failed checkpoint after clearing the account.
+        // Never leave restorable credentials behind a signed-out UI.
+        await _api.logout();
+      }
       isOffline = false;
       error = null;
     } finally {
@@ -344,18 +473,29 @@ class AppController extends ChangeNotifier {
     final generation = _generation;
     try {
       final cursor = await db.cursor;
-      final result = await _api.json(
-        '/library',
-        query: cursor == null ? null : {'cursor': cursor},
-      );
-      if (generation != _generation) return;
-      await db.applyLibrary(result);
-      await _reloadCache();
+      final result = await _libraryPages(cursor);
+      if (generation != _generation || _locking) return;
+      final changed =
+          result['reset'] == true ||
+          [
+            'tracks',
+            'playlists',
+            'deleted_track_ids',
+            'deleted_playlist_ids',
+          ].any((key) => (result[key] as List).isNotEmpty);
+      if (changed || result['cursor'] != cursor) await db.applyLibrary(result);
+      if (changed) await _reloadCache();
       isOffline = false;
       await flushOutbox();
       if (!_locking) {
         unawaited(_background(_transfers!.runUploads()));
-        unawaited(_background(_transfers!.reconcile(tracks, playlists, pins)));
+        // No-op polling retries missing/failed work, but does not repeatedly
+        // scan verified files. Integrity checks have their own slower cadence.
+        if (changed || _wantedDownloads.any((id) => !_files.containsKey(id))) {
+          unawaited(
+            _background(_transfers!.reconcile(tracks, playlists, pins)),
+          );
+        }
       }
     } catch (e) {
       _backgroundError(e);
@@ -363,6 +503,109 @@ class AppController extends ChangeNotifier {
     } finally {
       _notify();
     }
+  }
+
+  /// Stage an entire revision before committing it and its durable cursor.
+  /// A revision conflict invalidates every page, including playlist fragments.
+  Future<Map<String, dynamic>> _libraryPages(int? cursor) async {
+    for (var attempt = 0; attempt < 3; attempt++) {
+      try {
+        final tracks = <Map<String, dynamic>>[];
+        final playlists = <String, Map<String, dynamic>>{};
+        final entryIds = <String, Set<String>>{};
+        final trackIds = <String>{};
+        final deletedTracks = <String>{}, deletedPlaylists = <String>{};
+        final tokens = <String>{};
+        String? token;
+        int? revision;
+        bool? reset;
+        var entriesRead = 0;
+        int recordCount() =>
+            tracks.length +
+            playlists.length +
+            deletedTracks.length +
+            deletedPlaylists.length +
+            entriesRead;
+        while (true) {
+          final beforeRecords = recordCount();
+          final result = await _api.json(
+            '/library',
+            query: {'paged': true, 'cursor': ?cursor, 'page_token': ?token},
+          );
+          if (_locking || _disposed) throw StateError('Account locked');
+          if (result['cursor'] is! int || result['reset'] is! bool) {
+            throw const FormatException('Invalid library snapshot');
+          }
+          revision ??= result['cursor'] as int;
+          reset ??= result['reset'] as bool;
+          if (revision != result['cursor'] || reset != result['reset']) {
+            throw const FormatException(
+              'Library snapshot changed between pages',
+            );
+          }
+          for (final value in result['tracks'] as List? ?? const []) {
+            final track = Map<String, dynamic>.from(value as Map);
+            if (!trackIds.add(track['id'] as String)) {
+              throw const FormatException('Duplicate library track');
+            }
+            tracks.add(track);
+          }
+          for (final value in result['playlists'] as List? ?? const []) {
+            final fragment = Map<String, dynamic>.from(value as Map);
+            final id = fragment['id'] as String;
+            final entries = List<dynamic>.of(
+              fragment.remove('entries') as List? ?? [],
+            );
+            final existing = playlists[id];
+            if (existing == null) {
+              playlists[id] = {...fragment, 'entries': <dynamic>[]};
+              entryIds[id] = {};
+            } else if (!mapEquals(
+              Map<String, dynamic>.of(existing)..remove('entries'),
+              fragment,
+            )) {
+              throw const FormatException('Conflicting playlist fragments');
+            }
+            for (final entry in entries) {
+              if (!entryIds[id]!.add((entry as Map)['id'] as String)) {
+                throw const FormatException('Duplicate playlist entry');
+              }
+            }
+            (playlists[id]!['entries'] as List).addAll(entries);
+            entriesRead += entries.length;
+          }
+          deletedTracks.addAll(
+            (result['deleted_track_ids'] as List? ?? []).cast<String>(),
+          );
+          deletedPlaylists.addAll(
+            (result['deleted_playlist_ids'] as List? ?? []).cast<String>(),
+          );
+          final next = result['next_page_token'];
+          if (next == null) {
+            return {
+              'cursor': revision,
+              'reset': reset,
+              'tracks': tracks,
+              'playlists': playlists.values.toList(),
+              'deleted_track_ids': deletedTracks.toList(),
+              'deleted_playlist_ids': deletedPlaylists.toList(),
+            };
+          }
+          if (recordCount() == beforeRecords) {
+            throw const FormatException('Library page made no progress');
+          }
+          if (next is! String || next.isEmpty || !tokens.add(next)) {
+            throw const FormatException(
+              'Invalid or repeated library page token',
+            );
+          }
+          token = next;
+        }
+      } on DioException catch (e) {
+        if (e.response?.statusCode != 409 || attempt == 2) rethrow;
+      }
+    }
+    throw StateError('Library pagination retries exhausted');
   }
 
   /// Acknowledged IDs alone are removed; failed/partial batches stay durable.
@@ -376,7 +619,7 @@ class AppController extends ChangeNotifier {
   Future<void> _flushOutbox() async {
     final db = _requireDatabase();
     while (!_locking) {
-      final batch = (await db.list('event')).take(500).toList();
+      final batch = await db.eventBatch();
       if (batch.isEmpty) break;
       final response = await _api.json(
         '/listening-events',
@@ -389,23 +632,17 @@ class AppController extends ChangeNotifier {
           .where(submitted.contains)
           .toSet();
       await db.acknowledgeEvents(ack);
-      pendingEventCount = (await db.list('event')).length;
+      pendingEventCount = await db.eventCount();
       _notify();
       if (ack.length < batch.length) break;
     }
   }
 
-  Track? trackById(String id) {
-    for (final track in _tracks) {
-      if (track.id == id) return track;
-    }
-    return null;
-  }
+  Track? trackById(String id) => _tracksById[id];
 
   String? localPath(String trackId) {
     if (!isAuthenticated || _locking) return null;
-    final value = _files[trackId];
-    return value != null && File(value).existsSync() ? value : null;
+    return _files[trackId];
   }
 
   String? artworkPath(Track track) {
@@ -459,10 +696,23 @@ class AppController extends ChangeNotifier {
   }
 
   Future<AudioSource> _resolveSource(Track track, bool localFirst) async {
-    _requireDatabase();
+    final db = _requireDatabase();
     if (localFirst) {
       final local = localPath(track.id);
-      if (local != null) return AudioSource(local, local: true);
+      if (local != null) {
+        if (await File(local).exists()) return AudioSource(local, local: true);
+        _setFiles(Map.of(_files)..remove(track.id));
+        _notifyDownloads();
+        // Do not let an unrelated file-only refresh resurrect a record that
+        // failed validation. Recheck under the DB transaction in case a
+        // concurrent download has already replaced the missing file.
+        await db.transaction(() async {
+          final record = await db.get('file', track.id);
+          if (record?['path'] == local && !await File(local).exists()) {
+            await db.remove('file', track.id);
+          }
+        });
+      }
     }
     return AudioSource(
       await audioUrl(track.id),
@@ -620,7 +870,7 @@ class AppController extends ChangeNotifier {
     final generation = _generation;
     final operation = () async {
       await action(transfers);
-      if (!_locking && generation == _generation) await _reloadCache();
+      if (!_locking && generation == _generation) await _reloadUploads();
     }();
     _uploadOperations.add(operation);
     return operation.whenComplete(() => _uploadOperations.remove(operation));
@@ -668,15 +918,32 @@ class AppController extends ChangeNotifier {
       await _initializing;
     } catch (_) {}
     _retryTimer?.cancel();
-    await _closeAccount();
-    await playback.shutdown();
-    _disposed = true;
+    _integrityTimer?.cancel();
+    Object? failure;
+    StackTrace? failureStack;
+    try {
+      await _closeAccount();
+    } catch (e, stack) {
+      failure = e;
+      failureStack = stack;
+    }
+    try {
+      await playback.shutdown();
+    } catch (e, stack) {
+      failure ??= e;
+      failureStack ??= stack;
+    } finally {
+      _disposed = true;
+    }
+    if (failure != null) Error.throwWithStackTrace(failure, failureStack!);
   }
 
   @override
   void dispose() {
+    if (_notifierDisposed) return;
     _notifierDisposed = true;
-    playback.removeListener(_playbackChanged);
+    downloadChanges.dispose();
+    artworkChanges.dispose();
     unawaited(
       shutdown().catchError((Object e) {
         error = e.toString();

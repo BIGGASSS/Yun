@@ -30,6 +30,9 @@ class _LibraryScreenState extends State<LibraryScreen> {
   bool _descending = false, _selecting = false, _acting = false;
   final _selected = <String>{};
   Object? _accountScope;
+  Object? _viewKey;
+  List<Track> _filtered = const [], _visible = const [];
+  Map<String, List<Track>> _grouped = const {};
 
   Object get _scope =>
       (widget.app, widget.app.account?.server, widget.app.account?.userId);
@@ -131,34 +134,43 @@ class _LibraryScreenState extends State<LibraryScreen> {
       _selecting = false;
     }
     final query = _search.text.trim().toLowerCase();
-    final filtered = app.tracks
-        .where(
-          (track) =>
-              query.isEmpty ||
-              '${track.title} ${track.artist} ${track.album} ${track.albumArtist}'
-                  .toLowerCase()
-                  .contains(query),
-        )
-        .toList();
-    final groups = <String, List<Track>>{};
-    if (_view != 'Tracks') {
-      for (final track in filtered) {
-        groups.putIfAbsent(_groupKey(track), () => []).add(track);
-      }
-    }
-    var visible = _group == null ? filtered : groups[_group] ?? <Track>[];
     final albumDetail = _view == 'Albums' && _group != null;
     final trackView = _view == 'Tracks' || _group != null;
-    if (albumDetail) {
-      visible.sort((a, b) {
-        final disc = (a.discNumber ?? 0).compareTo(b.discNumber ?? 0);
-        return disc != 0
-            ? disc
-            : (a.trackNumber ?? 0).compareTo(b.trackNumber ?? 0);
-      });
-    }
     final sort = _sort ?? (albumDetail ? TrackSort.original : TrackSort.title);
-    visible = sortTracks(visible, sort, descending: _descending);
+    final viewKey = (app.tracks, query, _view, _group, sort, _descending);
+    if (_viewKey != viewKey) {
+      _viewKey = viewKey;
+      final filtered = app.tracks
+          .where(
+            (track) =>
+                query.isEmpty ||
+                '${track.title} ${track.artist} ${track.album} ${track.albumArtist}'
+                    .toLowerCase()
+                    .contains(query),
+          )
+          .toList();
+      final groups = <String, List<Track>>{};
+      if (_view != 'Tracks') {
+        for (final track in filtered) {
+          groups.putIfAbsent(_groupKey(track), () => []).add(track);
+        }
+      }
+      var visible = _group == null ? filtered : groups[_group] ?? <Track>[];
+      if (albumDetail) {
+        visible.sort((a, b) {
+          final disc = (a.discNumber ?? 0).compareTo(b.discNumber ?? 0);
+          return disc != 0
+              ? disc
+              : (a.trackNumber ?? 0).compareTo(b.trackNumber ?? 0);
+        });
+      }
+      _visible = sortTracks(visible, sort, descending: _descending);
+      _filtered = filtered;
+      _grouped = groups;
+    }
+    final visible = _visible;
+    final filtered = _filtered;
+    final groups = _grouped;
     // IDs survive reordering, but hidden/stale/account-scoped selections do not.
     final visibleIds = trackView && app.isAuthenticated
         ? visible.map((track) => track.id).toSet()

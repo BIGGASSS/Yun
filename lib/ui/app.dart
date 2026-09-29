@@ -7,6 +7,7 @@ import 'downloads_screen.dart';
 import 'library_screen.dart';
 import 'player.dart';
 import 'playlist_screen.dart';
+import 'selected_builder.dart';
 import 'settings_screen.dart';
 import 'stats_screen.dart';
 import 'theme.dart';
@@ -73,6 +74,25 @@ class _AppShellState extends State<_AppShell> {
   int _destination = 0;
   bool _queueVisible = false;
   final _searchFocus = FocusNode(debugLabel: 'Library search');
+  List<UploadJob>? _uploadSnapshot;
+  int _activeUploads = 0;
+
+  int _selectActiveUploads() {
+    final uploads = widget.app.uploads;
+    // Download byte ticks share this notifier; only scan new upload snapshots.
+    if (!identical(uploads, _uploadSnapshot)) {
+      _uploadSnapshot = uploads;
+      _activeUploads = uploads
+          .where(
+            (job) => switch (job.status) {
+              'queued' || 'uploading' || 'completing' || 'failed' => true,
+              _ => false,
+            },
+          )
+          .length;
+    }
+    return _activeUploads;
+  }
 
   static const _labels = [
     'Library',
@@ -348,16 +368,6 @@ class _AppShellState extends State<_AppShell> {
 
   Widget _statusBar(bool desktop) {
     final app = widget.app;
-    final activeUploads = app.uploads
-        .where(
-          (job) => [
-            'queued',
-            'uploading',
-            'completing',
-            'failed',
-          ].contains(job.status),
-        )
-        .length;
     return Padding(
       padding: const EdgeInsets.fromLTRB(24, 8, 12, 0),
       child: Row(
@@ -381,15 +391,19 @@ class _AppShellState extends State<_AppShell> {
               ),
             ),
           if (app.isAuthenticated)
-            IconButton(
-              tooltip: activeUploads > 0
-                  ? 'Uploads, $activeUploads active or needing attention'
-                  : 'Show uploads',
-              onPressed: () => showUploads(context, app),
-              icon: Badge(
-                isLabelVisible: activeUploads > 0,
-                label: Text('$activeUploads'),
-                child: const Icon(Icons.cloud_upload_outlined),
+            SelectedBuilder<int>(
+              listenable: app.downloadChanges,
+              select: _selectActiveUploads,
+              builder: (context, activeUploads, _) => IconButton(
+                tooltip: activeUploads > 0
+                    ? 'Uploads, $activeUploads active or needing attention'
+                    : 'Show uploads',
+                onPressed: () => showUploads(context, app),
+                icon: Badge(
+                  isLabelVisible: activeUploads > 0,
+                  label: Text('$activeUploads'),
+                  child: const Icon(Icons.cloud_upload_outlined),
+                ),
               ),
             ),
           if (!app.isAuthenticated)

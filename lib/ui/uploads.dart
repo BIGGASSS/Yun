@@ -5,6 +5,7 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 
 import '../core/app_controller.dart';
+import 'selected_builder.dart';
 import 'widgets.dart';
 
 Future<void> pickUploads(
@@ -60,10 +61,11 @@ void showUploads(BuildContext context, AppController app) {
       content: SizedBox(
         width: 520,
         height: 380,
-        child: ListenableBuilder(
-          listenable: app,
-          builder: (context, _) {
-            if (app.uploads.isEmpty) {
+        child: SelectedBuilder(
+          listenable: Listenable.merge([app, app.downloadChanges]),
+          select: () => app.uploads,
+          builder: (context, uploads, _) {
+            if (uploads.isEmpty) {
               return const EmptyState(
                 icon: Icons.upload_file_outlined,
                 title: 'Ready when you are',
@@ -73,7 +75,7 @@ void showUploads(BuildContext context, AppController app) {
             final pending = <UploadJob>[];
             final done = <UploadJob>[];
             final failed = <UploadJob>[];
-            for (final job in app.uploads) {
+            for (final job in uploads) {
               switch (job.status) {
                 case 'done':
                   done.add(job);
@@ -182,10 +184,11 @@ void showUploads(BuildContext context, AppController app) {
         ),
       ),
       actions: [
-        ListenableBuilder(
-          listenable: app,
-          builder: (context, _) => TextButton(
-            onPressed: app.uploads.any((job) => job.status == 'done')
+        SelectedBuilder(
+          listenable: Listenable.merge([app, app.downloadChanges]),
+          select: () => app.uploads,
+          builder: (context, uploads, _) => TextButton(
+            onPressed: uploads.any((job) => job.status == 'done')
                 ? () => runUiAction(context, app.clearDoneUploads)
                 : null,
             child: const Text('Clear done'),

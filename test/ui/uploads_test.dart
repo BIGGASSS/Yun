@@ -25,19 +25,20 @@ class _UploadsApp extends AppController {
   void setStatus(String id, String status) {
     final index = _jobs.indexWhere((job) => job.id == id);
     _jobs[index] = _jobs[index].copyWith(status: status);
-    notifyListeners();
+    // Production upload progress no longer emits broad app notifications.
+    downloadChanges.notifyListeners();
   }
 
   void add(UploadJob job) {
     _jobs.add(job);
-    notifyListeners();
+    downloadChanges.notifyListeners();
   }
 
   @override
   Future<void> clearDoneUploads() async {
     clearCalls++;
     _jobs.removeWhere((job) => job.status == 'done');
-    notifyListeners();
+    downloadChanges.notifyListeners();
   }
 
   @override
@@ -182,7 +183,7 @@ void main() {
     expect(tester.widget<TextButton>(clearButton()).onPressed, isNotNull);
   });
 
-  testWidgets('regroups and updates counts while the dialog remains open', (
+  testWidgets('narrow upload notifications regroup the open dialog', (
     tester,
   ) async {
     final app = await open(tester, [

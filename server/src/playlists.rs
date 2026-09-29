@@ -11,16 +11,16 @@ use std::collections::HashSet;
 #[derive(Deserialize, Serialize, FromRow, Debug)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Entry {
-    id: String,
-    track_id: String,
+    pub(crate) id: String,
+    pub(crate) track_id: String,
 }
 #[derive(Serialize, Debug)]
 pub(crate) struct Playlist {
-    id: String,
-    name: String,
-    revision: i64,
-    entries: Vec<Entry>,
-    updated_at: i64,
+    pub(crate) id: String,
+    pub(crate) name: String,
+    pub(crate) revision: i64,
+    pub(crate) entries: Vec<Entry>,
+    pub(crate) updated_at: i64,
 }
 pub(crate) async fn load(
     conn: &mut SqliteConnection,
@@ -112,20 +112,23 @@ pub(crate) async fn replace(
             return Err(ApiError::bad("duplicate entry ID"));
         }
     }
+    let entries =
+        serde_json::to_string(&input.entries).map_err(|_| ApiError::bad("invalid entries"))?;
     let _guard = state.0.writes.lock().await;
     let mut tx = state.0.pool.begin().await?;
-    let old = load(&mut tx, &auth.user, &id).await?;
-    if old.revision != input.revision {
+    let old: i64 =
+        sqlx::query_scalar("SELECT revision FROM playlists WHERE user_id=? AND id=? AND deleted=0")
+            .bind(&auth.user)
+            .bind(&id)
+            .fetch_optional(&mut *tx)
+            .await?
+            .ok_or_else(ApiError::not_found)?;
+    if old != input.revision {
         return Err(ApiError::conflict("stale playlist revision"));
     }
-    let owned: HashSet<String> =
-        sqlx::query_scalar("SELECT id FROM tracks WHERE user_id=? AND deleted=0")
-            .bind(&auth.user)
-            .fetch_all(&mut *tx)
-            .await?
-            .into_iter()
-            .collect();
-    if input.entries.iter().any(|e| !owned.contains(&e.track_id)) {
+    let unknown: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM json_each(?) e LEFT JOIN tracks t ON t.id=json_extract(e.value,'$.track_id') AND t.user_id=? AND t.deleted=0 WHERE t.id IS NULL)")
+        .bind(&entries).bind(&auth.user).fetch_one(&mut *tx).await?;
+    if unknown {
         return Err(ApiError::bad("unknown track"));
     }
     let revision = bump(&mut tx, &auth.user).await?;
@@ -138,17 +141,8 @@ pub(crate) async fn replace(
         .execute(&mut *tx)
         .await?;
     sqlx::query("DELETE FROM playlist_entries WHERE playlist_id=? AND EXISTS(SELECT 1 FROM playlists WHERE id=? AND user_id=?)").bind(&id).bind(&id).bind(&auth.user).execute(&mut *tx).await?;
-    for (position, entry) in input.entries.into_iter().enumerate() {
-        sqlx::query(
-            "INSERT INTO playlist_entries(playlist_id,id,track_id,position) VALUES(?,?,?,?)",
-        )
-        .bind(&id)
-        .bind(entry.id)
-        .bind(entry.track_id)
-        .bind(position as i64)
-        .execute(&mut *tx)
-        .await?;
-    }
+    sqlx::query("INSERT INTO playlist_entries(playlist_id,id,track_id,position) SELECT ?,json_extract(value,'$.id'),json_extract(value,'$.track_id'),CAST(key AS INTEGER) FROM json_each(?)")
+        .bind(&id).bind(entries).execute(&mut *tx).await?;
     let result = load(&mut tx, &auth.user, &id).await?;
     tx.commit().await?;
     Ok(Json(result))
@@ -165,8 +159,14 @@ pub(crate) async fn remove(
 ) -> Result<StatusCode, ApiError> {
     let _guard = state.0.writes.lock().await;
     let mut tx = state.0.pool.begin().await?;
-    let old = load(&mut tx, &auth.user, &id).await?;
-    if old.revision != input.revision {
+    let old: i64 =
+        sqlx::query_scalar("SELECT revision FROM playlists WHERE user_id=? AND id=? AND deleted=0")
+            .bind(&auth.user)
+            .bind(&id)
+            .fetch_optional(&mut *tx)
+            .await?
+            .ok_or_else(ApiError::not_found)?;
+    if old != input.revision {
         return Err(ApiError::conflict("stale playlist revision"));
     }
     let revision = bump(&mut tx, &auth.user).await?;

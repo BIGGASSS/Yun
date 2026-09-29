@@ -73,9 +73,12 @@ class _LibraryApp extends ChangeNotifier implements AppController {
       random: _LastRandom(),
       enableSystemControls: false,
     );
-    playback.addListener(notifyListeners);
   }
 
+  @override
+  final downloadChanges = ChangeNotifier();
+  @override
+  final artworkChanges = ChangeNotifier();
   final engine = FakeEngine();
   @override
   late final PlaybackController playback;
@@ -94,7 +97,8 @@ class _LibraryApp extends ChangeNotifier implements AppController {
 
   @override
   void dispose() {
-    playback.removeListener(notifyListeners);
+    downloadChanges.dispose();
+    artworkChanges.dispose();
     playback.dispose();
     super.dispose();
   }
@@ -151,7 +155,7 @@ class _LibraryApp extends ChangeNotifier implements AppController {
   @override
   Future<void> deleteTrack(String id) async {
     deleted.add(id);
-    library.removeWhere((track) => track.id == id);
+    library = library.where((track) => track.id != id).toList();
     notifyListeners();
   }
 
@@ -608,7 +612,7 @@ void main() {
     'stale IDs and account changes clear selection even when IDs overlap',
     (tester, app) async {
       await _selectAll(tester);
-      app.library.removeWhere((track) => track.id == 'alpha');
+      app.library = app.library.where((track) => track.id != 'alpha').toList();
       app.update();
       await tester.pumpAndSettle();
       expect(_selectedIds(tester), ['bravo', 'coda', 'zulu']);
