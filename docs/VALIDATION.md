@@ -4,6 +4,27 @@ This document separates implemented automation from executed evidence. A green
 compiler/unit-test run does not certify audio playback, background behavior,
 secure storage, recovery, signing, or third-party redistribution rights.
 
+## Tray branding and primary-click follow-up — local only
+
+For integrated code `f5c990e`, local formatting/analysis, **401 Flutter tests**
+(one opt-in native-audio smoke skipped), **6 artwork checks**, **12 Rust tests**,
+and the Linux release build passed. Concurrent collection/playback changes were
+preserved. **Hosted CI was intentionally skipped at the user's request**; the
+older hosted artifacts below do not include this follow-up.
+
+All tray artwork is generated from the unchanged `assets/icon.png`: Linux PNG,
+macOS full-color/non-template PNG, and a multi-size Windows ICO. Pixel checks
+verify both PNGs and every ICO frame against the source. Channel tests verify
+macOS's bundled bytes and left-click versus right-click behavior on Windows/macOS.
+
+Linux now exports a StatusNotifierItem (`ItemIsMenu=false`) and DBusMenu directly,
+rather than using AppIndicator's menu-only activation. Private-bus tests exercise
+primary activation, menu actions, protocol signatures, straight-ARGB icon pixels,
+acknowledged registration, watcher restart, host loss, timeouts and disposal. They
+do not access a host session bus or wallet. Actual desktop icon rendering and
+focus behavior still need manual confirmation; Windows/macOS native builds were
+not rerun for this change. Restart Yun to replace an already-created tray icon.
+
 ## Desktop minimize-to-tray follow-up
 
 **All nine hosted CI jobs passed** for integrated code commit `e260abf`:
