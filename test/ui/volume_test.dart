@@ -5,6 +5,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:yun/core/app_controller.dart';
 import 'package:yun/core/playback_controller.dart' show AudioSource;
 import 'package:yun/ui/app.dart';
+import 'package:yun/ui/player_icons.dart';
 
 import '../core/fakes.dart';
 
@@ -221,7 +222,13 @@ void main() {
       await tester.tap(find.text('Close'));
       await tester.pumpAndSettle();
       expect(slider, findsNothing);
-      expect(find.byIcon(Icons.volume_off_rounded), findsOneWidget);
+      expect(
+        find.byWidgetPredicate(
+          (widget) =>
+              widget is PlayerIcon && widget.glyph == PlayerGlyph.volumeMute,
+        ),
+        findsOneWidget,
+      );
       expect(tester.takeException(), isNull);
     },
   );

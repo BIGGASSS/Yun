@@ -4,10 +4,15 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart' hide RepeatMode;
 
 import '../core/app_controller.dart';
+import 'player_icons.dart';
 import 'track_widgets.dart';
 import 'widgets.dart';
 
-bool get _desktopVolume =>
+/// Desktop-class platforms (Linux, macOS, Windows; never web) get the
+/// redesigned [DesktopPlayerBar] and inline volume controls. Gated on the
+/// actual platform, never on window width: a wide Android or iOS window keeps
+/// the legacy touch bar.
+bool get _desktopPlatform =>
     !kIsWeb &&
     switch (defaultTargetPlatform) {
       TargetPlatform.linux ||
@@ -15,6 +20,8 @@ bool get _desktopVolume =>
       TargetPlatform.windows => true,
       _ => false,
     };
+
+bool get _desktopVolume => _desktopPlatform;
 
 class PlayerBar extends StatelessWidget {
   const PlayerBar({
@@ -30,146 +37,374 @@ class PlayerBar extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final player = app.playback;
-    final track = player.currentTrack;
-    if (track == null && compact) return const SizedBox.shrink();
+    if (player.currentTrack == null && compact) return const SizedBox.shrink();
     final scheme = Theme.of(context).colorScheme;
     return Material(
       color: scheme.surfaceContainerLow,
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          if (player.isBuffering)
-            const QuietProgress(label: 'Buffering audio')
-          else if (compact)
-            QuietProgress(
-              value: player.duration.inMilliseconds > 0
-                  ? (player.position.inMilliseconds /
-                            player.duration.inMilliseconds)
-                        .clamp(0, 1)
-                  : 0,
-              label: 'Playback progress',
-            ),
-          Padding(
-            padding: EdgeInsets.symmetric(
-              horizontal: compact ? 8 : 20,
-              vertical: 8,
-            ),
-            child: Row(
-              children: [
-                Expanded(
-                  flex: compact ? 1 : 3,
-                  child: InkWell(
-                    borderRadius: BorderRadius.circular(12),
-                    onTap: () => showNowPlaying(context, app),
-                    child: Semantics(
-                      button: true,
-                      label: 'Open now playing',
-                      child: Padding(
-                        padding: const EdgeInsets.all(4),
-                        child: Row(
-                          children: [
-                            TrackArtwork(
-                              app: app,
-                              track: track,
-                              size: compact ? 40 : 52,
-                            ),
-                            const SizedBox(width: 12),
-                            Expanded(
-                              child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  Text(
-                                    track?.title ?? 'Nothing playing',
-                                    maxLines: 1,
-                                    overflow: TextOverflow.ellipsis,
-                                    style: Theme.of(context)
-                                        .textTheme
-                                        .titleSmall,
-                                  ),
-                                  Text(
-                                    track?.artist ??
-                                        'Choose a track from your library',
-                                    maxLines: 1,
-                                    overflow: TextOverflow.ellipsis,
-                                    style: Theme.of(context)
-                                        .textTheme
-                                        .bodySmall,
-                                  ),
-                                ],
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                    ),
+      child: compact
+          ? _CompactPlayerBar(app: app)
+          : _desktopPlatform
+          ? DesktopPlayerBar(app: app, onQueue: onQueue)
+          : _WideTouchPlayerBar(app: app, onQueue: onQueue),
+    );
+  }
+}
+
+/// Narrow-window and mobile strip. Kept as-is for Android, which never shows
+/// volume controls here; only the desktop-only volume button gains the local
+/// vector glyphs.
+class _CompactPlayerBar extends StatelessWidget {
+  const _CompactPlayerBar({required this.app});
+  final AppController app;
+
+  @override
+  Widget build(BuildContext context) {
+    final player = app.playback;
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        if (player.isBuffering)
+          const QuietProgress(label: 'Buffering audio')
+        else
+          QuietProgress(
+            value: player.duration.inMilliseconds > 0
+                ? (player.position.inMilliseconds /
+                          player.duration.inMilliseconds)
+                      .clamp(0, 1)
+                : 0,
+            label: 'Playback progress',
+          ),
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
+          child: Row(
+            children: [
+              Expanded(child: _MetadataButton(app: app, artSize: 40)),
+              IconButton.filledTonal(
+                tooltip: player.isPlaying ? 'Pause' : 'Play',
+                onPressed: () => runUiAction(context, player.toggle),
+                icon: Icon(
+                  player.isPlaying
+                      ? Icons.pause_rounded
+                      : Icons.play_arrow_rounded,
+                ),
+              ),
+              IconButton(
+                tooltip: 'Next track',
+                onPressed: () => runUiAction(context, player.next),
+                icon: const Icon(Icons.skip_next_rounded),
+              ),
+              if (_desktopVolume)
+                IconButton(
+                  tooltip: 'Volume',
+                  onPressed: () => _showVolume(context, app),
+                  icon: PlayerIcon(
+                    player.isMuted
+                        ? PlayerGlyph.volumeMute
+                        : PlayerGlyph.volumeHigh,
                   ),
                 ),
-                if (!compact)
-                  Expanded(
-                    flex: 5,
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        PlaybackButtons(app: app, small: true),
-                        PlaybackSeek(app: app),
-                      ],
-                    ),
-                  ),
-                if (compact)
-                  IconButton.filledTonal(
-                    tooltip: player.isPlaying ? 'Pause' : 'Play',
-                    onPressed: () => runUiAction(context, player.toggle),
-                    icon: Icon(
-                      player.isPlaying
-                          ? Icons.pause_rounded
-                          : Icons.play_arrow_rounded,
-                    ),
-                  ),
-                if (compact)
-                  IconButton(
-                    tooltip: 'Next track',
-                    onPressed: () => runUiAction(context, player.next),
-                    icon: const Icon(Icons.skip_next_rounded),
-                  ),
-                if (compact && _desktopVolume)
-                  IconButton(
-                    tooltip: 'Volume',
-                    onPressed: () => _showVolume(context, app),
-                    icon: Icon(
-                      player.isMuted
-                          ? Icons.volume_off_rounded
-                          : Icons.volume_up_rounded,
-                    ),
-                  ),
-                if (!compact && _desktopVolume)
-                  SizedBox(width: 168, child: PlaybackVolume(app: app)),
-                if (!compact && _desktopVolume)
-                  IconButton(
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+/// Wide-window player strip for touch platforms (Android/iOS tablets,
+/// foldables, and web): the pre-redesign flex layout with Material icons.
+/// Width alone never opts a touch platform into [DesktopPlayerBar]; that
+/// redesign is desktop-platform only.
+class _WideTouchPlayerBar extends StatelessWidget {
+  const _WideTouchPlayerBar({required this.app, required this.onQueue});
+  final AppController app;
+  final VoidCallback onQueue;
+
+  @override
+  Widget build(BuildContext context) {
+    final player = app.playback;
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        if (player.isBuffering) const QuietProgress(label: 'Buffering audio'),
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
+          child: Row(
+            children: [
+              Expanded(flex: 3, child: _MetadataButton(app: app, artSize: 52)),
+              Expanded(
+                flex: 5,
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    PlaybackButtons(app: app, small: true),
+                    PlaybackSeek(app: app),
+                  ],
+                ),
+              ),
+              Expanded(
+                flex: 2,
+                child: Align(
+                  alignment: Alignment.centerRight,
+                  child: IconButton(
                     tooltip: 'Show queue',
                     onPressed: onQueue,
                     icon: const Icon(Icons.queue_music_rounded),
                   ),
-                if (!compact && !_desktopVolume)
+                ),
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+/// Wide-window player strip: artwork plus truncated metadata on the left, a
+/// bounded transport and seek column centered in the bar, and a compact
+/// volume plus queue cluster on the right.
+class DesktopPlayerBar extends StatelessWidget {
+  const DesktopPlayerBar({super.key, required this.app, required this.onQueue});
+  final AppController app;
+  final VoidCallback onQueue;
+
+  /// Upper bound for the centered seek column so the slider stays deliberate
+  /// instead of sprawling across ultrawide windows.
+  static const double maxSeekColumnWidth = 640;
+
+  @override
+  Widget build(BuildContext context) {
+    final player = app.playback;
+    final scheme = Theme.of(context).colorScheme;
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        if (player.isBuffering) const QuietProgress(label: 'Buffering audio'),
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+          child: LayoutBuilder(
+            builder: (context, constraints) {
+              // Equal flexible side zones keep the middle column optically
+              // centered no matter what the side content does.
+              final centerWidth = (constraints.maxWidth * .52).clamp(
+                360.0,
+                maxSeekColumnWidth,
+              );
+              return Row(
+                children: [
                   Expanded(
-                    flex: 2,
                     child: Align(
-                      alignment: Alignment.centerRight,
-                      child: IconButton(
-                        tooltip: 'Show queue',
-                        onPressed: onQueue,
-                        icon: const Icon(Icons.queue_music_rounded),
+                      alignment: Alignment.centerLeft,
+                      child: ConstrainedBox(
+                        constraints: const BoxConstraints(maxWidth: 300),
+                        child: _MetadataButton(app: app, artSize: 44),
                       ),
                     ),
                   ),
-              ],
-            ),
+                  SizedBox(
+                    width: centerWidth,
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        _DesktopTransport(app: app),
+                        SizedBox(
+                          height: 26,
+                          child: SliderTheme(
+                            data: _slimSliderTheme(scheme),
+                            child: PlaybackSeek(app: app),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  Expanded(
+                    child: Align(
+                      alignment: Alignment.centerRight,
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          if (_desktopVolume)
+                            SizedBox(
+                              width: 140,
+                              child: PlaybackVolume(app: app),
+                            ),
+                          IconButton(
+                            tooltip: 'Show queue',
+                            onPressed: onQueue,
+                            constraints: const BoxConstraints.tightFor(
+                              width: 36,
+                              height: 36,
+                            ),
+                            iconSize: 20,
+                            icon: const PlayerIcon(PlayerGlyph.queue),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ],
+              );
+            },
           ),
-        ],
+        ),
+      ],
+    );
+  }
+}
+
+/// Artwork plus truncated title/artist that opens the now playing sheet.
+class _MetadataButton extends StatelessWidget {
+  const _MetadataButton({required this.app, required this.artSize});
+  final AppController app;
+  final double artSize;
+
+  @override
+  Widget build(BuildContext context) {
+    final track = app.playback.currentTrack;
+    return InkWell(
+      borderRadius: BorderRadius.circular(12),
+      onTap: () => showNowPlaying(context, app),
+      child: Semantics(
+        button: true,
+        label: 'Open now playing',
+        child: Padding(
+          padding: const EdgeInsets.all(4),
+          child: Row(
+            children: [
+              TrackArtwork(app: app, track: track, size: artSize),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      track?.title ?? 'Nothing playing',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: Theme.of(context).textTheme.titleSmall,
+                    ),
+                    Text(
+                      track?.artist ?? 'Choose a track from your library',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: Theme.of(context).textTheme.bodySmall,
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
       ),
     );
   }
 }
+
+/// Compact transport cluster for the desktop strip: a filled play/pause
+/// anchor with evenly spaced skip, shuffle, and repeat buttons using local
+/// vector glyphs with a consistent stroke.
+class _DesktopTransport extends StatelessWidget {
+  const _DesktopTransport({required this.app});
+  final AppController app;
+
+  @override
+  Widget build(BuildContext context) {
+    final player = app.playback;
+    final scheme = Theme.of(context).colorScheme;
+    // A filled secondary container plus primary glyph makes the persistent
+    // shuffle/repeat selection unmistakable in a low-chroma theme.
+    final toggleStyle = ButtonStyle(
+      foregroundColor: WidgetStateProperty.resolveWith(
+        (states) => states.contains(WidgetState.selected)
+            ? scheme.primary
+            : scheme.onSurfaceVariant,
+      ),
+      backgroundColor: WidgetStateProperty.resolveWith(
+        (states) => states.contains(WidgetState.selected)
+            ? scheme.secondaryContainer
+            : Colors.transparent,
+      ),
+    );
+    return Row(
+      mainAxisAlignment: MainAxisAlignment.center,
+      children: [
+        IconButton(
+          tooltip: player.shuffle ? 'Turn shuffle off' : 'Turn shuffle on',
+          isSelected: player.shuffle,
+          style: toggleStyle,
+          onPressed: () => player.setShuffle(!player.shuffle),
+          constraints: const BoxConstraints.tightFor(width: 36, height: 36),
+          iconSize: 19,
+          icon: const PlayerIcon(PlayerGlyph.shuffle),
+        ),
+        const SizedBox(width: 6),
+        IconButton(
+          tooltip: 'Previous track',
+          onPressed: () => runUiAction(context, player.previous),
+          constraints: const BoxConstraints.tightFor(width: 38, height: 38),
+          iconSize: 22,
+          icon: const PlayerIcon(PlayerGlyph.previous),
+        ),
+        const SizedBox(width: 6),
+        IconButton.filled(
+          tooltip: player.isPlaying ? 'Pause' : 'Play',
+          onPressed: player.currentTrack == null
+              ? null
+              : () => runUiAction(context, player.toggle),
+          constraints: const BoxConstraints.tightFor(width: 40, height: 40),
+          iconSize: 24,
+          icon: PlayerIcon(
+            player.isPlaying ? PlayerGlyph.pause : PlayerGlyph.play,
+          ),
+        ),
+        const SizedBox(width: 6),
+        IconButton(
+          tooltip: 'Next track',
+          onPressed: () => runUiAction(context, player.next),
+          constraints: const BoxConstraints.tightFor(width: 38, height: 38),
+          iconSize: 22,
+          icon: const PlayerIcon(PlayerGlyph.next),
+        ),
+        const SizedBox(width: 6),
+        IconButton(
+          tooltip: 'Repeat: ${player.repeatMode.name}. Change repeat mode',
+          isSelected: player.repeatMode != RepeatMode.off,
+          style: toggleStyle,
+          onPressed: () => player.setRepeat(switch (player.repeatMode) {
+            RepeatMode.off => RepeatMode.all,
+            RepeatMode.all => RepeatMode.one,
+            RepeatMode.one => RepeatMode.off,
+          }),
+          constraints: const BoxConstraints.tightFor(width: 36, height: 36),
+          iconSize: 19,
+          icon: PlayerIcon(
+            player.repeatMode == RepeatMode.one
+                ? PlayerGlyph.repeatOne
+                : PlayerGlyph.repeat,
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+/// Slim slider geometry for the desktop strip: a 3px track with a small thumb
+/// and zero padding inflation instead of the oversized Material defaults.
+SliderThemeData _slimSliderTheme(ColorScheme scheme) => SliderThemeData(
+  trackHeight: 3,
+  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 7),
+  thumbShape: const RoundSliderThumbShape(
+    enabledThumbRadius: 6,
+    elevation: 0,
+    pressedElevation: 0,
+  ),
+  overlayShape: const RoundSliderOverlayShape(overlayRadius: 12),
+  activeTrackColor: scheme.primary,
+  inactiveTrackColor: scheme.surfaceContainerHighest,
+  thumbColor: scheme.primary,
+);
 
 /// App-local gain, not the operating system's master volume.
 class PlaybackVolume extends StatelessWidget {
@@ -184,26 +419,31 @@ class PlaybackVolume extends StatelessWidget {
         IconButton(
           tooltip: player.isMuted ? 'Unmute' : 'Mute',
           onPressed: () => runUiAction(context, player.toggleMute),
-          icon: Icon(
+          constraints: const BoxConstraints.tightFor(width: 36, height: 36),
+          iconSize: 20,
+          icon: PlayerIcon(
             player.isMuted
-                ? Icons.volume_off_rounded
+                ? PlayerGlyph.volumeMute
                 : player.volume < 50
-                ? Icons.volume_down_rounded
-                : Icons.volume_up_rounded,
+                ? PlayerGlyph.volumeLow
+                : PlayerGlyph.volumeHigh,
           ),
         ),
         Expanded(
           child: Semantics(
             label: 'Volume',
-            child: Slider(
-              key: const ValueKey('playback-volume-slider'),
-              value: player.volume,
-              max: 100,
-              divisions: 100,
-              label: '${player.volume.round()}%',
-              semanticFormatterCallback: (value) => '${value.round()}%',
-              onChanged: (value) =>
-                  runUiAction(context, () => player.setVolume(value)),
+            child: SliderTheme(
+              data: _slimSliderTheme(Theme.of(context).colorScheme),
+              child: Slider(
+                key: const ValueKey('playback-volume-slider'),
+                value: player.volume,
+                max: 100,
+                divisions: 100,
+                label: '${player.volume.round()}%',
+                semanticFormatterCallback: (value) => '${value.round()}%',
+                onChanged: (value) =>
+                    runUiAction(context, () => player.setVolume(value)),
+              ),
             ),
           ),
         ),

@@ -17,6 +17,10 @@ the specified major. Core dependencies must also be installed before running
   now-playing sheet. Compact windows use a Volume button/dialog. Muting remembers
   the previous positive level; sliders support keyboard input and spoken percent
   values. Android keeps its existing system-volume controls, even on wide screens.
+- Desktop's expanded player uses balanced side zones around centered transport,
+  a seek column capped at 640px, slim slider tracks, and local vector glyphs
+  instead of icon-font glyphs. Selected shuffle/repeat have a persistent highlight.
+  Touch platforms retain their original layout, including wide Android tablets.
 - Library search, albums/artists, metadata and immediate artwork replacement.
 - Ordered playlists with unique entry IDs, explicit duplicates, drag handles
   and accessible move-up/down menus.
@@ -32,5 +36,9 @@ the specified major. Core dependencies must also be installed before running
 - Server login/logout, theme light/dark/system (persisted by bootstrap), device
   text scaling/reduced motion, labeled controls, Ctrl/Cmd shortcuts.
 
-Tests: `test/ui/` and `test/core/app_artwork_test.dart`. Production screens
-contain no mock records; fixtures live only in the test directories.
+Tests: `test/ui/` and `test/core/app_artwork_test.dart`. The desktop player has
+layout/interaction tests and dark/light/840px goldens in `test/ui/goldens/`.
+Goldens intentionally use Flutter's deterministic test font, not desktop fonts;
+regenerate only after visual review with
+`fvm flutter test test/ui/player_bar_screenshot_test.dart --update-goldens`.
+Production screens contain no mock records; fixtures live only in test directories.
