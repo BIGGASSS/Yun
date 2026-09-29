@@ -24,8 +24,14 @@ the specified major. Core dependencies must also be installed before running
   instead of icon-font glyphs. Selected shuffle/repeat have a persistent highlight.
   Touch platforms retain their original layout, including wide Android tablets.
 - Library search, albums/artists, metadata and immediate artwork replacement.
-- Ordered playlists with unique entry IDs, explicit duplicates, drag handles
-  and accessible move-up/down menus.
+  Track sorting and checkbox multiselection support filtered select-all, bulk
+  playback, playlist addition, offline pinning and confirmed deletion.
+- Playlists and their entries support sorting, multiselection and select-all.
+  Sorting is view-only; drag handles and move-up/down menus edit saved order
+  only in ascending playlist-order view. Bulk removal preserves library tracks.
+  Add tracks offers sorting and filtered select-all, excludes existing members,
+  and adds each track at most once. Legacy repeated entries remain removable;
+  new repeats are not offered, including additions from Library.
 - Downloads show per-track byte progress, queued/verifying/failed states, pinned
   selections, storage totals, removal and retries. Artwork is cached privately
   and remains visible offline.

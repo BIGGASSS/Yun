@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../core/app_controller.dart';
+import 'collection_controls.dart';
 import 'track_widgets.dart';
 import 'widgets.dart';
 
@@ -25,9 +26,88 @@ class _LibraryScreenState extends State<LibraryScreen> {
   final _search = TextEditingController();
   String _view = 'Tracks';
   String? _group;
+  TrackSort? _sort;
+  bool _descending = false, _selecting = false, _acting = false;
+  final _selected = <String>{};
+  Object? _accountScope;
+
+  Object get _scope =>
+      (widget.app, widget.app.account?.server, widget.app.account?.userId);
+
+  @override
+  void initState() {
+    super.initState();
+    widget.app.addListener(_appChanged);
+  }
+
+  @override
+  void didUpdateWidget(covariant LibraryScreen oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.app != widget.app) {
+      oldWidget.app.removeListener(_appChanged);
+      widget.app.addListener(_appChanged);
+    }
+  }
+
+  void _appChanged() {
+    if (mounted) setState(() {});
+  }
+
+  void _openGroup(String? group) => setState(() {
+    _group = group;
+    _selected.clear();
+    _selecting = false;
+    _sort = null;
+    _descending = false;
+  });
+
+  Future<void> _bulk(List<Track> tracks, String action) async {
+    final app = widget.app;
+    final scope = _scope;
+    bool stillSelected(Track track) =>
+        mounted &&
+        _scope == scope &&
+        app.isAuthenticated &&
+        _selected.contains(track.id);
+    setState(() => _acting = true);
+    try {
+      await runUiAction(context, () async {
+        if (action == 'delete' &&
+            !await confirmAction(
+              context,
+              title: 'Delete ${tracks.length} selected tracks?',
+              message: 'The selected tracks will be removed from your library and playlists on all devices.',
+            )) {
+          return;
+        }
+        final current = tracks.where(stillSelected).toList();
+        if (!mounted || current.isEmpty) return;
+        switch (action) {
+          case 'play':
+            await app.play(current.first, queue: current);
+          case 'playlist':
+            await addTracksToPlaylist(context, app, current);
+          case 'offline':
+            for (final track in current) {
+              if (!stillSelected(track)) continue;
+              await app.pinTrack(track.id);
+            }
+          case 'delete':
+            for (final track in current) {
+              if (!stillSelected(track)) continue;
+              await app.deleteTrack(track.id);
+              _selected.remove(track.id);
+            }
+        }
+      });
+    } finally {
+      if (mounted) setState(() => _acting = false);
+    }
+  }
 
   @override
   void dispose() {
+    widget.app.removeListener(_appChanged);
     _search.dispose();
     super.dispose();
   }
@@ -45,6 +125,11 @@ class _LibraryScreenState extends State<LibraryScreen> {
   @override
   Widget build(BuildContext context) {
     final app = widget.app;
+    if (_accountScope != _scope || !app.isAuthenticated) {
+      _accountScope = _scope;
+      _selected.clear();
+      _selecting = false;
+    }
     final query = _search.text.trim().toLowerCase();
     final filtered = app.tracks
         .where(
@@ -61,8 +146,10 @@ class _LibraryScreenState extends State<LibraryScreen> {
         groups.putIfAbsent(_groupKey(track), () => []).add(track);
       }
     }
-    final visible = _group == null ? filtered : groups[_group] ?? <Track>[];
-    if (_view == 'Albums' && _group != null) {
+    var visible = _group == null ? filtered : groups[_group] ?? <Track>[];
+    final albumDetail = _view == 'Albums' && _group != null;
+    final trackView = _view == 'Tracks' || _group != null;
+    if (albumDetail) {
       visible.sort((a, b) {
         final disc = (a.discNumber ?? 0).compareTo(b.discNumber ?? 0);
         return disc != 0
@@ -70,6 +157,17 @@ class _LibraryScreenState extends State<LibraryScreen> {
             : (a.trackNumber ?? 0).compareTo(b.trackNumber ?? 0);
       });
     }
+    final sort = _sort ?? (albumDetail ? TrackSort.original : TrackSort.title);
+    visible = sortTracks(visible, sort, descending: _descending);
+    // IDs survive reordering, but hidden/stale/account-scoped selections do not.
+    final visibleIds = trackView && app.isAuthenticated
+        ? visible.map((track) => track.id).toSet()
+        : <String>{};
+    _selected.retainAll(visibleIds);
+    final selectedTracks = visible
+        .where((track) => _selected.contains(track.id))
+        .toList();
+    final canAct = selectedTracks.isNotEmpty && !_acting && !app.busy;
     return LayoutBuilder(
       builder: (context, constraints) => CustomScrollView(
         slivers: [
@@ -79,8 +177,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
               children: [
                 SectionHeading(
                   'Library',
-                  subtitle:
-                      '${app.tracks.length} tracks · Your music, your space',
+                  subtitle: '${app.tracks.length} tracks',
                   actions: [
                     IconButton(
                       tooltip: 'Sync library',
@@ -102,7 +199,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
                     controller: _search,
                     focusNode: widget.searchFocus,
                     textInputAction: TextInputAction.search,
-                    onChanged: (_) => setState(() => _group = null),
+                    onChanged: (_) => setState(() {}),
                     decoration: InputDecoration(
                       hintText: 'Search tracks, albums, artists',
                       prefixIcon: const Icon(Icons.search_rounded),
@@ -110,10 +207,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
                           ? null
                           : IconButton(
                               tooltip: 'Clear search',
-                              onPressed: () => setState(() {
-                                _search.clear();
-                                _group = null;
-                              }),
+                              onPressed: () => setState(_search.clear),
                               icon: const Icon(Icons.close_rounded),
                             ),
                     ),
@@ -129,10 +223,10 @@ class _LibraryScreenState extends State<LibraryScreen> {
                         ChoiceChip(
                           label: Text(view),
                           selected: _view == view,
-                          onSelected: (_) => setState(() {
+                          onSelected: (_) {
                             _view = view;
-                            _group = null;
-                          }),
+                            _openGroup(null);
+                          },
                         ),
                     ],
                   ),
@@ -144,7 +238,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
                       children: [
                         IconButton(
                           tooltip: 'Back to ${_view.toLowerCase()}',
-                          onPressed: () => setState(() => _group = null),
+                          onPressed: () => _openGroup(null),
                           icon: const Icon(Icons.arrow_back_rounded),
                         ),
                         Expanded(
@@ -153,7 +247,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
                             style: Theme.of(context).textTheme.titleLarge,
                           ),
                         ),
-                        if (_view == 'Albums' && visible.isNotEmpty)
+                        if (albumDetail && visible.isNotEmpty)
                           IconButton(
                             tooltip: 'Keep album offline',
                             onPressed: () => runUiAction(
@@ -177,6 +271,97 @@ class _LibraryScreenState extends State<LibraryScreen> {
                                 ),
                           icon: const Icon(Icons.play_arrow_rounded),
                         ),
+                      ],
+                    ),
+                  ),
+                if (app.isAuthenticated && trackView)
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(24, 8, 24, 12),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        Wrap(
+                          spacing: 12,
+                          runSpacing: 8,
+                          crossAxisAlignment: WrapCrossAlignment.center,
+                          children: [
+                            TrackSortControl(
+                              value: sort,
+                              descending: _descending,
+                              allowOriginal: albumDetail,
+                              originalLabel: 'Album order',
+                              onChanged: (value) =>
+                                  setState(() => _sort = value),
+                              onToggleDirection: () =>
+                                  setState(() => _descending = !_descending),
+                            ),
+                            TextButton.icon(
+                              onPressed: _acting
+                                  ? null
+                                  : () => setState(() {
+                                      _selecting = !_selecting;
+                                      _selected.clear();
+                                    }),
+                              icon: Icon(
+                                _selecting
+                                    ? Icons.close_rounded
+                                    : Icons.checklist_rounded,
+                              ),
+                              label: Text(
+                                _selecting ? 'Done selecting' : 'Select tracks',
+                              ),
+                            ),
+                          ],
+                        ),
+                        if (_selecting)
+                          SelectionControls(
+                            selectedCount: _selected.length,
+                            allSelected:
+                                visibleIds.isNotEmpty &&
+                                _selected.length == visibleIds.length,
+                            onSelectAll: visibleIds.isEmpty || _acting
+                                ? null
+                                : () => setState(() {
+                                    if (_selected.containsAll(visibleIds)) {
+                                      _selected.removeAll(visibleIds);
+                                    } else {
+                                      _selected.addAll(visibleIds);
+                                    }
+                                  }),
+                            onClear: _selected.isEmpty || _acting
+                                ? null
+                                : () => setState(_selected.clear),
+                            actions: [
+                              TextButton.icon(
+                                onPressed: canAct
+                                    ? () => _bulk(selectedTracks, 'play')
+                                    : null,
+                                icon: const Icon(Icons.play_arrow_rounded),
+                                label: const Text('Play selected'),
+                              ),
+                              TextButton.icon(
+                                onPressed: canAct && !app.isOffline
+                                    ? () => _bulk(selectedTracks, 'playlist')
+                                    : null,
+                                icon: const Icon(Icons.playlist_add_rounded),
+                                label: const Text('Add selected to playlist'),
+                              ),
+                              TextButton.icon(
+                                onPressed: canAct
+                                    ? () => _bulk(selectedTracks, 'offline')
+                                    : null,
+                                icon: const Icon(Icons.download_outlined),
+                                label: const Text('Keep selected offline'),
+                              ),
+                              TextButton.icon(
+                                onPressed: canAct && !app.isOffline
+                                    ? () => _bulk(selectedTracks, 'delete')
+                                    : null,
+                                icon: const Icon(Icons.delete_outline_rounded),
+                                label: const Text('Delete selected'),
+                              ),
+                            ],
+                          ),
                       ],
                     ),
                   ),
@@ -210,7 +395,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
                 ),
               ),
             )
-          else if (filtered.isEmpty)
+          else if (visible.isEmpty && trackView || filtered.isEmpty)
             const SliverFillRemaining(
               hasScrollBody: false,
               child: EmptyState(
@@ -219,13 +404,33 @@ class _LibraryScreenState extends State<LibraryScreen> {
                 message: 'Try another title, album, or artist.',
               ),
             )
-          else if (_view == 'Tracks' || _group != null)
+          else if (trackView)
             SliverPadding(
               padding: const EdgeInsets.fromLTRB(8, 0, 8, 24),
               sliver: SliverList.builder(
                 itemCount: visible.length,
-                itemBuilder: (context, index) =>
-                    TrackTile(app: app, track: visible[index], queue: visible),
+                itemBuilder: (context, index) {
+                  final track = visible[index];
+                  return TrackTile(
+                    key: ValueKey(track.id),
+                    app: app,
+                    track: track,
+                    queue: visible,
+                    selected: _selecting ? _selected.contains(track.id) : null,
+                    onSelectionChanged: !_selecting
+                        ? null
+                        : (value) {
+                            if (_acting) return;
+                            setState(() {
+                              if (value == true) {
+                                _selected.add(track.id);
+                              } else {
+                                _selected.remove(track.id);
+                              }
+                            });
+                          },
+                  );
+                },
               ),
             )
           else
@@ -252,7 +457,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
             title: Text(_groupTitle(keys[index])),
             subtitle: Text('${tracks.length} tracks'),
             trailing: const Icon(Icons.chevron_right_rounded),
-            onTap: () => setState(() => _group = keys[index]),
+            onTap: () => _openGroup(keys[index]),
           );
         },
       );
@@ -274,7 +479,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
             elevation: 0,
             clipBehavior: Clip.antiAlias,
             child: InkWell(
-              onTap: () => setState(() => _group = keys[index]),
+              onTap: () => _openGroup(keys[index]),
               child: Padding(
                 padding: const EdgeInsets.all(12),
                 child: Column(

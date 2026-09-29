@@ -185,7 +185,7 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('repeated playlist entries are distinct and ordered', (
+  testWidgets('legacy repeated entries remain ordered but cannot be repeated', (
     tester,
   ) async {
     final app = _TestApp(signedIn: true);
@@ -208,12 +208,11 @@ void main() {
     expect(find.text('2. First song'), findsOneWidget);
     await tester.tap(find.byTooltip('Entry 1 options'));
     await tester.pumpAndSettle();
-    await tester.tap(find.text('Repeat this track'));
-    await tester.pumpAndSettle();
-    expect(app.playlists.single.entries.length, 3);
+    expect(find.text('Repeat this track'), findsNothing);
+    expect(app.playlists.single.entries.length, 2);
     expect(
       app.playlists.single.entries.map((entry) => entry.id).toSet().length,
-      3,
+      2,
     );
     expect(tester.takeException(), isNull);
   });

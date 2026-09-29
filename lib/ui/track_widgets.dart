@@ -106,6 +106,8 @@ class TrackTile extends StatelessWidget {
     this.onTap,
     this.trailing,
     this.number,
+    this.selected,
+    this.onSelectionChanged,
   });
   final AppController app;
   final Track track;
@@ -113,13 +115,21 @@ class TrackTile extends StatelessWidget {
   final VoidCallback? onTap;
   final Widget? trailing;
   final int? number;
+  final bool? selected;
+  final ValueChanged<bool?>? onSelectionChanged;
 
   @override
   Widget build(BuildContext context) {
     final current = app.playback.currentTrack?.id == track.id;
     return ListTile(
-      selected: current,
-      leading: TrackArtwork(app: app, track: track),
+      selected: selected ?? current,
+      leading: selected == null
+          ? TrackArtwork(app: app, track: track)
+          : Checkbox(
+              value: selected,
+              onChanged: onSelectionChanged,
+              semanticLabel: 'Select ${track.title}',
+            ),
       title: Text(
         '${number == null ? '' : '$number. '}${track.title}',
         maxLines: 2,
@@ -130,9 +140,12 @@ class TrackTile extends StatelessWidget {
         maxLines: 2,
         overflow: TextOverflow.ellipsis,
       ),
-      onTap:
-          onTap ??
-          () => runUiAction(context, () => app.play(track, queue: queue)),
+      onTap: selected == null
+          ? onTap ??
+                () => runUiAction(context, () => app.play(track, queue: queue))
+          : onSelectionChanged == null
+          ? null
+          : () => onSelectionChanged!(!selected!),
       trailing: trailing ?? TrackMenu(app: app, track: track),
     );
   }
@@ -193,7 +206,19 @@ Future<void> addTrackToPlaylist(
   BuildContext context,
   AppController app,
   Track track,
+) => addTracksToPlaylist(context, app, [track]);
+
+Future<void> addTracksToPlaylist(
+  BuildContext context,
+  AppController app,
+  List<Track> tracks,
 ) async {
+  if (tracks.isEmpty) return;
+  final account = (app.account?.server, app.account?.userId);
+  bool sameAccount() =>
+      context.mounted &&
+      app.isAuthenticated &&
+      account == (app.account?.server, app.account?.userId);
   final id = await showDialog<String>(
     context: context,
     builder: (context) => SimpleDialog(
@@ -217,26 +242,39 @@ Future<void> addTrackToPlaylist(
       ],
     ),
   );
-  if (id == null || !context.mounted) return;
+  if (id == null || !context.mounted || !sameAccount()) return;
   Playlist? playlist;
   if (id == '__new') {
     final name = await askForName(context, title: 'New playlist');
-    if (name == null) return;
+    if (name == null || !sameAccount()) return;
     playlist = await app.createPlaylist(name);
   } else {
     playlist = app.playlists.where((item) => item.id == id).firstOrNull;
   }
-  if (playlist == null) return;
-  await app.savePlaylist(
-    playlist,
-    entries: [
-      ...playlist.entries,
-      PlaylistEntry(id: app.newId(), trackId: track.id),
-    ],
-  );
+  if (playlist == null || !sameAccount()) return;
+  final existing = playlist.entries.map((entry) => entry.trackId).toSet();
+  final available = app.tracks.map((track) => track.id).toSet();
+  final additions = [
+    for (final track in tracks)
+      if (available.contains(track.id) && existing.add(track.id))
+        PlaylistEntry(id: app.newId(), trackId: track.id),
+  ];
+  if (additions.isNotEmpty) {
+    await app.savePlaylist(
+      playlist,
+      entries: [...playlist.entries, ...additions],
+    );
+  }
   if (context.mounted) {
-    ScaffoldMessenger.of(context)
-        .showSnackBar(SnackBar(content: Text('Added to ${playlist.name}')));
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          additions.isEmpty
+              ? 'No new tracks to add to ${playlist.name}'
+              : 'Added ${additions.length} to ${playlist.name}',
+        ),
+      ),
+    );
   }
 }
 
