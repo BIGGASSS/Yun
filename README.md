@@ -4,6 +4,18 @@ A quiet Material 3 music player for a private, self-hosted library. One Flutter
 client targets **Linux x64, macOS ARM64, Android ARM64, and Windows x64**, backed
 by an account-isolated Rust server. Flutter is pinned with FVM.
 
+## Screenshots
+
+Rendered from the Flutter UI with a demo library and original sample artwork.
+
+| Desktop · Library & queue (dark) | Desktop · Albums (light) |
+| --- | --- |
+| ![Yun desktop library with playback controls and an open queue in dark mode](docs/screenshots/desktop-library-dark.png) | ![Yun desktop album grid in light mode](docs/screenshots/desktop-albums-light.png) |
+
+| Mobile · Library | Mobile · Now playing |
+| --- | --- |
+| <img src="docs/screenshots/mobile-library-dark.png" alt="Yun mobile library in dark mode with downloaded tracks and a mini player" width="260"> | <img src="docs/screenshots/mobile-now-playing-dark.png" alt="Yun mobile now playing screen with album artwork and playback controls" width="260"> |
+
 ## What is implemented
 
 - Adaptive mobile/desktop library, albums/artists/search, queue, shuffle/repeat,
