@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:package_info_plus/package_info_plus.dart';
 import 'package:yun/core/app_controller.dart';
 import 'package:yun/ui/app.dart';
 import 'package:yun/ui/playlist_screen.dart';
@@ -73,6 +74,13 @@ void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
   setUp(() {
+    PackageInfo.setMockInitialValues(
+      appName: '韵',
+      packageName: 'app.yun',
+      version: '2.3.4',
+      buildNumber: '56',
+      buildSignature: '',
+    );
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(
           const MethodChannel('desktop_drop'),
@@ -116,6 +124,58 @@ void main() {
       expect(tester.takeException(), isNull);
     });
   }
+
+  for (final signedIn in [false, true]) {
+    for (final width in [390.0, 1000.0]) {
+      testWidgets(
+        'settings footer shows app version at ${width.toInt()}px, signed in: $signedIn',
+        (tester) async {
+          final app = _TestApp(signedIn: signedIn);
+          addTearDown(app.dispose);
+          await size(tester, Size(width, 844));
+          await tester.pumpWidget(YunApp(controller: app));
+          await tester.pumpAndSettle();
+          await tester.tap(find.byIcon(Icons.settings_outlined));
+          await tester.pumpAndSettle();
+
+          final version = find.text('Version 2.3.4 (56)');
+          expect(version, findsOneWidget);
+          await tester.ensureVisible(version);
+          await tester.pumpAndSettle();
+          expect(
+            tester.getTopLeft(version).dy,
+            greaterThan(
+              tester.getBottomLeft(find.textContaining('A quiet place')).dy,
+            ),
+          );
+          final theme = Theme.of(tester.element(version));
+          final style = tester.widget<Text>(version).style!;
+          expect(style.fontSize, theme.textTheme.bodySmall!.fontSize);
+          expect(style.color, theme.colorScheme.onSurfaceVariant);
+          expect(tester.takeException(), isNull);
+        },
+      );
+    }
+  }
+
+  testWidgets('settings version omits an empty build number', (tester) async {
+    PackageInfo.setMockInitialValues(
+      appName: '韵',
+      packageName: 'app.yun',
+      version: '2.3.4',
+      buildNumber: '',
+      buildSignature: '',
+    );
+    final app = _TestApp();
+    addTearDown(app.dispose);
+    await tester.pumpWidget(YunApp(controller: app));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byIcon(Icons.settings_outlined));
+    await tester.pumpAndSettle();
+    expect(find.text('Version 2.3.4'), findsOneWidget);
+    expect(find.text('Version 2.3.4 ()'), findsNothing);
+    expect(tester.takeException(), isNull);
+  });
 
   testWidgets('mobile offers five destinations and a real connection form', (
     tester,

@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:package_info_plus/package_info_plus.dart';
 
 import '../core/app_controller.dart';
 import '../core/desktop_controller.dart';
@@ -111,6 +112,7 @@ class _WindowBehavior extends StatelessWidget {
 class _SettingsScreenState extends State<SettingsScreen> {
   final _form = GlobalKey<FormState>();
   late final TextEditingController _server;
+  late final Future<PackageInfo> _packageInfo;
   final _username = TextEditingController();
   final _password = TextEditingController();
   bool _showPassword = false;
@@ -121,6 +123,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   void initState() {
     super.initState();
     _server = TextEditingController(text: widget.app.account?.server ?? '');
+    _packageInfo = PackageInfo.fromPlatform();
   }
 
   @override
@@ -416,6 +419,26 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   const SizedBox(height: 4),
                   const Text(
                     'A quiet place for your own music. Listening statistics are personal; no third-party tracking service is used.',
+                  ),
+                  FutureBuilder<PackageInfo>(
+                    future: _packageInfo,
+                    builder: (context, snapshot) {
+                      final info = snapshot.data;
+                      if (info == null) return const SizedBox.shrink();
+                      return Padding(
+                        padding: const EdgeInsets.only(top: 12),
+                        child: Text(
+                          'Version ${info.version}'
+                          '${info.buildNumber.isEmpty ? '' : ' (${info.buildNumber})'}',
+                          style: Theme.of(context).textTheme.bodySmall
+                              ?.copyWith(
+                                color: Theme.of(context)
+                                    .colorScheme
+                                    .onSurfaceVariant,
+                              ),
+                        ),
+                      );
+                    },
                   ),
                 ],
               ),
