@@ -263,9 +263,15 @@ pub(crate) async fn refresh(
 }
 pub(crate) async fn logout(
     State(state): State<AppState>,
-    auth: Auth,
+    auth: Result<Auth, ApiError>,
     Json(input): Json<Refresh>,
 ) -> Result<StatusCode, ApiError> {
+    // Consume the bounded JSON body even when authentication fails. Rejecting
+    // from the parts extractor can close HTTP/1 while the client is still
+    // sending its body, hiding the 401 behind a transport error and preventing
+    // the client's refresh-and-revoke retry. Authentication still gates every
+    // mutation; malformed/oversized bodies retain the JSON extractor's limits.
+    let auth = auth?;
     let _guard = state.0.writes.lock().await;
     // Only the authenticated session can be revoked with this endpoint.
     let result =

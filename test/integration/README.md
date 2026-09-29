@@ -22,6 +22,15 @@ skip. Build it before running the complete integration suite; an existing binary
 that cannot start or fails health checks is a failure, never a silent skip.
 Tests do not need native audio libraries.
 
+CI uses the **release** server artifact. For CI-equivalent local validation,
+rebuild it and explicitly select it rather than relying on an existing debug
+binary (HTTP connection timing can differ between profiles):
+
+```sh
+cargo build --release --locked --manifest-path server/Cargo.toml
+YUN_SERVER_BINARY="$PWD/server/target/release/yun-server" fvm flutter test
+```
+
 ## Fixed contracts and coverage
 
 The independent review originally reproduced four failing regressions. All four
@@ -40,7 +49,12 @@ are now covered by **15 passing real-server regression cases** in
    checking only the original token would hide a missing logout after rotation.
    Secure credential writes/deletes and login/refresh/logout are serialized.
    Unit tests cover in-flight writes, overlapping login/logout, failed rotation,
-   bounded 401 retry, and best-effort offline local logout.
+   bounded 401 retry, and best-effort offline local logout. The server consumes
+   bounded logout JSON before returning an auth rejection, so an unread request
+   body cannot hide the 401 behind a closed connection. Deterministic Rust
+   streamed-body tests cover consumption, refresh/revocation, malformed JSON,
+   and size limits. TCP failures report sanitized paths/statuses/error types,
+   never credentials.
 3. **Expired upload reservations/receipts:** a status 404 durably clears the old
    remote ID and offset. The worker validates the source before reserving again,
    uploads from zero, and completes. Tests exercise both partial reservations

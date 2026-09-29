@@ -5,7 +5,17 @@ use axum::{
 };
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
+use std::{
+    pin::Pin,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    },
+    task::{Context, Poll},
+};
 use tempfile::TempDir;
+use tokio::io::{AsyncRead, ReadBuf};
+use tokio_util::io::ReaderStream;
 use tower::ServiceExt;
 use yun_server::{AppState, Config};
 
@@ -158,6 +168,69 @@ async fn json_request(
         },
     )
 }
+#[derive(Default)]
+struct BodyProgress {
+    bytes_read: AtomicUsize,
+    eof: AtomicBool,
+}
+
+struct FragmentedReader {
+    bytes: Vec<u8>,
+    offset: usize,
+    chunk_size: usize,
+    yield_next: bool,
+    progress: Arc<BodyProgress>,
+}
+
+impl AsyncRead for FragmentedReader {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        if buf.remaining() == 0 {
+            return Poll::Ready(Ok(()));
+        }
+        // Force separate polls for fragments, without timers or scheduler races.
+        if self.yield_next {
+            self.yield_next = false;
+            cx.waker().wake_by_ref();
+            return Poll::Pending;
+        }
+        if self.offset == self.bytes.len() {
+            self.progress.eof.store(true, Ordering::SeqCst);
+            return Poll::Ready(Ok(()));
+        }
+        let count = self
+            .chunk_size
+            .min(buf.remaining())
+            .min(self.bytes.len() - self.offset);
+        buf.put_slice(&self.bytes[self.offset..self.offset + count]);
+        self.offset += count;
+        self.progress.bytes_read.fetch_add(count, Ordering::SeqCst);
+        self.yield_next = true;
+        Poll::Ready(Ok(()))
+    }
+}
+
+fn fragmented_body(bytes: Vec<u8>, chunk_size: usize) -> (Body, Arc<BodyProgress>) {
+    assert!(chunk_size > 0);
+    let progress = Arc::new(BodyProgress::default());
+    let reader = FragmentedReader {
+        bytes,
+        offset: 0,
+        chunk_size,
+        yield_next: true,
+        progress: progress.clone(),
+    };
+    // Unknown length: the JSON extractor must actually poll the stream, rather
+    // than accepting/rejecting it based on Content-Length or a body size hint.
+    (
+        Body::from_stream(ReaderStream::with_capacity(reader, chunk_size)),
+        progress,
+    )
+}
+
 fn wav(seconds: u32) -> Vec<u8> {
     let length = seconds * 8000 * 2;
     let mut bytes = Vec::with_capacity(length as usize + 44);
@@ -178,6 +251,154 @@ fn wav(seconds: u32) -> Vec<u8> {
 }
 fn event(device: &str, session: &str, track: &str, start: i64, ms: i64) -> Value {
     json!({"id":uid(),"device_id":device,"session_id":session,"track_id":track,"started_at":start,"ended_at":start+ms,"listened_ms":ms,"timezone_offset_minutes":120})
+}
+
+#[tokio::test]
+async fn expired_logout_consumes_streamed_json_before_401_and_allows_refresh() {
+    let h = Harness::new().await;
+    let pool = sqlx::sqlite::SqlitePoolOptions::new()
+        .connect_with(
+            sqlx::sqlite::SqliteConnectOptions::new().filename(h.dir.path().join("yun.sqlite3")),
+        )
+        .await
+        .unwrap();
+    // A legitimate access token expires while its refresh credential remains
+    // valid. Explicit expiry makes the regression independent of wall time.
+    assert_eq!(
+        sqlx::query("UPDATE sessions SET access_expires=0 WHERE user_id=?")
+            .bind(h.a["user"]["id"].as_str().unwrap())
+            .execute(&pool)
+            .await
+            .unwrap()
+            .rows_affected(),
+        1
+    );
+    pool.close().await;
+
+    let input = serde_json::to_vec(&json!({"refresh_token":h.a["refresh_token"]})).unwrap();
+    let length = input.len();
+    let (body, progress) = fragmented_body(input, 7);
+    let response = h
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/auth/logout")
+                .header("authorization", format!("Bearer {}", h.a()))
+                .header("content-type", "application/json")
+                .body(body)
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    // Check before polling/dropping the response body: returning a 401 with an
+    // unread request can break the client's connection before refresh begins.
+    assert_eq!(
+        progress.bytes_read.load(Ordering::SeqCst),
+        length,
+        "logout returned 401 before consuming the streamed JSON request"
+    );
+    assert!(
+        progress.eof.load(Ordering::SeqCst),
+        "logout must read through request EOF before 401"
+    );
+
+    let (code, rotated) = json_request(
+        &h.app,
+        "POST",
+        "/api/v1/auth/refresh",
+        None,
+        json!({"refresh_token":h.a["refresh_token"]}),
+    )
+    .await;
+    assert_eq!(code, StatusCode::OK, "{rotated}");
+    assert_ne!(rotated["refresh_token"], h.a["refresh_token"]);
+    assert_ne!(rotated["access_token"], h.a["access_token"]);
+    let access = rotated["access_token"].as_str().unwrap();
+    assert_eq!(
+        json_request(&h.app, "GET", "/api/v1/library", Some(access), json!({}))
+            .await
+            .0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        json_request(
+            &h.app,
+            "POST",
+            "/api/v1/auth/logout",
+            Some(access),
+            json!({"refresh_token":rotated["refresh_token"]})
+        )
+        .await
+        .0,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        json_request(&h.app, "GET", "/api/v1/library", Some(access), json!({}))
+            .await
+            .0,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        json_request(
+            &h.app,
+            "POST",
+            "/api/v1/auth/refresh",
+            None,
+            json!({"refresh_token":rotated["refresh_token"]})
+        )
+        .await
+        .0,
+        StatusCode::UNAUTHORIZED
+    );
+}
+
+#[tokio::test]
+async fn invalid_logout_streamed_json_still_enforces_syntax_and_body_limit() {
+    let h = Harness::new().await;
+    // The global JSON limit is 2 MiB. An unknown-length stream must be bounded
+    // while reading, even when authentication has already failed.
+    const JSON_LIMIT: usize = 2 * 1024 * 1024;
+    const CHUNK: usize = 16 * 1024;
+    let malformed = b"{\"refresh_token\":".to_vec();
+    let malformed_length = malformed.len();
+    let mut oversized = b"{\"refresh_token\":\"".to_vec();
+    oversized.resize(yun_server::MAX_CHUNK + 1, b'a');
+    oversized.extend_from_slice(b"\"}");
+    for (input, expected) in [
+        (malformed, StatusCode::BAD_REQUEST),
+        (oversized, StatusCode::PAYLOAD_TOO_LARGE),
+    ] {
+        let (body, progress) = fragmented_body(input, CHUNK);
+        let response = h
+            .app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/auth/logout")
+                    .header("authorization", "Bearer invalid")
+                    .header("content-type", "application/json")
+                    .body(body)
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), expected);
+        let read = progress.bytes_read.load(Ordering::SeqCst);
+        if expected == StatusCode::BAD_REQUEST {
+            assert_eq!(read, malformed_length);
+            assert!(progress.eof.load(Ordering::SeqCst));
+        } else {
+            assert!(
+                read > JSON_LIMIT && read <= JSON_LIMIT + CHUNK,
+                "oversized JSON must stop reading at the body limit, read {read} bytes"
+            );
+            assert!(!progress.eof.load(Ordering::SeqCst));
+        }
+    }
 }
 
 #[tokio::test]

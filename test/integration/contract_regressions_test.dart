@@ -325,9 +325,28 @@ void main() {
             String? rotatedRefresh;
             String? persistedBeforeRotation;
             var revocations = 0;
+            // No tokens, headers, or bodies: expose swallowed logout failures
+            // without leaking credentials into CI logs.
+            final requests = <String>[];
             api.dio.interceptors.add(
               InterceptorsWrapper(
+                onRequest: (request, handler) {
+                  requests.add('send ${Uri.parse(request.path).path}');
+                  handler.next(request);
+                },
+                onError: (error, handler) {
+                  requests.add(
+                    '${Uri.parse(error.requestOptions.path).path}: '
+                    '${error.type.name}, status=${error.response?.statusCode}, '
+                    'cause=${error.error.runtimeType}',
+                  );
+                  handler.next(error);
+                },
                 onResponse: (response, handler) {
+                  requests.add(
+                    '${Uri.parse(response.requestOptions.path).path}: '
+                    '${response.statusCode}',
+                  );
                   if (response.statusCode == 200 &&
                       response.requestOptions.path.endsWith('/auth/refresh')) {
                     rotatedRefresh =
@@ -346,7 +365,7 @@ void main() {
             await api.logout();
             expect(api.session, isNull);
             expect(await store.read(ApiClient.sessionKey), isNull);
-            expect(rotatedRefresh, isNotNull);
+            expect(rotatedRefresh, isNotNull, reason: requests.join('\n'));
             expect(
               (jsonDecode(persistedBeforeRotation!) as Map)['refresh_token'],
               old.refreshToken,

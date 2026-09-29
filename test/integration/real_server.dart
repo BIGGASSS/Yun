@@ -89,7 +89,9 @@ class RealServer {
     // Accelerates the real server's 15-minute expiry without changing server code.
     final result = await Process.run('python3', [
       '-c',
-      'import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); c.execute("UPDATE sessions SET access_expires=0 WHERE access_hash=?", (sys.argv[2],)); c.commit()',
+      'import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); '
+          'r=c.execute("UPDATE sessions SET access_expires=0 WHERE access_hash=?", (sys.argv[2],)); '
+          'assert r.rowcount == 1, "expected exactly one session to expire"; c.commit()',
       '${directory.path}/yun.sqlite3',
       sha256.convert(utf8.encode(accessToken)).toString(),
     ]);
