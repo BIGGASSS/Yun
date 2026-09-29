@@ -26,6 +26,10 @@ class AndroidSigningTests(unittest.TestCase):
         cases = [
             ("debug-signed", "pull_request", "refs/pull/1/merge", True),
             ("release-signed", "workflow_dispatch", "refs/heads/main", True),
+            ("release-signed", "workflow_dispatch", "refs/heads/feature", False),
+            ("release-signed", "workflow_dispatch", "refs/tags/v1.0.0", False),
+            ("release-signed", "workflow_call", "refs/heads/main", False),
+            ("release-signed", "pull_request_target", "refs/heads/main", False),
             ("release-signed", "push", "refs/tags/v1.0.0", True),
             ("release-signed", "push", "refs/tags/v1.0.0-rc.1", True),
             ("release-signed", "push", "refs/heads/main", False),

@@ -8,7 +8,14 @@ modifying that cache. Upstream: https://github.com/mogol/flutter_secure_storage.
 The original `README.md` and BSD-3-Clause `LICENSE` (copyright 2017 German
 Saprykin) are retained unchanged. `CHANGELOG.md` and the plugin implementation
 are retained with trailing whitespace removed from one line each; there are no
-functional plugin-dispatch changes. The vendored `json.hpp` retains its embedded license.
+functional plugin-dispatch changes. The vendored `json.hpp` retains its embedded
+copyright/SPDX notices, which are not a substitute for full license texts. It
+identifies itself as nlohmann/json **3.11.2**, but the installed baseline differs
+from the upstream v3.11.2 release header; no byte-identical upstream provenance
+is claimed. The header is unchanged by this fork. Full MIT, Apache-2.0, and CC0
+texts and embedded-component attribution are now provided alongside it; see
+[`linux/include/json.NOTICES.md`](linux/include/json.NOTICES.md) for sources and
+scope. These third-party terms are not replaced by Yun's root MIT license.
 
 Pub's cached upstream archive SHA-256:
 

@@ -1,0 +1,4 @@
+# Security-sensitive automation and signing changes require owner review.
+/.github/ @BIGGASSS
+/scripts/release/ @BIGGASSS
+/android/app/build.gradle.kts @BIGGASSS

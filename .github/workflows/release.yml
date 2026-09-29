@@ -1,10 +1,11 @@
-name: Private release candidates
-# Artifacts only: no tags, GitHub Releases, registry pushes, or public distribution.
+name: Release candidates
+# Artifacts only: no tags, GitHub Releases, or registry pushes.
+# Workflow artifacts are public in this public repository; they are not private.
 on:
   workflow_dispatch:
     inputs:
       android_signing:
-        description: Android APK signing (release requires protected operator secrets)
+        description: Android APK signing (release requires main and release-signing environment approval)
         type: choice
         options:
           - debug-signed
@@ -21,18 +22,14 @@ jobs:
     uses: ./.github/workflows/native-builds.yml
     with:
       android_signing: ${{ inputs.android_signing }}
-    # Prefer protected release-signing environment secrets on the called job.
-    # Explicit mapping also supports repository/org secrets; do not inherit all.
-    secrets:
-      ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
-      ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
-      ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
-      ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+    # The called Android job reads only release-signing environment secrets.
   server:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@master
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
         with:
           toolchain: 1.98.1
       - run: |
@@ -44,7 +41,7 @@ jobs:
           tar -czf dist/yun-server-linux-x64.tar.gz -C dist/server .
           rm -rf dist/server
           python scripts/release/checksums.py
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: yun-server-linux-x64
           path: dist/

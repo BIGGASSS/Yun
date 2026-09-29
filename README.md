@@ -27,13 +27,13 @@ by an account-isolated Rust server. Flutter is pinned with FVM.
 - Android foreground audio, macOS media controls, Linux MPRIS and Windows SMTC
   adapters; platform configurations and native artifact workflows.
 - Container/HTTPS deployment, stopped-server backup/restore, unit/widget tests,
-  real Rust↔Dart TCP integration tests, CI and private evaluation packaging.
+  real Rust↔Dart TCP integration tests, CI and evaluation packaging.
 
 **This is an evaluation candidate, not a certified four-platform release.**
 [Hosted CI](https://github.com/BIGGASSS/Yun/actions/workflows/ci.yml) builds all
 four native packages and runs Flutter/Rust tests, TCP integration, null-output
 libmpv playback, container backup/restore, and isolated keyring tests. Choose a
-successful run for the version you want; its private evaluation artifacts have
+successful run for the version you want; its publicly accessible evaluation artifacts have
 14-day retention. See [validation evidence](docs/VALIDATION.md) for the tested
 scope and version-specific results.
 
@@ -154,7 +154,18 @@ bounded metadata parser is not an OS sandbox.
 Push a `v*` tag (for example `v1.0.0`) to validate, build all clients and the Linux
 server, and publish a GitHub Release with checksums. Tag releases use the configured
 Android release signing; macOS/Windows artifacts remain unsigned. CI and the separate
-**Private release candidates** workflow retain workflow artifacts only; candidates default to debug-signed
+**Release candidates** workflow retain publicly accessible workflow artifacts only; candidates default to debug-signed
 Android APKs with opt-in fail-closed release signing. Production signing/notarization and dependency license/source
-obligations are explicit release gates. No open-source license is granted for
-this private project; third-party dependencies retain their respective licenses.
+obligations are explicit release gates.
+
+## License
+
+Yun's first-party material is licensed under the [MIT License](LICENSE),
+copyright © 2026 BIGGASSS. Third-party components are excluded from this grant
+and retain their own licenses and notices, including the vendored
+[Linux secure-storage plugin's BSD-3-Clause license](packages/flutter_secure_storage_linux/LICENSE)
+and [nlohmann/json notices and licenses](packages/flutter_secure_storage_linux/linux/include/json.NOTICES.md).
+
+This source-license choice does not complete the binary redistribution review.
+The actual bundled dependencies (including mpv/FFmpeg), notices, and any source
+obligations still require the [release license gates](docs/RELEASE.md#dependencylicense-redistribution-gate).

@@ -12,12 +12,14 @@ jobs:
   validate:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
       - run: sudo apt-get update && sudo apt-get install -y clang cmake ninja-build pkg-config libgtk-3-dev libmpv-dev libsecret-1-dev liblzma-dev
       - uses: ./.github/actions/flutter
       - run: fvm dart format --output=none --set-exit-if-changed lib test
       - run: fvm flutter analyze
-      - uses: dtolnay/rust-toolchain@master
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
         with:
           toolchain: 1.98.1
           components: rustfmt, clippy
@@ -35,24 +37,21 @@ jobs:
       - run: shellcheck scripts/*.sh scripts/release/*.sh
       - run: python3 scripts/test-release-tooling.py
       - run: python3 scripts/release/test-android-signing.py
+      - run: python3 scripts/release/test-workflow-policy.py
   clients:
     needs: validate
     uses: ./.github/workflows/native-builds.yml
     with:
       android_signing: release-signed
-    # Prefer protected release-signing environment secrets on the called job.
-    # Explicit mapping also supports repository/org secrets; do not inherit all.
-    secrets:
-      ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
-      ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
-      ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
-      ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+    # The called Android job reads only release-signing environment secrets.
   server:
     needs: validate
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@master
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
         with:
           toolchain: 1.98.1
       - run: |
@@ -64,7 +63,7 @@ jobs:
           tar -czf dist/yun-server-linux-x64.tar.gz -C dist/server .
           rm -rf dist/server
           python scripts/release/checksums.py
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: yun-server-linux-x64
           path: dist/
@@ -77,8 +76,10 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           pattern: yun-*
           path: artifacts

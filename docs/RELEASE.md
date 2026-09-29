@@ -1,4 +1,4 @@
-# Releases and private candidates
+# Releases and evaluation candidates
 
 ## Scope and provenance
 
@@ -10,10 +10,12 @@ release keystore (no debug fallback); macOS and Windows remain unsigned. All
 builds must succeed before publication. Releases follow repository visibility;
 review the acceptance and license gates below before pushing a release tag.
 
-CI and the separate **Private release candidates** workflow
+CI and the separate **Release candidates** workflow
 (`.github/workflows/release.yml`) upload workflow artifacts only (14-day retention).
-They do not publish a GitHub Release, packages, or container images. An artifact
-is **not** evidence of a completed hardware, security, signing, or license review.
+They do not publish a GitHub Release, packages, or container images. These artifacts
+are publicly accessible when the repository is public; environment approval does
+not make an artifact private. An artifact is **not** evidence of a completed
+hardware, security, signing, or license review.
 
 - `.fvmrc` is the Flutter version source of truth: currently **3.47.5**.
 - `.github/actions/flutter/action.yml` first bootstraps that exact Flutter/Dart
@@ -50,10 +52,12 @@ Tags do not override the version in `pubspec.yaml`. Allow `v*` tags in the
 `release-signing` environment's deployment rules and approve its job if required.
 Missing signing secrets or a failed validation/build prevents publication.
 
-To make an artifact-only candidate, select **Actions → Private release candidates → Run
-workflow**, choosing the reviewed branch/commit and `android_signing` mode
-(default `debug-signed`; opt-in `release-signed`). Validation gates client/server
-packaging, including Flutter tests against a freshly built actual server binary.
+To make an artifact-only candidate, select **Actions → Release candidates → Run
+workflow**, choosing the reviewed branch and `android_signing` mode
+(default `debug-signed`; opt-in `release-signed` on `main` only). Manual candidate
+packaging does not run the validation job: verify successful CI for the exact
+commit first. Tag releases separately gate packaging on validation, including
+Flutter tests against a freshly built actual server binary.
 Download the per-target artifacts from that workflow run; manual dispatch does
 not publish a GitHub Release. Check `SHA256SUMS` against the contained archives, e.g.
 `sha256sum -c SHA256SUMS` (Linux) or `shasum -a 256 -c SHA256SUMS` (macOS).
@@ -76,18 +80,52 @@ ID signing/notarization remain operator-only procedures below; their workflow
 artifacts remain explicitly unsigned. Play App Signing/AAB publication is not
 implemented. Never commit signing keys, passwords, or notarization credentials.
 
+## Repository and workflow protections
+
+GitHub settings are not defined by workflow YAML. Keep these controls enabled:
+
+- An active `main` ruleset requires a pull request, resolved review conversations,
+  code-owner review for sensitive paths, and successful Rust, Flutter, deployment,
+  keyring, and all four native-build checks. Stale approvals are dismissed and
+  the branch must be up to date. Force pushes and deletion are blocked.
+- An active `v*` tag ruleset restricts tag creation, movement, and deletion to
+  repository administrators. Both rulesets retain an explicit administrator
+  bypass for the solo maintainer; use it only deliberately, not as a routine
+  substitute for CI. No independent approving review is required for ordinary
+  solo-maintainer PRs. `.github/CODEOWNERS` requests owner review of workflows,
+  release scripts, and Android signing configuration.
+- Actions use a read-only default token and cannot approve PRs. Allow GitHub-owned
+  actions plus the explicitly selected Flutter, Android, Rust-toolchain, and
+  Rust-cache actions; require full commit SHAs. All checkouts disable persisted
+  credentials. Dependabot proposes weekly action updates for review.
+- Require approval for workflow runs from **all external contributors**. Fork PRs
+  must never receive signing secrets. Enable secret scanning, push protection,
+  and dependency vulnerability alerts on the public repository.
+- The `release-signing` environment has the separate approval/ref restrictions
+  below. Environment secrets are not ordinary repository secrets. A public
+  repository does not make secret values public, but executing untrusted code
+  with them can disclose them.
+
+Run `python3 scripts/release/test-workflow-policy.py` to check the local policy
+invariants. It cannot verify remote rulesets, secret placement, or environment
+settings; inspect those through GitHub settings/API after changes.
+
 ## Android release signing gate
 
 Before running `release-signed`:
 
-1. Create the GitHub environment **`release-signing`**, restrict it to reviewed
-   release branches/tags, require independent reviewers, and prevent self-approval
-   where available. Configure these controls **before** the first run: naming an
-   environment in YAML does not automatically protect it. If your GitHub plan
-   cannot enforce the required approval rules, do not enable hosted signing.
-2. Store these four secrets on that environment (preferred). Explicit repository/
-   organization secret forwarding is also supported, but lacks environment-only
-   secret isolation. CI uses `native-evaluation`, never the release environment.
+1. Configure the GitHub environment **`release-signing`** with required reviewer
+   **`BIGGASSS`**, no administrator approval bypass, and custom deployment rules
+   allowing only the **branch `main`** and **tags `v*`**. The chosen solo-maintainer
+   policy permits self-approval; this is a manual gate, not independent review.
+   Add a second trusted maintainer and prevent self-approval if independent review
+   becomes possible. Configure these controls **before** the first run: naming an
+   environment in YAML does not protect it. If the GitHub plan cannot enforce
+   approval rules, do not enable hosted signing.
+2. Store these four secrets **only** on that environment, never as repository or
+   organization secrets. Caller workflows do not forward signing secrets; the
+   environment supplies them to the signed Android job. CI uses `native-evaluation`,
+   never the release environment.
 
    | Secret | Value |
    | --- | --- |
@@ -98,7 +136,7 @@ Before running `release-signed`:
 
    Base64 is encoding, **not encryption**. To upload an existing keystore without
    printing it or writing a base64 file, on a trusted operator machine with `gh`
-   authenticated to the intended private repository:
+   authenticated to the intended repository:
 
    ```sh
    set +x
@@ -113,10 +151,12 @@ Before running `release-signed`:
    encrypted offline keystore backup and independently record its certificate
    SHA-256 fingerprint; future APK updates require the same key. Check application
    ID, version code, certificate expiry, and key ownership before approval.
-3. Push a reviewed `v*` tag, or run **Private release candidates** with `release-signed`.
-   Inspect the exact source commit and workflow/dependency changes, and approve
-   the environment job. Only manual dispatch or a `v*` tag push may request
-   release signing. Do not approve untrusted code: Gradle/plugins/build scripts
+3. Push a reviewed `v*` tag, or run **Release candidates** on `main` with
+   `release-signed`. Inspect the exact source commit and workflow/dependency
+   changes, and manually approve the environment job. Only manual dispatch on
+   `main` or a `v*` tag push may request signing. Before build tools run, the job
+   checks that its commit is reachable from `origin/main`; tags on divergent
+   commits fail closed. Do not approve untrusted code: Gradle/plugins/build scripts
    can access the process environment and key.
 4. `scripts/release/build-android.sh` fails on absent secrets, invalid base64,
    Gradle signing/build errors, or failed `apksigner verify`; there is **no debug
@@ -320,7 +360,7 @@ restrictions, audio focus, and actual codec support still need device testing.
 `NOTICES.txt` is a warning/checklist pointer, **not a complete notices bundle**.
 The Dart inventory and lockfile are supplied with client artifacts; both release
 and candidate server archives include Cargo metadata. These inventories do not enumerate every
-native binary pulled by plugins. Private artifact upload does not itself satisfy
+native binary pulled by plugins. Evaluation artifact upload does not itself satisfy
 third-party obligations. Before sharing a candidate beyond authorized evaluation:
 
 - [ ] Identify the applicable Yun source license and include its actual license
