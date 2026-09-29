@@ -6,10 +6,17 @@ secure storage, recovery, signing, or third-party redistribution rights.
 
 ## Desktop minimize-to-tray follow-up
 
-Local validation: formatting/analysis clean, **316 Flutter tests passed** (one
-opt-in native-audio smoke skipped), **12 Rust tests passed**, release-tooling
-checks passed, and the Linux release build passed. Flutter TCP tests used the
-release server binary, with temporary files isolated under the user cache.
+**All nine hosted CI jobs passed** for integrated code commit `e260abf`:
+[CI run 36569754215](https://github.com/BIGGASSS/Yun/actions/runs/36569754215).
+This includes all four native packages, **326 Flutter tests**, **12 Rust tests**,
+real libmpv/null-output playback and TCP API smoke, deployment checks, and both
+Linux keyring jobs. Use this run's artifacts for tray support (14-day retention).
+Concurrent upload-management, background-error, and release changes were retained.
+
+Local validation also passed formatting/analysis, 326 Flutter tests (one opt-in
+native-audio smoke skipped), 12 Rust tests, release-tooling checks, and the Linux
+release build. Flutter TCP tests used the release server binary, with temporary
+files isolated under the user cache.
 
 The 108 new Flutter tests cover settings persistence and failed writes, all three
 desktop bootstrap paths, unchanged wide Android/iOS, close versus explicit quit,
@@ -31,12 +38,9 @@ Manual acceptance remains required on each desktop:
 
 A headless build, mocked native channel, or advertised tray host does not certify
 actual icon rendering, native focus policy (including Wayland), or physical audio.
-The last confirmed hosted baseline before this feature is
-[de35996 / run 36552642043](https://github.com/BIGGASSS/Yun/actions/runs/36552642043):
-all nine jobs green, including the logout HTTP-body fix, playback preferences, and
-all four native packages. It does **not** contain tray support; use a successful
-[CI run](https://github.com/BIGGASSS/Yun/actions/workflows/ci.yml) containing this
-feature for tray artifacts.
+The earlier [de35996 / run 36552642043](https://github.com/BIGGASSS/Yun/actions/runs/36552642043)
+was also green, including the logout HTTP-body fix and playback preferences, but
+its artifacts do **not** contain tray support.
 
 ## Playback preference persistence follow-up
 
