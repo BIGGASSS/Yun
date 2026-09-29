@@ -640,6 +640,9 @@ class AppController extends ChangeNotifier {
   Future<void> retryUpload(String id) =>
       _uploadOperation((transfers) => transfers.retryUpload(id));
 
+  Future<void> clearDoneUploads() =>
+      _uploadOperation((transfers) => transfers.clearDoneUploads());
+
   Future<ServerStats> loadStats({DateTime? from, DateTime? to}) =>
       _online((db) async {
         final result = ServerStats.fromJson(
