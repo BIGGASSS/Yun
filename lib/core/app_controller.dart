@@ -100,7 +100,17 @@ class AppController extends ChangeNotifier {
 
   void _backgroundError(Object e) {
     if (_disposed || _locking) return;
-    error = e.toString();
+    // Mobile lifecycle transitions routinely interrupt background requests.
+    // Use the offline indicator instead of a persistent error banner; explicit
+    // actions still throw so their callers can report the failure locally.
+    final transientConnectionFailure =
+        e is DioException &&
+        e.response == null &&
+        (e.type == DioExceptionType.connectionError ||
+            e.type == DioExceptionType.connectionTimeout ||
+            e.type == DioExceptionType.sendTimeout ||
+            e.type == DioExceptionType.receiveTimeout);
+    if (!transientConnectionFailure) error = e.toString();
     if (e is DioException &&
         (e.response == null || e.response!.statusCode == 401)) {
       isOffline = true;

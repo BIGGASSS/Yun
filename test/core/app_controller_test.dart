@@ -86,6 +86,7 @@ void main() {
     await expectLater(app.refresh(), throwsA(isA<DioException>()));
     expect(app.isAuthenticated, isTrue);
     expect(app.isOffline, isTrue);
+    expect(app.error, isNull);
     await app.logout();
     expect(app.localPath('t'), isNull);
     expect(app.tracks, isEmpty);
@@ -93,6 +94,106 @@ void main() {
     await app.shutdown();
     app.dispose();
   });
+  for (final type in [
+    DioExceptionType.connectionError,
+    DioExceptionType.connectionTimeout,
+    DioExceptionType.sendTimeout,
+    DioExceptionType.receiveTimeout,
+  ]) {
+    test('$type stays quiet on repeated refreshes and recovers', () async {
+      await seedAccount();
+      Object? failure = DioException(
+        requestOptions: RequestOptions(path: '/library'),
+        type: type,
+      );
+      final dio = Dio()
+        ..httpClientAdapter = FakeAdapter((options, _) {
+          if (failure != null) throw failure;
+          if (options.path.endsWith('/auth/refresh')) {
+            return jsonResponse({
+              'access_token': 'a',
+              'refresh_token': 'r2',
+              'expires_at': DateTime.now().millisecondsSinceEpoch + 3600000,
+            });
+          }
+          if (options.path.endsWith('/listening-events')) {
+            return jsonResponse({
+              'acknowledged_ids': ['pending'],
+            });
+          }
+          return jsonResponse({'cursor': 6, 'reset': false});
+        });
+      final app = AppController(
+        api: ApiClient(dio: dio, credentials: credentials),
+        storageDirectory: () async => root,
+        playbackEngine: FakeEngine(),
+        enableSystemControls: false,
+        automaticRefresh: false,
+      );
+      try {
+        await app.initialize();
+        for (var i = 0; i < 3; i++) {
+          await expectLater(app.refresh(), throwsA(same(failure)));
+          expect(app.isOffline, isTrue);
+          expect(app.error, isNull);
+          expect(app.pendingEventCount, 1);
+          expect(app.downloadedTrackIds, {'t'});
+        }
+        // A quiet network failure must not erase a different actionable error.
+        app.error = 'Storage failure';
+        await expectLater(app.refresh(), throwsA(same(failure)));
+        expect(app.error, 'Storage failure');
+        app.clearError();
+        failure = null;
+        await app.refresh();
+        expect(app.isOffline, isFalse);
+        expect(app.error, isNull);
+        expect(app.pendingEventCount, 0);
+      } finally {
+        await app.shutdown();
+        app.dispose();
+      }
+    });
+  }
+
+  test('actionable refresh failures still populate the error banner', () async {
+    await seedAccount();
+    late Object failure;
+    final dio = Dio()..httpClientAdapter = FakeAdapter((_, _) => throw failure);
+    final app = AppController(
+      api: ApiClient(dio: dio, credentials: credentials),
+      storageDirectory: () async => root,
+      playbackEngine: FakeEngine(),
+      enableSystemControls: false,
+      automaticRefresh: false,
+    );
+    try {
+      await app.initialize();
+      final options = RequestOptions(path: '/auth/refresh');
+      for (final value in [
+        for (final status in [401, 500])
+          DioException(
+            requestOptions: options,
+            type: DioExceptionType.badResponse,
+            response: Response(requestOptions: options, statusCode: status),
+          ),
+        DioException(
+          requestOptions: options,
+          type: DioExceptionType.badCertificate,
+        ),
+        StateError('Storage unavailable'),
+      ]) {
+        failure = value;
+        app.clearError();
+        await expectLater(app.refresh(), throwsA(isA<Exception>()));
+        expect(app.error, isNotNull);
+      }
+    } finally {
+      await app.shutdown();
+      app.dispose();
+    }
+  });
+
   test(
     'outbox only drops acknowledged submitted IDs; library cursor is reused',
     () async {
