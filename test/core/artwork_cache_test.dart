@@ -32,7 +32,7 @@ void main() {
     );
   }
 
-  ArtworkCache open(Account account, {int maxBytes = 128 * 1024 * 1024}) =>
+  ArtworkCache open(Account account, {int maxBytes = 1024 * 1024 * 1024}) =>
       ArtworkCache(
         api: api,
         account: account,

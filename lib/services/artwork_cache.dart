@@ -17,7 +17,7 @@ class ArtworkCache {
     required this.account,
     required Directory directory,
     this.onChanged,
-    this.maxBytes = 128 * 1024 * 1024,
+    this.maxBytes = 1024 * 1024 * 1024,
   }) : directory = Directory(
          p.join(directory.path, _hash([account.server, account.userId])),
        );
