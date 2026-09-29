@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math' as math;
 
 import 'package:audio_session/audio_session.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -24,19 +25,55 @@ void main() {
   });
 
   test(
-    'volume delegates exact 0..100 values without activating audio focus',
+    'volume maps loudness percentages without activating audio focus',
     () async {
       await engine.initialize();
       expect(player.volumeCalls, isEmpty);
       for (final value in [100.0, 37.5, 0.0, 37.5]) {
         await engine.setVolume(value);
-        expect(player.state.volume, value);
       }
-      expect(player.volumeCalls, [100, 37.5, 0, 37.5]);
+      expect(player.volumeCalls, [
+        100,
+        closeTo(58.0978976016, 1e-8),
+        0,
+        closeTo(58.0978976016, 1e-8),
+      ]);
+      expect(player.state.volume, closeTo(58.0978976016, 1e-8));
       expect(player.plays, 0);
       expect(session.activations, isEmpty);
     },
   );
+
+  test('each halving of loudness reduces mpv signal gain by 10 dB', () async {
+    await engine.initialize();
+    for (final entry in {
+      100.0: 0.0,
+      50.0: -10.0,
+      25.0: -20.0,
+      12.5: -30.0,
+      6.25: -40.0,
+    }.entries) {
+      await engine.setVolume(entry.key);
+      // Model mpv's native cubic amplitude curve, independently of our mapping.
+      final amplitude = math.pow(player.state.volume / 100, 3);
+      final decibels = 20 * math.log(amplitude) / math.ln10;
+      expect(decibels, closeTo(entry.value, 1e-8));
+    }
+  });
+
+  test('loudness mapping is bounded and strictly increasing', () async {
+    await engine.initialize();
+    var previous = -1.0;
+    for (var i = 0; i <= 1000; i++) {
+      await engine.setVolume(i / 10);
+      final nativeVolume = player.state.volume;
+      expect(nativeVolume, inInclusiveRange(0.0, 100.0));
+      expect(nativeVolume, greaterThan(previous));
+      previous = nativeVolume;
+    }
+    expect(player.volumeCalls.first, 0);
+    expect(player.volumeCalls.last, 100);
+  });
 
   test('volume clamps finite input and rejects nonfinite input', () async {
     await engine.initialize();
@@ -59,8 +96,11 @@ void main() {
     expect(player.state.volume, 100);
     player.failVolume = false;
     await engine.setVolume(12);
-    expect(player.volumeCalls, [12, 12]);
-    expect(player.state.volume, 12);
+    expect(player.volumeCalls, [
+      closeTo(30.9160773467, 1e-8),
+      closeTo(30.9160773467, 1e-8),
+    ]);
+    expect(player.state.volume, closeTo(30.9160773467, 1e-8));
   });
 
   test(

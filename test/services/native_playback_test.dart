@@ -51,6 +51,11 @@ void main() {
           )..configureRecording('native-smoke', (event) async {
             events.add(event);
           });
+      // UI loudness 37.5% is converted to mpv's native cubic volume scale.
+      const expectedNativeVolume = 58.0978976016;
+      // Native mixer options may round to single-precision floats.
+      bool volumeRestored() =>
+          (nativePlayer.state.volume - expectedNativeVolume).abs() < 1e-4;
       try {
         await controller.setVolume(37.5);
         await controller.playQueue(const [
@@ -60,12 +65,12 @@ void main() {
         await _until(() => controller.position.inMilliseconds >= 400);
         expect(controller.isPlaying, isTrue);
         expect(controller.duration.inMilliseconds, closeTo(6000, 100));
-        await _until(() => nativePlayer.state.volume == 37.5);
+        await _until(volumeRestored);
         await controller.toggleMute();
         await _until(() => nativePlayer.state.volume == 0);
         expect(controller.isMuted, isTrue);
         await controller.toggleMute();
-        await _until(() => nativePlayer.state.volume == 37.5);
+        await _until(volumeRestored);
         await controller.pause();
         await _until(() => !controller.isPlaying);
         final paused = controller.position;
@@ -80,7 +85,7 @@ void main() {
         await controller.seek(const Duration(milliseconds: 5700));
         await _until(() => controller.currentTrack?.id == 'tone-b');
         await _until(() => controller.position.inMilliseconds >= 300);
-        expect(nativePlayer.state.volume, 37.5);
+        expect(nativePlayer.state.volume, closeTo(expectedNativeVolume, 1e-4));
         expect(controller.volume, 37.5);
         await controller.seek(const Duration(milliseconds: 5800));
         await _until(() => controller.currentTrack == null);

@@ -27,7 +27,13 @@ Import `package:yun/core/app_controller.dart` (re-exports models). `AppControlle
 Without an explicit `index`, `playQueue` starts at a random track when shuffle is enabled, otherwise the first track. An explicit index always selects that entry. Queue order, shuffle, repeat, and volume preferences are preserved.
 
 `double volume` (0–100, initially 100), `bool isMuted`, `Future<void> setVolume(double)`,
-`toggleMute()`: serialized app-local gain; mute restores the last positive level.
+`toggleMute()`: serialized app-local loudness; mute restores the last positive level.
+Percentages approximate perceived loudness: 50% is roughly half as loud as 100%,
+25% half as loud as 50% (−10 dB per halving). The native adapter compensates for
+mpv's cubic mixer curve; UI and saved settings retain the percentage, not the
+native mixer value. 0% is silence and 100% is unchanged audio. This is a perceptual
+approximation, not track loudness normalization. Existing saved percentages are
+retained, so intermediate settings play louder than with the old curve.
 Finite input is clamped; nonfinite input is rejected. Before first playback these
 commands do not initialize audio; the saved gain applies before audio opens.
 Native failures do not publish or persist an unapplied value.

@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:math' as math;
 
 import 'package:audio_session/audio_session.dart';
 import 'package:media_kit/media_kit.dart';
@@ -25,6 +26,8 @@ abstract interface class PlaybackEngine {
   Future<void> play();
   Future<void> pause();
   Future<void> seek(Duration position);
+
+  /// App-local perceived loudness percentage (0–100), not native mixer gain.
   Future<void> setVolume(double volume);
   Future<void> stop();
   Future<void> dispose();
@@ -214,7 +217,15 @@ class MediaKitEngine implements PlaybackEngine {
     if (!volume.isFinite) {
       throw ArgumentError.value(volume, 'volume', 'Must be finite');
     }
-    await _player?.setVolume(volume.clamp(0.0, 100.0));
+    // Approximate half perceived loudness with a 10 dB reduction each time
+    // the UI percentage halves. mpv applies (nativeVolume / 100)^3 to the
+    // signal, so compensate for that cubic curve here, not in saved/UI values.
+    // 60 * log10(nativeVolume / 100) = 10 * log2(volume / 100).
+    // Zero stays exact silence; 100 stays unity gain.
+    final fraction = volume.clamp(0.0, 100.0) / 100.0;
+    final nativeVolume =
+        100.0 * math.pow(fraction, math.ln10 / (6 * math.ln2)).toDouble();
+    await _player?.setVolume(nativeVolume);
   }
 
   @override
