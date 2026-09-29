@@ -19,8 +19,11 @@ hardware, security, signing, or license review.
 
 - `.fvmrc` is the Flutter version source of truth: currently **3.47.5**.
 - `.github/actions/flutter/action.yml` first bootstraps that exact Flutter/Dart
-  version, then activates FVM **4.3.1** with Dart and runs `fvm install`. Every
-  Flutter analyze/test/build subsequently uses FVM, not a floating runner SDK.
+  version via the vendored upstream `subosito/flutter-action` in
+  `.github/actions/flutter-sdk`, then activates FVM **4.3.1** with Dart and runs
+  `fvm install`. Every Flutter analyze/test/build subsequently uses FVM, not a
+  floating runner SDK. Upstream vendor updates are manual; Dependabot handles
+  nested cache pins. See [provenance and update instructions](../.github/actions/flutter-sdk/UPSTREAM.md).
 - Rust is pinned to **1.98.1**, including Windows (needed by `smtc_windows`/
   Cargokit native builds), server CI, and the Docker build stage.
 - Commit the reviewed `pubspec.lock` and `server/Cargo.lock`. The workflows run
@@ -95,8 +98,8 @@ GitHub settings are not defined by workflow YAML. Keep these controls enabled:
   solo-maintainer PRs. `.github/CODEOWNERS` requests owner review of workflows,
   release scripts, and Android signing configuration.
 - Actions use a read-only default token and cannot approve PRs. Allow GitHub-owned
-  actions plus the explicitly selected Flutter, Android, Rust-toolchain, and
-  Rust-cache actions; require full commit SHAs. All checkouts disable persisted
+  actions plus the explicitly selected Android, Rust-toolchain, and Rust-cache
+  actions; require full commit SHAs (including nested cache actions). All checkouts disable persisted
   credentials. Dependabot proposes weekly action updates for review.
 - Require approval for workflow runs from **all external contributors**. Fork PRs
   must never receive signing secrets. Enable secret scanning, push protection,

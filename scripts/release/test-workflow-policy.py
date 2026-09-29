@@ -5,6 +5,7 @@ These deliberately check the checked-in YAML's text/indentation, not arbitrary Y
 Security-sensitive restructuring must update these assertions explicitly. Remote
 secret scope, environment protection and branch rules still need operator checks.
 """
+import hashlib
 import os
 from pathlib import Path
 import re
@@ -82,6 +83,57 @@ class WorkflowPolicyTests(unittest.TestCase):
                         self.assertRegex(value, r"^[\w.-]+/[\w./-]+@[0-9a-f]{40} +# +\S.*$")
                         count += 1
         self.assertGreater(count, 0)
+
+    def test_vendored_flutter_sdk_provenance_and_license(self):
+        path = ".github/actions/flutter-sdk/action.yml"
+        # Explicitly require the vendor to participate in the all-YAML pin scan.
+        self.assertIn(path, self.files)
+        action = self.files[path]
+        vendor = ROOT / ".github/actions/flutter-sdk"
+        provenance = (vendor / "UPSTREAM.md").read_text()
+        commit = re.search(r"(?m)^Upstream commit: `([0-9a-f]{40})`", provenance)
+        self.assertIsNotNone(commit)
+        records = re.findall(
+            r"(?m)^\| `([^`]+)` \| `([^`]+)` \| `([0-9a-f]{64})` \|$",
+            provenance,
+        )
+        self.assertEqual([(source, local) for source, local, _ in records],
+                         [("action.yaml", "action.yml"), ("setup.sh", "setup.sh"),
+                          ("LICENSE", "LICENSE")])
+        # Undo only the documented nested-pin patch. This permits Dependabot cache
+        # updates while detecting any other upstream content changes offline.
+        original_action, patches = re.subn(
+            r"(?m)^(      uses: actions/cache)@[0-9a-f]{40} +# +\S[^\n]*$",
+            r"\1@v5", action,
+        )
+        self.assertEqual(patches, 2)
+        for source, local, digest in records:
+            with self.subTest(file=local):
+                self.assertIn(
+                    f"https://github.com/subosito/flutter-action/blob/{commit[1]}/{source}",
+                    provenance,
+                )
+                contents = original_action.encode() if local == "action.yml" else (vendor / local).read_bytes()
+                self.assertEqual(hashlib.sha256(contents).hexdigest(), digest)
+        license_text = (vendor / "LICENSE").read_text()
+        self.assertIn("The MIT License (MIT)", license_text)
+        self.assertIn("Copyright (c) 2019 Alif Rachmawadi", license_text)
+        self.assertTrue(os.access(vendor / "setup.sh", os.X_OK))
+        self.assertIn('$GITHUB_ACTION_PATH/setup.sh', action)
+
+    def test_local_flutter_bootstrap_uses_vendored_sdk_before_fvm(self):
+        bootstrap = self.files[".github/actions/flutter/action.yml"]
+        sdk = block(bootstrap, "    - uses: ./.github/actions/flutter-sdk")
+        self.assertIn('json.load(open(".fvmrc"))["flutter"]', bootstrap)
+        self.assertIn("        flutter-version: ${{ steps.version.outputs.version }}\n", sdk)
+        self.assertIn("        channel: stable\n", sdk)
+        self.assertIn("        cache: true\n", sdk)
+        self.assertLess(bootstrap.index(sdk), bootstrap.index("dart pub global activate fvm 4.3.1"))
+        self.assertIn("dart pub global run fvm:main install --skip-pub-get", bootstrap)
+        for path, text in self.files.items():
+            self.assertNotRegex(text, r"uses:\s*subosito/flutter-action@", path)
+            if path.startswith(".github/workflows/"):
+                self.assertNotIn("uses: ./.github/actions/flutter-sdk", text, path)
 
     def test_every_checkout_disables_persisted_credentials(self):
         count = 0

@@ -163,8 +163,10 @@ obligations are explicit release gates.
 Yun's first-party material is licensed under the [MIT License](LICENSE),
 copyright © 2026 BIGGASSS. Third-party components are excluded from this grant
 and retain their own licenses and notices, including the vendored
-[Linux secure-storage plugin's BSD-3-Clause license](packages/flutter_secure_storage_linux/LICENSE)
-and [nlohmann/json notices and licenses](packages/flutter_secure_storage_linux/linux/include/json.NOTICES.md).
+[Linux secure-storage plugin's BSD-3-Clause license](packages/flutter_secure_storage_linux/LICENSE),
+[nlohmann/json notices and licenses](packages/flutter_secure_storage_linux/linux/include/json.NOTICES.md),
+and [Flutter SDK action's MIT license](.github/actions/flutter-sdk/LICENSE)
+([upstream provenance](.github/actions/flutter-sdk/UPSTREAM.md)).
 
 This source-license choice does not complete the binary redistribution review.
 The actual bundled dependencies (including mpv/FFmpeg), notices, and any source
