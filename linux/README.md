@@ -20,17 +20,22 @@ the default plugin build downloads its pinned source archive.
 
 **Settings → Window behavior** controls whether closing quits (default) or hides
 Yun to the tray while playback and transfers continue. Settings also offers
-explicit Minimize to tray and Quit actions; the tray menu has Show Yun / Quit Yun.
-The title-bar Minimize button keeps its ordinary window-manager behavior.
+explicit Minimize to tray and Quit actions. Left-click restores/focuses Yun;
+right-click opens the Show Yun / Quit Yun menu. Linux exports a StatusNotifierItem
+with `ItemIsMenu=false` and a DBusMenu directly, rather than AppIndicator's
+menu-only primary-click behavior. The title-bar Minimize button keeps its ordinary
+window-manager behavior.
 
 Tray display requires a StatusNotifier host (provided by KDE Plasma; GNOME may
 need its AppIndicator extension). Yun does not install or start one. Before
-hiding, it checks the watcher and host on the session bus; when unavailable it
+hiding, it checks its registration with the current watcher and the host on the
+session bus; when unavailable it
 keeps the window visible and reports an error. Watcher/host loss restores a
 hidden window, with polling for implementations missing loss signals. These
 checks are conservative, not proof that every desktop rendered the icon.
 
-The pinned tray plugin's deprecated Ayatana constructor still emits a build
+The upstream tray plugin remains linked on Linux even though Yun uses its own
+D-Bus tray implementation there. Its deprecated Ayatana constructor still emits a build
 warning on newer systems; only that plugin is exempt from treating deprecation
 warnings as errors. No other warning policy is weakened.
 
@@ -64,7 +69,11 @@ and expose `yun` on PATH (or update the desktop entry's `Exec` to its installed
 absolute path). The application ID and desktop filename are `app.yun.yun`.
 The GTK window icon is also embedded as a GResource, so it does not depend on the
 working directory. Application icons are derived from the unchanged
-`assets/icon.png`; small tray glyphs are bundled separately in `assets/tray_icons/`.
+`assets/icon.png`, including the full-color tray derivatives in `assets/tray_icons/`.
+Regenerate them with `python3 scripts/generate-tray-icons.py` (requires Pillow),
+and validate with `python3 scripts/test-tray-icons.py`. PNGs are 64px for Linux
+and 36px for macOS's 18-point/Retina icon; Windows gets a multi-size ICO. macOS
+uses full-color mode, not template tinting.
 
 This setup follows the installed `media_kit`, `media_kit_libs_linux`,
 `flutter_secure_storage_linux`, and `audio_service_mpris` READMEs.

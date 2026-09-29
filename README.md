@@ -11,8 +11,9 @@ by an account-isolated Rust server. Flutter is pinned with FVM.
 - Desktop app-volume slider and mute, including compact windows and now playing;
   volume/mute, shuffle, and repeat survive app restarts. Android retains system
   volume and remembers shuffle/repeat.
-- Desktop tray with Show/Quit actions and a saved **Settings → Window behavior**
-  choice: close to quit (default) or minimize to tray without stopping music.
+- Branded desktop tray: left-click restores Yun, right-click opens Show/Quit.
+  **Settings → Window behavior** remembers close to quit (default) or minimize
+  to tray without stopping music.
   Android/iOS behavior is unchanged; an unavailable tray never hides the window.
 - Admin-created accounts, Argon2id passwords, rotating/revocable sessions,
   authenticated original-file streaming with byte-range seeking.

@@ -7,14 +7,14 @@ import 'package:tray_manager/tray_manager.dart';
 import 'package:window_manager/window_manager.dart';
 
 import 'desktop_host.dart';
-import 'linux_tray_availability.dart';
+import 'linux_status_notifier_tray.dart';
 
 /// Production desktop adapter. Construct only on Linux, macOS or Windows.
 /// Close policy, application shutdown and persistence belong to the controller.
 class NativeDesktopHost
     with WindowListener, TrayListener
     implements DesktopHost {
-  NativeDesktopHost({this._linuxAvailability, TargetPlatform? platform})
+  NativeDesktopHost({this._linuxTray, TargetPlatform? platform})
     : _platform = platform ?? defaultTargetPlatform;
 
   static const _closeChannel = MethodChannel('yun/desktop_close');
@@ -22,7 +22,7 @@ class NativeDesktopHost
   bool get _isLinux => _platform == TargetPlatform.linux;
   bool get _isMacOS => _platform == TargetPlatform.macOS;
   bool get _isWindows => _platform == TargetPlatform.windows;
-  LinuxTrayAvailability? _linuxAvailability;
+  LinuxDesktopTray? _linuxTray;
   Timer? _windowsTrayPoll;
   void Function()? _onClose;
   void Function()? _onShow;
@@ -90,17 +90,31 @@ class NativeDesktopHost
     if (_disposed) return;
 
     try {
+      if (_isLinux) {
+        final linuxTray = _linuxTray ??= LinuxStatusNotifierTray();
+        // The Dart SNI is the only Linux icon. In particular, do not create an
+        // AppIndicator: its ItemIsMenu policy consumes primary activation.
+        _trayCreated = true;
+        await linuxTray.initialize(
+          onShow: () => _dispatch(_onShow),
+          onQuit: () => _dispatch(_onQuit),
+          onChanged: _publishAvailability,
+          onError: _report,
+        );
+        return;
+      }
       trayManager.addListener(this);
       _trayListenerAdded = true;
       _trayAttempted = true;
-      // Linux's AppIndicator must exist before setContextMenu is called.
       await trayManager.setIcon(
         _isWindows
             ? 'assets/tray_icons/yun.ico'
             : _isMacOS
             ? 'assets/tray_icons/yun_macos.png'
             : 'assets/tray_icons/yun_linux.png',
-        isTemplate: _isMacOS,
+        // These are full-color derivatives of assets/icon.png, not alpha masks.
+        // Template tinting on macOS would replace the logo with its tile shape.
+        isTemplate: false,
       );
       await trayManager.setContextMenu(
         Menu(
@@ -111,16 +125,9 @@ class NativeDesktopHost
           ],
         ),
       );
-      // Neither tooltips nor programmatic context menus are supported on Linux.
-      if (!_isLinux) await trayManager.setToolTip('Yun');
+      await trayManager.setToolTip('Yun');
       _trayCreated = true;
-      if (_isLinux) {
-        final availability = _linuxAvailability ??= LinuxTrayAvailability();
-        await availability.initialize(
-          onChanged: _publishAvailability,
-          onError: _report,
-        );
-      } else if (_isWindows) {
+      if (_isWindows) {
         // tray_manager 0.5.3 reports success even if Shell_NotifyIcon fails.
         await checkTrayAvailability();
         if (!_disposed) {
@@ -197,6 +204,7 @@ class NativeDesktopHost
 
   @override
   void onTrayMenuItemClick(MenuItem menuItem) {
+    if (_isLinux) return;
     switch (menuItem.key) {
       case 'show':
         _dispatch(_onShow);
@@ -210,7 +218,7 @@ class NativeDesktopHost
     if (_disposed || !_windowReady || !_trayCreated) return false;
     var available = true;
     if (_isLinux) {
-      available = await _linuxAvailability?.check() ?? false;
+      available = await _linuxTray?.check() ?? false;
     } else if (_isWindows) {
       available = false;
       try {
@@ -287,9 +295,9 @@ class NativeDesktopHost
       trayManager.removeListener(this);
       _trayListenerAdded = false;
     }
-    final availability = _linuxAvailability;
-    _linuxAvailability = null;
-    if (availability != null) await _cleanup(availability.dispose);
+    final linuxTray = _linuxTray;
+    _linuxTray = null;
+    if (linuxTray != null) await _cleanup(linuxTray.dispose);
     if (_trayAttempted) {
       await _cleanup(trayManager.destroy);
       _trayAttempted = false;

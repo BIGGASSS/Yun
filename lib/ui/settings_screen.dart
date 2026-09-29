@@ -65,7 +65,8 @@ class _WindowBehavior extends StatelessWidget {
           const Text(
             'Closing to the tray keeps your music playing. '
             'The window’s Minimize button still uses normal system behavior. '
-            'Use Show in the tray menu to restore Yun. '
+            'Left-click the tray icon to restore Yun; right-click opens '
+            'the Show / Quit menu. '
             'Quit in the tray menu or Quit Yun below always exits, '
             'regardless of this preference.',
           ),

@@ -1,17 +1,19 @@
 import 'dart:async';
 import 'dart:io';
 
-import 'package:dbus/dbus.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:tray_manager/tray_manager.dart';
 import 'package:window_manager/window_manager.dart';
-import 'package:yun/services/linux_tray_availability.dart';
+import 'package:yun/services/linux_status_notifier_tray.dart';
 import 'package:yun/services/native_desktop_host.dart';
 
-class _ControlledAvailability extends LinuxTrayAvailability {
-  _ControlledAvailability(DBusClient client) : super(client: client);
+class _ControlledAvailability implements LinuxDesktopTray {
+  void Function()? show;
+  void Function()? quit;
+  bool failInitialize = false;
+  bool failDispose = false;
 
   bool available = true;
   int initializations = 0;
@@ -22,10 +24,15 @@ class _ControlledAvailability extends LinuxTrayAvailability {
 
   @override
   Future<void> initialize({
+    required void Function() onShow,
+    required void Function() onQuit,
     required void Function(bool) onChanged,
     required void Function(Object) onError,
   }) async {
     initializations++;
+    if (failInitialize) throw PlatformException(code: 'tray');
+    show = onShow;
+    quit = onQuit;
     changed = onChanged;
     onChanged(available);
   }
@@ -39,7 +46,7 @@ class _ControlledAvailability extends LinuxTrayAvailability {
   @override
   Future<void> dispose() async {
     disposals++;
-    await super.dispose();
+    if (failDispose) throw PlatformException(code: 'tray');
   }
 }
 
@@ -50,7 +57,6 @@ void main() {
   const codec = StandardMethodCodec();
 
   group('NativeDesktopHost (mock plugins only)', () {
-    late DBusServer server;
     late _ControlledAvailability availability;
     late NativeDesktopHost host;
     late List<MethodCall> windows;
@@ -92,14 +98,9 @@ void main() {
 
     setUp(() async {
       debugDefaultTargetPlatformOverride = TargetPlatform.linux;
-      server = DBusServer();
-      final address = await server.listenAddress(
-        DBusAddress.tcp('127.0.0.1', port: 0),
-      );
-      // Controlled probes; even the unused base connection is private, never a
-      // session bus. The two plugin channels below mock every native operation.
-      availability = _ControlledAvailability(DBusClient(address));
-      host = NativeDesktopHost(linuxAvailability: availability);
+      // No real bus or native tray APIs in adapter tests.
+      availability = _ControlledAvailability();
+      host = NativeDesktopHost(linuxTray: availability);
       windows = [];
       tray = [];
       changes = [];
@@ -131,7 +132,6 @@ void main() {
 
     tearDown(() async {
       await host.dispose();
-      await server.close();
       binding.defaultBinaryMessenger.setMockMethodCallHandler(
         windowChannel,
         null,
@@ -146,7 +146,7 @@ void main() {
     });
 
     test(
-      'icon precedes menu; Linux never calls tooltip or popup APIs',
+      'Linux uses only Dart SNI callbacks, never AppIndicator APIs',
       () async {
         await initialize();
         expect(windows.map((c) => c.method), [
@@ -154,28 +154,79 @@ void main() {
           'setPreventClose',
         ]);
         expect(windows.last.arguments, {'isPreventClose': true});
-        expect(tray.map((c) => c.method), ['setIcon', 'setContextMenu']);
-        expect(
-          tray.first.arguments['iconPath'],
-          endsWith('assets/tray_icons/yun_linux.png'),
-        );
-        expect(tray.first.arguments['isTemplate'], isFalse);
-        final menu = tray.last.arguments['menu'] as Map;
-        final items = menu['items'] as List;
-        expect(
-          items.where((item) => item['key'] != null).map((item) => item['key']),
-          ['show', 'quit'],
-        );
+        expect(tray, isEmpty);
+        expect(trayManager.hasListeners, isFalse);
         expect(changes, [false, true]);
         host.onTrayIconMouseDown();
         host.onTrayIconRightMouseDown();
         expect(shows, 0);
-        expect(tray.map((c) => c.method), ['setIcon', 'setContextMenu']);
-        host.onTrayMenuItemClick(MenuItem(key: 'show', label: 'Show Yun'));
+        expect(tray, isEmpty);
         host.onTrayMenuItemClick(MenuItem(key: 'quit', label: 'Quit Yun'));
+        expect(quits, 0);
+        availability.show!();
+        availability.quit!();
         await windowEvent('close');
         expect([shows, quits, closes], [1, 1, 1]);
         expect(errors, isEmpty);
+      },
+    );
+
+    test(
+      'unregistered Linux item keeps startup visible and can recover',
+      () async {
+        availability.available = false;
+        await initialize();
+        expect(changes, [false]);
+        await expectLater(host.hide(), throwsStateError);
+        expect(windows.map((c) => c.method), isNot(contains('hide')));
+        availability.available = true;
+        availability.changed!(true);
+        await host.hide();
+        expect(changes, [false, true]);
+        expect(windows.last.method, 'hide');
+        expect(tray, isEmpty);
+      },
+    );
+
+    test(
+      'Linux SNI activation and watcher loss use the restoration bridge',
+      () async {
+        var hidden = false;
+        Future<void>? restoration;
+        await host.initialize(
+          onClose: () => closes++,
+          onShow: () {
+            restoration = host.show();
+          },
+          onQuit: () => quits++,
+          onTrayAvailabilityChanged: (available) {
+            changes.add(available);
+            if (!available && hidden) restoration = host.show();
+          },
+          onError: errors.add,
+        );
+        await host.hide();
+        minimized = true;
+        windows.clear();
+        availability.show!();
+        await restoration;
+        expect(
+          windows.map((c) => c.method),
+          containsAllInOrder(['restore', 'show', 'focus']),
+        );
+        expect(quits, 0);
+        await host.hide();
+        hidden = true;
+        windows.clear();
+        availability.available = false;
+        availability.changed!(false);
+        await restoration;
+        expect(changes, [false, true, false]);
+        expect(
+          windows.map((c) => c.method),
+          containsAllInOrder(['show', 'focus']),
+        );
+        expect(tray, isEmpty);
       },
     );
 
@@ -338,11 +389,7 @@ void main() {
       );
       await host.dispose();
       await host.dispose();
-      expect(tray.map((c) => c.method), [
-        'setIcon',
-        'setContextMenu',
-        'destroy',
-      ]);
+      expect(tray, isEmpty);
       expect(
         windows
             .where((c) => c.method == 'setPreventClose')
@@ -358,37 +405,35 @@ void main() {
       expect(availability.disposals, 1);
     });
 
-    for (final method in ['setIcon', 'setContextMenu']) {
-      test(
-        '$method failure keeps close interception but cannot hide',
-        () async {
-          failTray = method;
-          await initialize();
-          expect(errors.single, isA<PlatformException>());
-          expect(changes, [false]);
-          expect(await host.checkTrayAvailability(), isFalse);
-          await expectLater(host.hide(), throwsStateError);
-          expect(tray.last.method, 'destroy');
-          expect(trayManager.hasListeners, isFalse);
-          expect(windowManager.listeners, contains(host));
-          await windowEvent('close');
-          expect(closes, 1);
-          await host.dispose();
-          expect(tray.where((c) => c.method == 'destroy'), hasLength(1));
-        },
-      );
-    }
+    test(
+      'SNI setup failure keeps close interception but cannot hide',
+      () async {
+        availability.failInitialize = true;
+        await initialize();
+        expect(errors.single, isA<PlatformException>());
+        expect(changes, [false]);
+        expect(await host.checkTrayAvailability(), isFalse);
+        await expectLater(host.hide(), throwsStateError);
+        expect(tray, isEmpty);
+        expect(trayManager.hasListeners, isFalse);
+        expect(windowManager.listeners, contains(host));
+        await windowEvent('close');
+        expect(closes, 1);
+        await host.dispose();
+        expect(availability.disposals, 1);
+      },
+    );
 
     test(
       'tray teardown failure is reported but interception still releases',
       () async {
         await initialize();
-        failTray = 'destroy';
+        availability.failDispose = true;
         await host.dispose();
         await host.dispose();
         expect(errors.single, isA<PlatformException>());
         expect(availability.disposals, 1);
-        expect(tray.where((c) => c.method == 'destroy'), hasLength(1));
+        expect(tray, isEmpty);
         expect(windows.last.arguments, {'isPreventClose': false});
         expect(windowManager.listeners, isNot(contains(host)));
       },
@@ -409,7 +454,7 @@ void main() {
       () async {
         final syncError = StateError('sync callback');
         await initialize(onShow: () => throw syncError);
-        host.onTrayMenuItemClick(MenuItem(key: 'show', label: 'Show'));
+        availability.show!();
         await Future<void>.delayed(Duration.zero);
         expect(errors, [syncError]);
         final asyncError = StateError('async callback');
@@ -419,7 +464,7 @@ void main() {
             throw asyncError;
           },
         );
-        host.onTrayMenuItemClick(MenuItem(key: 'show', label: 'Show'));
+        availability.show!();
         await Future<void>.delayed(const Duration(milliseconds: 20));
         expect(errors, [syncError, asyncError]);
 
@@ -430,7 +475,7 @@ void main() {
             throw StateError('reporter also failed');
           },
         );
-        host.onTrayMenuItemClick(MenuItem(key: 'show', label: 'Show'));
+        availability.show!();
         await Future<void>.delayed(const Duration(milliseconds: 20));
         // flutter_test fails this test if either asynchronous error escapes.
       },

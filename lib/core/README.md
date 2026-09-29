@@ -61,9 +61,13 @@ Failed shutdown leaves the window visible and prohibits further hiding; it does
 not pretend the core's memoized shutdown can be retried. OS force termination
 remains outside orderly-shutdown guarantees.
 
-`DesktopHost` isolates native APIs. The adapter uses pinned `window_manager` and
-`tray_manager`, a Windows pre-engine WM_CLOSE bridge and checked shell icon probe,
-and Linux watcher/host checks over D-Bus. Loss monitoring restores hidden windows.
+`DesktopHost` isolates native APIs. The adapter uses pinned `window_manager`,
+`tray_manager` on Windows/macOS, and a direct Linux StatusNotifierItem/DBusMenu.
+Primary activation restores/focuses; right-click exposes Show / Quit. Linux
+advertises `ItemIsMenu=false`, requires acknowledged registration with the current
+watcher plus a live host, and re-registers when the watcher restarts. Windows has
+a pre-engine WM_CLOSE bridge and checked shell-icon probe. Loss monitoring
+restores hidden windows.
 Windows probes intentionally match tray_manager 0.5.3's root-window/icon ID pair;
 revalidate that contract before upgrading the plugin. macOS Dock reopening
 reconciles hidden state through native focus events. Touch/web never construct
