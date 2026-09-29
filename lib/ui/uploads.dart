@@ -70,11 +70,50 @@ void showUploads(BuildContext context, AppController app) {
                 message: 'Choose audio files or drop them into 韵. Uploads can be retried after a connection interruption.',
               );
             }
+            final pending = <UploadJob>[];
+            final done = <UploadJob>[];
+            final failed = <UploadJob>[];
+            for (final job in app.uploads) {
+              switch (job.status) {
+                case 'done':
+                  done.add(job);
+                case 'failed':
+                case 'cancelled':
+                  failed.add(job);
+                default:
+                  pending.add(job);
+              }
+            }
+            final rows = <Object>[
+              ('Pending', pending.length),
+              ...pending,
+              ('Done', done.length),
+              ...done,
+              ('Failed', failed.length),
+              ...failed,
+            ];
             return ListView.separated(
-              itemCount: app.uploads.length,
+              itemCount: rows.length,
               separatorBuilder: (_, _) => const SizedBox(height: 16),
               itemBuilder: (context, index) {
-                final job = app.uploads[index];
+                final row = rows[index];
+                if (row is (String, int)) {
+                  return Semantics(
+                    header: true,
+                    child: Row(
+                      children: [
+                        Expanded(
+                          child: Text(
+                            row.$1,
+                            style: Theme.of(context).textTheme.titleMedium,
+                          ),
+                        ),
+                        Text('${row.$2}'),
+                      ],
+                    ),
+                  );
+                }
+                final job = row as UploadJob;
                 final active = ![
                   'done',
                   'failed',
@@ -143,6 +182,15 @@ void showUploads(BuildContext context, AppController app) {
         ),
       ),
       actions: [
+        ListenableBuilder(
+          listenable: app,
+          builder: (context, _) => TextButton(
+            onPressed: app.uploads.any((job) => job.status == 'done')
+                ? () => runUiAction(context, app.clearDoneUploads)
+                : null,
+            child: const Text('Clear done'),
+          ),
+        ),
         TextButton(
           onPressed: () => Navigator.pop(dialogContext),
           child: const Text('Close'),

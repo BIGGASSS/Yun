@@ -91,6 +91,60 @@ void main() {
     },
   );
 
+  test('clear done removes only persisted done jobs and preserves tracks and sources', () async {
+    final original = await source();
+    final jobs = <UploadJob>[];
+    for (final status in [
+      'done',
+      'queued',
+      'uploading',
+      'completing',
+      'failed',
+      'cancelled',
+    ]) {
+      final job = (await transfers.enqueueUpload(
+        status,
+        original.path,
+      )).copyWith(status: status, offset: 2, remoteId: 'remote-$status');
+      await db.put('upload', job.id, job.toJson());
+      jobs.add(job);
+      // Matching IDs also guard against removing records from other kinds.
+      final track = Track(id: job.id, title: 'Imported $status');
+      await db.put('track', track.id, track.toJson());
+    }
+    final legacy = UploadJob(
+      id: 'legacy-done',
+      localPath: original.path,
+      filename: 'original song.wav',
+      sizeBytes: 4,
+      status: 'done',
+    );
+    await db.put('upload', legacy.id, legacy.toJson());
+    final cancellation = {'id': 'cancelled', 'remote_id': 'remote-cancelled'};
+    await db.put('upload_cancel', 'cancelled', cancellation);
+    final tracks = await db.list('track');
+    final retained = jobs
+        .where((job) => job.status != 'done')
+        .map((job) => job.toJson())
+        .toList();
+
+    // Repeat to verify idempotence, including preservation of owned sources
+    // belonging to removed records (this operation only clears history).
+    for (var attempt = 0; attempt < 2; attempt++) {
+      await transfers.clearDoneUploads();
+      expect(await db.get('upload', 'done'), isNull);
+      expect(await db.get('upload', legacy.id), isNull);
+      expect(await db.list('upload'), retained);
+      expect(await db.list('track'), tracks);
+      expect(await db.get('upload_cancel', 'cancelled'), cancellation);
+      expect(await original.readAsBytes(), [1, 2, 3, 4]);
+      for (final job in jobs) {
+        expect(await File(job.localPath).readAsBytes(), [1, 2, 3, 4]);
+      }
+      expect(errors, isEmpty);
+    }
+  });
+
   test('successful legacy uploads never delete external originals', () async {
     final original = await source();
     final job = UploadJob(
