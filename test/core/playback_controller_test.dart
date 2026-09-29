@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:yun/core/playback_controller.dart';
@@ -19,6 +20,7 @@ void main() {
     engine = FakeEngine();
     player = PlaybackController(
       engine: engine,
+      random: Random(42),
       enableSystemControls: false,
       resolveSource: (track, local) async =>
           AudioSource('/cache/${track.id}', local: true),
@@ -278,6 +280,63 @@ void main() {
       player.setShuffle(true);
       await player.next();
       expect(player.currentTrack, isNull);
+    },
+  );
+
+  test(
+    'shuffled collection starts randomly and visits each entry once',
+    () async {
+      player.setShuffle(true);
+      await player.playQueue(tracks);
+      expect(player.index, Random(42).nextInt(tracks.length));
+      expect(player.queue, tracks);
+      final first = player.index;
+      await player.next();
+      final second = player.index;
+      expect(second, isNot(first));
+      await player.previous();
+      expect(player.index, first);
+      final visited = {player.index};
+      for (var i = 1; i < tracks.length; i++) {
+        await player.next();
+        expect(visited.add(player.index), isTrue);
+      }
+      await player.next();
+      expect(player.currentTrack, isNull);
+    },
+  );
+
+  test(
+    'explicit indices override shuffle, including the first entry',
+    () async {
+      player.setShuffle(true);
+      for (final index in [0, 2]) {
+        await player.playQueue(tracks, index: index);
+        expect(player.index, index);
+        expect(player.queue, tracks);
+        expect(player.shuffle, isTrue);
+      }
+    },
+  );
+
+  test(
+    'collection starts handle sequential, single and empty queues',
+    () async {
+      await player.playQueue(tracks);
+      expect(player.index, 0);
+      player.setShuffle(true);
+      player.setRepeat(RepeatMode.all);
+      await player.setVolume(35);
+      await player.playQueue([tracks.first]);
+      expect(player.index, 0);
+      await player.next();
+      expect(player.index, 0);
+      await player.playQueue([]);
+      expect(player.currentTrack, isNull);
+      expect(player.queue, isEmpty);
+      expect(player.shuffle, isTrue);
+      expect(player.repeatMode, RepeatMode.all);
+      expect(player.volume, 35);
     },
   );
 

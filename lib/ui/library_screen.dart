@@ -84,7 +84,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
         if (!mounted || current.isEmpty) return;
         switch (action) {
           case 'play':
-            await app.play(current.first, queue: current);
+            await app.playback.playQueue(current);
           case 'playlist':
             await addTracksToPlaylist(context, app, current);
           case 'offline':
@@ -179,6 +179,16 @@ class _LibraryScreenState extends State<LibraryScreen> {
                   'Library',
                   subtitle: '${app.tracks.length} tracks',
                   actions: [
+                    FilledButton.tonalIcon(
+                      onPressed: app.isAuthenticated && visible.isNotEmpty
+                          ? () => runUiAction(
+                              context,
+                              () => app.playback.playQueue(visible),
+                            )
+                          : null,
+                      icon: const Icon(Icons.play_arrow_rounded),
+                      label: const Text('Play'),
+                    ),
                     IconButton(
                       tooltip: 'Sync library',
                       onPressed: app.isAuthenticated && !app.busy
@@ -267,7 +277,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
                               ? null
                               : () => runUiAction(
                                   context,
-                                  () => app.play(visible.first, queue: visible),
+                                  () => app.playback.playQueue(visible),
                                 ),
                           icon: const Icon(Icons.play_arrow_rounded),
                         ),
