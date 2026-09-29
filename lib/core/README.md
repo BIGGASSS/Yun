@@ -1,6 +1,6 @@
 # Client integration API
 
-Import `package:yun/core/app_controller.dart` (re-exports models). `AppController` is a `ChangeNotifier`. Create once, `await app.initialize()`, use `ListenableBuilder`/Provider, and dispose at shutdown. Native playback is initialized lazily on first play. `lib/main.dart` owns initialization, lifecycle checkpoints, orderly exit, and persistent theme/playback settings. All async operations throw actionable exceptions; UI should catch and show them. `error` also reports background failures. No UI dependency beyond Flutter foundation.
+Import `package:yun/core/app_controller.dart` (re-exports models). `AppController` is a `ChangeNotifier`. Create once, `await app.initialize()`, use `ListenableBuilder`/Provider, and dispose at shutdown. Native playback is initialized lazily on first play. `lib/main.dart` owns initialization, lifecycle checkpoints, orderly exit, and persistent theme/playback settings. All async operations throw actionable exceptions; UI should catch and show them. `error` also reports background failures, except transient connection errors/timeouts: these only set `isOffline`, avoiding repeated banners during app resume and automatic retries. Explicit actions still throw so the UI can report their failure. Authentication, server, certificate and storage errors remain visible. No UI dependency beyond Flutter foundation.
 
 ## AppController
 - `AppController({ApiClient? api, Future<Directory> Function()? storageDirectory, CacheDatabase Function(File)? databaseFactory, PlaybackEngine? playbackEngine, SystemMediaControls? systemControls, bool enableSystemControls = true, bool automaticRefresh = true})`. Production defaults; injectable adapters permit native-free tests.
@@ -45,6 +45,29 @@ accepted commands and writes; lifecycle backgrounding and shutdown drain too.
 Storage errors appear in `playback.error` without reverting successful audio
 changes; another setting command retries (including the same value). Malformed
 stored fields fall back safely. Preferences contain no track/account information.
+
+## DesktopController
+
+Bootstrap owns a separate desktop-only `DesktopController`, injected into YunApp.
+It serializes window visibility, close requests, preference writes and shutdown.
+`desktop.closeBehavior` is an account-independent SharedPreferences enum name;
+missing/unknown values default to `quit`. Writes publish only after success.
+
+`requestWindowClose()` applies that preference. `minimizeToTray()` checkpoints
+without stopping playback, closing databases, or changing credentials/queues.
+`showWindow()` restores/focuses. `quit()` and `requestApplicationExit()` always
+await account shutdown and pending settings, regardless of close preference.
+Failed shutdown leaves the window visible and prohibits further hiding; it does
+not pretend the core's memoized shutdown can be retried. OS force termination
+remains outside orderly-shutdown guarantees.
+
+`DesktopHost` isolates native APIs. The adapter uses pinned `window_manager` and
+`tray_manager`, a Windows pre-engine WM_CLOSE bridge and checked shell icon probe,
+and Linux watcher/host checks over D-Bus. Loss monitoring restores hidden windows.
+Windows probes intentionally match tray_manager 0.5.3's root-window/icon ID pair;
+revalidate that contract before upgrading the plugin. macOS Dock reopening
+reconciles hidden state through native focus events. Touch/web never construct
+this adapter. Retry retains interception until old-account shutdown completes.
 
 ## Models
 Track: id/title/artist/album/albumArtist/trackNumber/discNumber/durationMs/sizeBytes/sha256/mimeType/hasArtwork/revision/createdAt; `Duration duration`.

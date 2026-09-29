@@ -1,6 +1,8 @@
 #include "flutter_window.h"
 
 #include <optional>
+#include <shellapi.h>
+#include <flutter/standard_method_codec.h>
 
 #include "flutter/generated_plugin_registrant.h"
 
@@ -24,6 +26,45 @@ bool FlutterWindow::OnCreate() {
   if (!flutter_controller_->engine() || !flutter_controller_->view()) {
     return false;
   }
+  close_channel_ =
+      std::make_unique<flutter::MethodChannel<flutter::EncodableValue>>(
+          flutter_controller_->engine()->messenger(), "yun/desktop_close",
+          &flutter::StandardMethodCodec::GetInstance());
+  close_channel_->SetMethodCallHandler(
+      [this](const flutter::MethodCall<flutter::EncodableValue>& call,
+             std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result) {
+        if (call.method_name() == "hasTrayIcon") {
+          // Coupled to pinned tray_manager 0.5.3's _ApplyIcon/GetMainWindow:
+          // the icon uses the root Yun HWND, uID 1, and no GUID. Recheck this
+          // identity when upgrading the plugin; Explorer's presence alone is
+          // not evidence that our icon was successfully registered.
+          NOTIFYICONIDENTIFIER identifier{};
+          identifier.cbSize = sizeof(identifier);
+          identifier.hWnd = GetHandle();
+          identifier.uID = 1;
+          RECT rect{};
+          const HRESULT status = Shell_NotifyIconGetRect(&identifier, &rect);
+          const bool available = SUCCEEDED(status) &&
+                                 rect.right > rect.left &&
+                                 rect.bottom > rect.top;
+          result->Success(flutter::EncodableValue(available));
+          return;
+        }
+        if (call.method_name() != "setEnabled") {
+          result->NotImplemented();
+          return;
+        }
+        const auto* enabled = call.arguments()
+                                  ? std::get_if<bool>(call.arguments())
+                                  : nullptr;
+        if (!enabled) {
+          result->Error("invalid_argument", "setEnabled requires a boolean");
+          return;
+        }
+        intercept_close_ = *enabled;
+        result->Success();
+      });
+
   RegisterPlugins(flutter_controller_->engine());
   SetChildContent(flutter_controller_->view()->GetNativeWindow());
 
@@ -40,6 +81,11 @@ bool FlutterWindow::OnCreate() {
 }
 
 void FlutterWindow::OnDestroy() {
+  intercept_close_ = false;
+  if (close_channel_) {
+    close_channel_->SetMethodCallHandler(nullptr);
+    close_channel_ = nullptr;
+  }
   if (flutter_controller_) {
     flutter_controller_ = nullptr;
   }
@@ -51,6 +97,11 @@ LRESULT
 FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
                               WPARAM const wparam,
                               LPARAM const lparam) noexcept {
+  if (message == WM_CLOSE && intercept_close_ && close_channel_) {
+    close_channel_->InvokeMethod("onClose", nullptr);
+    return 0;
+  }
+
   // Give Flutter, including plugins, an opportunity to handle window messages.
   if (flutter_controller_) {
     std::optional<LRESULT> result =

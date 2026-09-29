@@ -11,6 +11,9 @@ by an account-isolated Rust server. Flutter is pinned with FVM.
 - Desktop app-volume slider and mute, including compact windows and now playing;
   volume/mute, shuffle, and repeat survive app restarts. Android retains system
   volume and remembers shuffle/repeat.
+- Desktop tray with Show/Quit actions and a saved **Settings → Window behavior**
+  choice: close to quit (default) or minimize to tray without stopping music.
+  Android/iOS behavior is unchanged; an unavailable tray never hides the window.
 - Admin-created accounts, Argon2id passwords, rotating/revocable sessions,
   authenticated original-file streaming with byte-range seeking.
 - In-app file selection and desktop drop, durable resumable uploads, embedded
@@ -26,11 +29,12 @@ by an account-isolated Rust server. Flutter is pinned with FVM.
   real Rust↔Dart TCP integration tests, CI and private evaluation packaging.
 
 **This is an evaluation candidate, not a certified four-platform release.**
-[Hosted CI](https://github.com/BIGGASSS/Yun/actions/runs/36492699251) passed all
-four native builds/packages, 143 Flutter tests, 10 Rust tests, TCP integration,
-null-output libmpv decoding and volume control, the container backup/restore smoke, and 27 isolated
-keyring tests on each of Ubuntu 22.04 and 24.04. Download
-private evaluation artifacts from that run (14-day retention).
+[Hosted CI](https://github.com/BIGGASSS/Yun/actions/workflows/ci.yml) builds all
+four native packages and runs Flutter/Rust tests, TCP integration, null-output
+libmpv playback, container backup/restore, and isolated keyring tests. Choose a
+successful run for the version you want; its private evaluation artifacts have
+14-day retention. See [validation evidence](docs/VALIDATION.md) for the tested
+scope and version-specific results.
 
 Hardware playback, Android/macOS/Windows runtime behavior, production signing,
 public TLS deployment and redistribution-license review still require the gates in

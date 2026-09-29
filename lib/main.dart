@@ -1,11 +1,14 @@
 import 'dart:async';
 import 'dart:ui' show AppExitResponse;
 
-import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'core/app_controller.dart';
+import 'core/desktop_controller.dart';
+import 'services/desktop_host.dart';
+import 'services/desktop_settings_store.dart';
+import 'services/native_desktop_host.dart';
 import 'services/playback_settings_store.dart';
 import 'ui/app.dart';
 import 'ui/theme.dart';
@@ -19,7 +22,14 @@ void main() {
 /// Backgrounding does not stop music. OS process termination can still lose the
 /// last (at most roughly ten seconds) uncheckpointed listening segment.
 class YunBootstrap extends StatefulWidget {
-  const YunBootstrap({super.key, this.controllerFactory});
+  const YunBootstrap({
+    super.key,
+    this.controllerFactory,
+    this.desktopHostFactory,
+  });
+
+  /// Native boundary injected by bootstrap tests; never called on touch/web.
+  final DesktopHost Function()? desktopHostFactory;
 
   final AppController Function({
     required PlaybackSettings playbackSettings,
@@ -33,6 +43,8 @@ class YunBootstrap extends StatefulWidget {
 
 class _YunBootstrapState extends State<YunBootstrap> {
   AppController? _controller;
+  DesktopController? _desktop;
+  Future<void>? _opening;
   SharedPreferences? _preferences;
   Object? _failure;
   bool _ready = false;
@@ -47,6 +59,12 @@ class _YunBootstrapState extends State<YunBootstrap> {
       onPause: () => _bestEffort(_checkpoint),
       onExitRequested: () async {
         try {
+          final desktop = _desktop;
+          if (desktop != null) {
+            return await desktop.requestApplicationExit()
+                ? AppExitResponse.exit
+                : AppExitResponse.cancel;
+          }
           await _controller?.shutdown();
           return AppExitResponse.exit;
         } catch (error) {
@@ -73,33 +91,44 @@ class _YunBootstrapState extends State<YunBootstrap> {
     try {
       await _controller?.playback.checkpoint();
     } finally {
-      await _controller?.playback.flushSettings();
+      try {
+        await _controller?.playback.flushSettings();
+      } finally {
+        await _desktop?.flushSettings();
+      }
     }
   }
 
-  Future<void> _initialize() async {
+  Future<void> _initialize() =>
+      _opening ??= _open().whenComplete(() => _opening = null);
+
+  Future<void> _open() async {
     setState(() {
       _failure = null;
       _ready = false;
     });
     final old = _controller;
-    _controller = null;
+    final oldDesktop = _desktop;
     try {
-      if (old != null) {
-        await old.shutdown();
-        old.dispose();
+      // Keep references and close interception until pending durable work is
+      // finished. A native close or OS quit during Retry must await it too.
+      if (old != null) await old.shutdown();
+      if (!mounted || (oldDesktop?.isQuitting ?? false)) return;
+      if (oldDesktop != null) {
+        // A close-to-tray event may have hidden the failed startup meanwhile.
+        // Do not remove its recovery icon while replacing desktop resources.
+        await oldDesktop.showWindow();
+        await oldDesktop.detach();
+        oldDesktop.dispose();
       }
+      old?.dispose();
+      _controller = null;
+      _desktop = null;
       _preferences = await SharedPreferences.getInstance();
       final store = SharedPreferencesPlaybackSettingsStore(_preferences!);
       final saved = await store.read();
-      final desktop =
-          !kIsWeb &&
-          switch (defaultTargetPlatform) {
-            TargetPlatform.linux ||
-            TargetPlatform.macOS ||
-            TargetPlatform.windows => true,
-            _ => false,
-          };
+      if (!mounted) return;
+      final desktop = isDesktopPlatform;
       // Touch devices retain their OS-managed volume. Shuffle and repeat are
       // shared preferences on every platform; never start playback on restore.
       final settings = PlaybackSettings(
@@ -114,8 +143,27 @@ class _YunBootstrapState extends State<YunBootstrap> {
         savePlaybackSettings: store.write,
       );
       _controller = controller;
+      if (desktop) {
+        final integration = DesktopController(
+          host: (widget.desktopHostFactory ?? NativeDesktopHost.new)(),
+          settings: SharedPreferencesDesktopSettingsStore(_preferences!),
+          shutdown: controller.shutdown,
+          checkpoint: () async {
+            try {
+              await controller.playback.checkpoint();
+            } finally {
+              await controller.playback.flushSettings();
+            }
+          },
+        );
+        _desktop = integration;
+        await integration.initialize();
+      }
+      if (!mounted || (_desktop?.isQuitting ?? false)) return;
       await controller.initialize();
-      if (mounted) setState(() => _ready = true);
+      if (mounted && !(_desktop?.isQuitting ?? false)) {
+        setState(() => _ready = true);
+      }
     } catch (error) {
       if (mounted) setState(() => _failure = error);
     }
@@ -124,6 +172,7 @@ class _YunBootstrapState extends State<YunBootstrap> {
   @override
   void dispose() {
     _lifecycle.dispose();
+    _desktop?.dispose();
     _controller?.dispose();
     super.dispose();
   }
@@ -138,6 +187,7 @@ class _YunBootstrapState extends State<YunBootstrap> {
       );
       return YunApp(
         controller: _controller!,
+        desktop: _desktop,
         initialThemeMode: theme,
         onThemeChanged: (mode) async {
           await _preferences?.setString('appearance.theme', mode.name);
@@ -177,6 +227,11 @@ class _YunBootstrapState extends State<YunBootstrap> {
                       onPressed: _initialize,
                       child: const Text('Retry'),
                     ),
+                    if (_desktop != null)
+                      TextButton(
+                        onPressed: _desktop!.quit,
+                        child: const Text('Quit Yun'),
+                      ),
                   ],
                 ],
               ),

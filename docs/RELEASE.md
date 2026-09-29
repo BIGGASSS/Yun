@@ -33,7 +33,8 @@ is **not** evidence of a completed hardware, security, signing, or license revie
 `CI` runs Flutter analyze/test; Rust fmt/test/clippy (`-D warnings`) and release
 build; shell lint, Docker/Caddy configuration and container smoke checks; and all
 four native client builds via `native-builds.yml`. Ubuntu installs GTK3, libmpv,
-libsecret, clang, CMake, Ninja, pkg-config, and liblzma development dependencies.
+libsecret, Ayatana AppIndicator, clang, CMake, Ninja, pkg-config, and liblzma
+development dependencies.
 macOS uses the Apple Silicon `macos-15` runner (asserts arm64); Windows uses x64
 MSVC on `windows-2022`; Android uses Java 17 plus the Android SDK.
 
@@ -257,11 +258,16 @@ dependencies on Ubuntu 24.04:
 
 ```sh
 sudo apt-get update
-sudo apt-get install libgtk-3-0t64 libmpv2 libsecret-1-0
+sudo apt-get install libgtk-3-0t64 libmpv2 libsecret-1-0 libayatana-appindicator3-1
 # A running user Secret Service/keyring (e.g. GNOME Keyring) is also required.
 tar -xzf yun-linux-x64.tar.gz
 bash yun/install.sh
 ```
+
+Tray display additionally needs a StatusNotifier host (for example KDE Plasma).
+Without one Yun remains usable but will not hide to the tray. Closing quits by
+default; **Settings → Window behavior** can opt into close-to-tray. Use **Quit Yun**
+before replacing binaries when that preference is enabled.
 
 The installer requires Bash/Python 3 and installs the **whole** bundle into
 `~/.local/opt/yun`, with a desktop entry in

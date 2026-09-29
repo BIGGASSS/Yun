@@ -2,7 +2,9 @@
 #define RUNNER_FLUTTER_WINDOW_H_
 
 #include <flutter/dart_project.h>
+#include <flutter/encodable_value.h>
 #include <flutter/flutter_view_controller.h>
+#include <flutter/method_channel.h>
 
 #include <memory>
 
@@ -28,6 +30,11 @@ class FlutterWindow : public Win32Window {
 
   // The Flutter instance hosted by this window.
   std::unique_ptr<flutter::FlutterViewController> flutter_controller_;
+
+  // Enabled only after Dart installs its close policy. Intercept before the
+  // engine's lifecycle delegate can turn WM_CLOSE into an application exit.
+  bool intercept_close_ = false;
+  std::unique_ptr<flutter::MethodChannel<flutter::EncodableValue>> close_channel_;
 };
 
 #endif  // RUNNER_FLUTTER_WINDOW_H_

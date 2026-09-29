@@ -23,6 +23,12 @@ the specified major. Core dependencies must also be installed before running
   a seek column capped at 640px, slim slider tracks, and local vector glyphs
   instead of icon-font glyphs. Selected shuffle/repeat have a persistent highlight.
   Touch platforms retain their original layout, including wide Android tablets.
+- Desktop-only **Settings → Window behavior**: saved Quit (default) / Minimize to
+  tray close policy, plus explicit Minimize and Quit buttons. Tray Show restores
+  and focuses the window; Quit and macOS Cmd-Q bypass the hide policy. Missing
+  trays keep the window visible, retain the preference, and expose a dismissible
+  error. Controls are platform-gated even at narrow desktop / wide mobile sizes.
+  Bootstrap supplies the optional `YunApp.desktop` controller.
 - Library search, albums/artists, metadata and immediate artwork replacement.
   Track sorting and checkbox multiselection support filtered select-all, bulk
   playback, playlist addition, offline pinning and confirmed deletion.

@@ -1,20 +1,110 @@
 import 'package:flutter/material.dart';
 
 import '../core/app_controller.dart';
+import '../core/desktop_controller.dart';
 import 'widgets.dart';
 
 class SettingsScreen extends StatefulWidget {
   const SettingsScreen({
     super.key,
     required this.app,
+    this.desktop,
     required this.themeMode,
     required this.onThemeChanged,
   });
   final AppController app;
+  final DesktopController? desktop;
   final ThemeMode themeMode;
   final ValueChanged<ThemeMode> onThemeChanged;
   @override
   State<SettingsScreen> createState() => _SettingsScreenState();
+}
+
+class _WindowBehavior extends StatelessWidget {
+  const _WindowBehavior({required this.desktop});
+
+  final DesktopController desktop;
+
+  @override
+  Widget build(BuildContext context) => ListenableBuilder(
+    listenable: desktop,
+    builder: (context, _) {
+      final enabled = !desktop.isSaving && !desktop.isQuitting;
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Text(
+            'Window behavior',
+            style: Theme.of(context).textTheme.titleLarge,
+          ),
+          const SizedBox(height: 12),
+          const Text('When closing the window'),
+          RadioGroup<DesktopCloseBehavior>(
+            groupValue: desktop.closeBehavior,
+            onChanged: (value) {
+              if (enabled && value != null) desktop.setCloseBehavior(value);
+            },
+            child: Column(
+              children: [
+                RadioListTile<DesktopCloseBehavior>(
+                  contentPadding: EdgeInsets.zero,
+                  value: DesktopCloseBehavior.quit,
+                  enabled: enabled,
+                  title: const Text('Quit Yun'),
+                  subtitle: const Text('Default'),
+                ),
+                RadioListTile<DesktopCloseBehavior>(
+                  contentPadding: EdgeInsets.zero,
+                  value: DesktopCloseBehavior.minimizeToTray,
+                  enabled: enabled,
+                  title: const Text('Minimize to tray'),
+                ),
+              ],
+            ),
+          ),
+          const Text(
+            'Closing to the tray keeps your music playing. '
+            'The window’s Minimize button still uses normal system behavior. '
+            'Use Show in the tray menu to restore Yun. '
+            'Quit in the tray menu or Quit Yun below always exits, '
+            'regardless of this preference.',
+          ),
+          if (!desktop.trayAvailable) ...[
+            const SizedBox(height: 12),
+            const Text(
+              'No usable system tray is available. Yun will stay visible '
+              'instead of hiding. You can still save a preference for when '
+              'a tray is available; your saved choice is kept.',
+            ),
+          ],
+          if (desktop.isSaving || desktop.isQuitting) ...[
+            const SizedBox(height: 12),
+            Semantics(
+              liveRegion: true,
+              child: Text(desktop.isQuitting ? 'Quitting Yun…' : 'Saving…'),
+            ),
+          ],
+          const SizedBox(height: 16),
+          Wrap(
+            spacing: 12,
+            runSpacing: 12,
+            children: [
+              OutlinedButton(
+                onPressed: enabled && desktop.canMinimize
+                    ? desktop.minimizeToTray
+                    : null,
+                child: const Text('Minimize to tray'),
+              ),
+              OutlinedButton(
+                onPressed: enabled ? desktop.quit : null,
+                child: const Text('Quit Yun'),
+              ),
+            ],
+          ),
+        ],
+      );
+    },
+  );
 }
 
 class _SettingsScreenState extends State<SettingsScreen> {
@@ -116,6 +206,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     padding: EdgeInsets.symmetric(vertical: 24),
                     child: Divider(),
                   ),
+                  if (isDesktopPlatform && widget.desktop != null) ...[
+                    _WindowBehavior(desktop: widget.desktop!),
+                    const Padding(
+                      padding: EdgeInsets.symmetric(vertical: 24),
+                      child: Divider(),
+                    ),
+                  ],
                   Text(
                     'Server & account',
                     style: Theme.of(context).textTheme.titleLarge,
