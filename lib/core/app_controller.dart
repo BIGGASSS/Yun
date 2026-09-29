@@ -38,7 +38,9 @@ class AppController extends ChangeNotifier {
     Future<void> Function(PlaybackSettings)? savePlaybackSettings,
     int Function()? listeningMonotonicMs,
     this.automaticRefresh = true,
-  }) : _api = api ?? ApiClient(),
+    this.artworkCacheMaxBytes = ArtworkCache.defaultMaxBytes,
+  }) : assert(artworkCacheMaxBytes >= 0),
+       _api = api ?? ApiClient(),
        _storageDirectory = storageDirectory ?? getApplicationSupportDirectory,
        _databaseFactory = databaseFactory ?? CacheDatabase.new {
     playback = PlaybackController(
@@ -55,6 +57,7 @@ class AppController extends ChangeNotifier {
   final Future<Directory> Function() _storageDirectory;
   final CacheDatabase Function(File) _databaseFactory;
   final bool automaticRefresh;
+  final int artworkCacheMaxBytes;
   late final PlaybackController playback;
   CacheDatabase? _database;
   TransferService? _transfers;
@@ -198,6 +201,7 @@ class AppController extends ChangeNotifier {
       api: _api,
       account: value,
       directory: Directory(p.join(_root!.path, 'artwork')),
+      maxBytes: artworkCacheMaxBytes,
       onChanged: () {
         if (generation == _generation && !_locking && !_notifierDisposed) {
           artworkChanges.notifyListeners();
@@ -650,10 +654,22 @@ class AppController extends ChangeNotifier {
     return _artwork?.path(track);
   }
 
-  Future<String?> getArtwork(Track track) async {
+  /// Keep artwork resident for a mounted foreground consumer. Release on
+  /// account/track/revision change or disposal; callbacks capture their cache.
+  VoidCallback? retainArtwork(Track track) {
+    if (!isAuthenticated || _locking) return null;
+    return _artwork?.retain(track);
+  }
+
+  Future<String?> getArtwork(Track track) => _getArtwork(track);
+
+  /// Deliberate user retry, independent of polling and cache notifications.
+  Future<String?> retryArtwork(Track track) => _getArtwork(track, retry: true);
+
+  Future<String?> _getArtwork(Track track, {bool retry = false}) async {
     if (!isAuthenticated || _locking) return null;
     final generation = _generation;
-    final path = await _artwork?.get(track, online: !isOffline);
+    final path = await _artwork?.get(track, online: !isOffline, retry: retry);
     return generation == _generation && !_locking ? path : null;
   }
 
@@ -770,7 +786,9 @@ class AppController extends ChangeNotifier {
         );
         await db.put('track', result.id, result.toJson());
         await _reloadCache();
-        if (localPath(result.id) != null) await _artwork?.get(result);
+        if (localPath(result.id) != null) {
+          await _artwork?.get(result, background: true);
+        }
         return result;
       });
   Future<void> deleteTrack(String id) => _online((db) async {

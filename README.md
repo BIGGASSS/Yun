@@ -101,6 +101,9 @@ The native smoke is opt-in locally, and enabled in Linux CI.
 Download a track, album or playlist explicitly. Playlist selections follow server
 changes when connected; overlapping selections share a single copy. Originals are
 not silently evicted. Artwork has a separate bounded 1 GiB per-account cache.
+Mounted artwork consumers protect resident images from speculative eviction. If
+artwork cannot fit, placeholders are used instead of repeatedly downloading and
+evicting it; a new foreground demand or revision can retry capacity misses.
 Selected uploads are first copied into account-private staging storage (up to
 1 GiB per file by default); successful/cancelled jobs remove only those staged
 copies, never your originals. Allow staging space in addition to downloads.

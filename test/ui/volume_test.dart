@@ -49,6 +49,8 @@ class _VolumeApp extends ChangeNotifier implements AppController {
   @override
   Future<String?> getArtwork(Track track) async => null;
   @override
+  VoidCallback? retainArtwork(Track track) => null;
+  @override
   String? artworkPath(Track track) => null;
   @override
   bool isPinned(String kind, String id) => false;

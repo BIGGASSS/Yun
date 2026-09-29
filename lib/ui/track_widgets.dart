@@ -24,7 +24,14 @@ class TrackArtwork extends StatefulWidget {
 
 class _TrackArtworkState extends State<TrackArtwork> {
   Future<String?>? _request;
-  Object? _requestKey;
+  Object? _requestKey, _demandKey;
+  VoidCallback? _releaseArtwork;
+
+  @override
+  void dispose() {
+    _releaseArtwork?.call();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -43,6 +50,22 @@ class _TrackArtworkState extends State<TrackArtwork> {
       animation: Listenable.merge([widget.app, widget.app.artworkChanges]),
       builder: (context, _) {
         final app = widget.app;
+        final demandKey = (
+          app,
+          app.account,
+          track?.id,
+          track?.revision,
+          track?.hasArtwork,
+        );
+        if (_demandKey != demandKey) {
+          _releaseArtwork?.call();
+          _releaseArtwork = null;
+          _demandKey = demandKey;
+        }
+        // Connectivity/busy notifications are not new foreground demand. Keep
+        // the lease across them so budget misses cannot repeatedly refill.
+        // A locked/uninitialized account may become available on a later build.
+        _releaseArtwork ??= track == null ? null : app.retainArtwork(track);
         // A future's old snapshot must never paint another account/revision.
         final key = (
           app,

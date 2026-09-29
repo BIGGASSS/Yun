@@ -17,10 +17,15 @@ class _ArtworkEntry {
   final int bytes;
 }
 
+class _ArtworkDemand {
+  int consumers = 0;
+}
+
 class _ArtworkRequest {
   _ArtworkRequest(this.track, this.online, this.background);
   final Track track;
   bool online, background;
+  final token = CancelToken();
   final result = Completer<String?>();
 }
 
@@ -33,10 +38,11 @@ class ArtworkCache {
     required this.account,
     required Directory directory,
     this.onChanged,
-    this.maxBytes = 1024 * 1024 * 1024,
+    this.maxBytes = defaultMaxBytes,
     this.maxConcurrentRequests = 3,
     this.maxPendingRequests = 64,
-  }) : assert(maxConcurrentRequests > 0),
+  }) : assert(maxBytes >= 0),
+       assert(maxConcurrentRequests > 0),
        assert(maxPendingRequests >= maxConcurrentRequests),
        directory = Directory(
          p.join(directory.path, _hash([account.server, account.userId])),
@@ -47,12 +53,17 @@ class ArtworkCache {
   final Directory directory;
   final void Function()? onChanged;
   final int maxBytes, maxConcurrentRequests, maxPendingRequests;
+  static const defaultMaxBytes = 1024 * 1024 * 1024;
   static const maxImageBytes = 10 * 1024 * 1024;
-  final _token = CancelToken();
   final Map<String, _ArtworkRequest> _pending = {};
   final _foreground = ListQueue<_ArtworkRequest>();
   final _background = ListQueue<_ArtworkRequest>();
   final _entries = <String, _ArtworkEntry>{};
+  final _demands = <String, _ArtworkDemand>{};
+  // Missing due to capacity is not fresh fetch intent. Keep these markers for
+  // the revision, not on a timer that would merely restart the eviction loop.
+  final _budgetMisses = <String>{};
+  final _tooLarge = <String>{};
   Map<String, int> _revisions = {};
   Future<void> _tail = Future.value();
   Future<void>? _initializing, _closing;
@@ -77,7 +88,45 @@ class ArtworkCache {
       for (final track in tracks)
         if (track.hasArtwork) track.id: track.revision,
     };
+    if (_budgetMisses.isNotEmpty ||
+        _tooLarge.isNotEmpty ||
+        _demands.isNotEmpty) {
+      final validKeys = {
+        for (final track in tracks)
+          if (_valid(track)) _key(track),
+      };
+      _budgetMisses.retainWhere(validKeys.contains);
+      _tooLarge.retainWhere(validKeys.contains);
+      _demands.removeWhere((key, _) => !validKeys.contains(key));
+    }
   }
+
+  /// Protect resident artwork for a continuous foreground demand (e.g. a
+  /// mounted widget). Multiple consumers share admission state. Only a genuinely
+  /// new demand may retry a capacity miss; oversized revisions stay suppressed.
+  /// Release is idempotent and does not initiate network work.
+  void Function()? retain(Track track) {
+    if (!_valid(track)) return null;
+    final key = _key(track);
+    final demand = _demands.putIfAbsent(key, () {
+      _budgetMisses.remove(key);
+      return _ArtworkDemand();
+    });
+    demand.consumers++;
+    var released = false;
+    return () {
+      if (released) return;
+      released = true;
+      demand.consumers--;
+      if (demand.consumers == 0 && identical(_demands[key], demand)) {
+        _demands.remove(key);
+      }
+    };
+  }
+
+  int _protectedBytesExcept(String key) => _demands.keys
+      .where((demandKey) => demandKey != key)
+      .fold(0, (bytes, demandKey) => bytes + (_entries[demandKey]?.bytes ?? 0));
 
   /// No synchronous filesystem operations on the UI isolate. [get] validates
   /// availability asynchronously, including after an external file deletion.
@@ -120,14 +169,21 @@ class ArtworkCache {
 
   /// Local-first, deduplicated, bounded and foreground-prioritized. Background
   /// work is best-effort: a full queue drops prefetch instead of retaining the
-  /// entire library. A foreground request may displace queued prefetch.
+  /// entire library. A foreground request may displace queued prefetch. Budget
+  /// misses do not automatically refill: use [retain] for new foreground demand,
+  /// or [retry] for a deliberate user retry, never for polling/notifications.
   Future<String?> get(
     Track track, {
     bool online = true,
     bool background = false,
+    bool retry = false,
   }) {
     if (!_valid(track)) return Future.value(null);
     final key = _key(track);
+    if (retry) {
+      _budgetMisses.remove(key);
+      _tooLarge.remove(key);
+    }
     final existing = _pending[key];
     if (existing != null) {
       existing.online |= online;
@@ -136,6 +192,16 @@ class ArtworkCache {
         if (_background.remove(existing)) _foreground.add(existing);
       }
       return existing.result.future;
+    }
+    final entry = _entries[key];
+    if (entry != null) {
+      // Cached reads need no network admission slot, even with a full queue.
+      return _cachedOrGet(track, entry, online: online, background: background);
+    }
+    if (maxBytes == 0 ||
+        _budgetMisses.contains(key) ||
+        _tooLarge.contains(key)) {
+      return Future.value(null);
     }
     if (_pending.length >= maxPendingRequests) {
       if (background || _background.isEmpty) return Future.value(null);
@@ -148,6 +214,36 @@ class ArtworkCache {
     (background ? _background : _foreground).add(request);
     _pump();
     return request.result.future;
+  }
+
+  Future<String?> _cachedOrGet(
+    Track track,
+    _ArtworkEntry entry, {
+    required bool online,
+    required bool background,
+  }) async {
+    try {
+      final path = await _cachedPath(track, entry);
+      if (!_valid(track)) return null;
+      return path ?? await get(track, online: online, background: background);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Future<String?> _cachedPath(Track track, _ArtworkEntry entry) async {
+    final key = _key(track);
+    if (await File(entry.path).exists()) {
+      return identical(_entries[key], entry) ? entry.path : null;
+    }
+    await _serial(() async {
+      if (identical(_entries[key], entry)) {
+        _entries.remove(key);
+        _totalBytes -= entry.bytes;
+        if (_valid(track)) onChanged?.call();
+      }
+    });
+    return null;
   }
 
   void _pump() {
@@ -171,6 +267,9 @@ class ArtworkCache {
     } catch (_) {
       // Optional artwork must not interrupt audio or offline browsing.
     } finally {
+      // Cancelling a subscription to Dio's response wrapper alone does not
+      // necessarily close its underlying transport. Use a per-request token.
+      request.token.cancel('Artwork request finished');
       _pending.remove(_key(request.track));
       _active--;
       request.result.complete(_valid(request.track) ? result : null);
@@ -183,31 +282,48 @@ class ArtworkCache {
     final key = _key(track);
     final entry = _entries[key];
     if (entry != null) {
-      if (await File(entry.path).exists()) return entry.path;
-      await _serial(() async {
-        if (identical(_entries[key], entry)) {
-          _entries.remove(key);
-          _totalBytes -= entry.bytes;
-          if (_valid(track)) onChanged?.call();
-        }
-      });
+      final path = await _cachedPath(track, entry);
+      if (path != null) return path;
     }
-    if (!request.online || !_valid(track)) return null;
+    if (!request.online ||
+        !_valid(track) ||
+        maxBytes == 0 ||
+        _budgetMisses.contains(key) ||
+        _tooLarge.contains(key)) {
+      return null;
+    }
+    if (_protectedBytesExcept(key) >= maxBytes) {
+      _budgetMisses.add(key);
+      return null;
+    }
     final response = await api.request(
       '/tracks/${Uri.encodeComponent(track.id)}/artwork',
       query: {'revision': track.revision},
       responseType: ResponseType.stream,
-      cancelToken: _token,
+      cancelToken: request.token,
     );
+    final stream = (response.data as ResponseBody).stream;
+    final limit = maxBytes < maxImageBytes ? maxBytes : maxImageBytes;
+    final length = int.tryParse(response.headers.value('content-length') ?? '');
+    final tooLarge = length != null && length > limit;
+    final cannotFit =
+        length != null && length + _protectedBytesExcept(key) > maxBytes;
+    if (!_valid(track) || tooLarge || cannotFit) {
+      if (_valid(track)) {
+        (tooLarge ? _tooLarge : _budgetMisses).add(key);
+      }
+      await stream.listen(null).cancel();
+      return null;
+    }
     final bytes = BytesBuilder(copy: false);
-    await for (final chunk in (response.data as ResponseBody).stream) {
+    await for (final chunk in stream) {
       if (!_valid(track)) return null;
-      if (bytes.length + chunk.length > maxImageBytes) {
-        throw StateError('Artwork exceeds 10 MiB');
+      if (bytes.length + chunk.length > limit) {
+        _tooLarge.add(key);
+        return null;
       }
       bytes.add(chunk);
     }
-    final length = int.tryParse(response.headers.value('content-length') ?? '');
     if (length != null && length != bytes.length) return null;
     return _serial(() => _store(track, bytes.takeBytes()));
   }
@@ -220,25 +336,39 @@ class ArtworkCache {
   }
 
   Future<String?> _store(Track track, List<int> bytes) async {
-    if (!_valid(track) ||
-        bytes.isEmpty ||
-        bytes.length > maxImageBytes ||
-        bytes.length > maxBytes) {
+    if (!_valid(track) || bytes.isEmpty) return null;
+    final key = _key(track);
+    if (bytes.length > maxImageBytes || bytes.length > maxBytes) {
+      _tooLarge.add(key);
+      return null;
+    }
+    if (bytes.length + _protectedBytesExcept(key) > maxBytes) {
+      _budgetMisses.add(key);
       return null;
     }
     await directory.create(recursive: true);
-    final key = _key(track);
     final file = File(p.join(directory.path, '$key.image'));
     final partial = File('${file.path}.part');
     try {
       await partial.writeAsBytes(bytes, flush: true);
       if (!_valid(track)) return null;
+      // Reserve capacity before publishing. If eviction fails, the partial is
+      // discarded rather than leaving an over-budget committed image/index.
+      if (!await _trim(incoming: track, bytes: bytes.length) ||
+          !_valid(track)) {
+        return null;
+      }
       await partial.rename(file.path);
+      if (!_valid(track)) {
+        _totalBytes -= _entries.remove(key)?.bytes ?? 0;
+        await file.delete();
+        return null;
+      }
       _totalBytes -= _entries.remove(key)?.bytes ?? 0;
       _entries[key] = _ArtworkEntry(file.path, bytes.length);
       _totalBytes += bytes.length;
-      await _trim();
-      if (!_valid(track)) return null;
+      _budgetMisses.remove(key);
+      _tooLarge.remove(key);
       onChanged?.call();
       return file.path;
     } finally {
@@ -246,19 +376,44 @@ class ArtworkCache {
     }
   }
 
-  /// The index is insertion-ordered by age. No directory scans/stats/sorts per
-  /// image; each eviction is O(1) bookkeeping plus its asynchronous unlink.
-  Future<void> _trim() async {
-    while (_totalBytes > maxBytes && _entries.isNotEmpty) {
-      final key = _entries.keys.first;
-      final entry = _entries[key]!;
-      try {
-        await File(entry.path).delete();
-      } on FileSystemException {
-        if (await File(entry.path).exists()) rethrow;
+  /// Walk the age-ordered in-memory index, never scanning the directory per
+  /// image. Prefer idle entries; speculative work cannot evict demanded artwork.
+  /// Startup must still enforce the hard cap on an already oversized disk cache.
+  Future<bool> _trim({Track? incoming, int bytes = 0}) async {
+    final incomingKey = incoming == null ? null : _key(incoming);
+    var changed = false;
+    try {
+      while (_totalBytes - (_entries[incomingKey]?.bytes ?? 0) + bytes >
+          maxBytes) {
+        if (incoming != null && !_valid(incoming)) return false;
+        final idle = _entries.keys.where(
+          (key) => key != incomingKey && !_demands.containsKey(key),
+        );
+        if (idle.isEmpty && incomingKey != null) {
+          _budgetMisses.add(incomingKey);
+          return false;
+        }
+        final key = idle.isNotEmpty ? idle.first : _entries.keys.first;
+        // Make eviction visible before awaiting unlink. A retain arriving during
+        // deletion establishes a new demand; do not overwrite its admission.
+        final entry = _entries.remove(key)!;
+        _totalBytes -= entry.bytes;
+        _budgetMisses.add(key);
+        try {
+          await File(entry.path).delete();
+        } on FileSystemException {
+          if (await File(entry.path).exists()) {
+            _entries[key] = entry;
+            _totalBytes += entry.bytes;
+            _budgetMisses.remove(key);
+            rethrow;
+          }
+        }
+        changed = true;
       }
-      _entries.remove(key);
-      _totalBytes -= entry.bytes;
+      return true;
+    } finally {
+      if (changed && incoming != null && !_closed) onChanged?.call();
     }
   }
 
@@ -266,7 +421,9 @@ class ArtworkCache {
   Future<void> _close() async {
     _closed = true;
     _revisions.clear();
-    _token.cancel('Account locked');
+    for (final request in _pending.values) {
+      request.token.cancel('Account locked');
+    }
     for (final request in [..._foreground, ..._background]) {
       _pending.remove(_key(request.track));
       request.result.complete(null);
@@ -276,6 +433,9 @@ class ArtworkCache {
     await Future.wait(_pending.values.map((r) => r.result.future));
     await _tail;
     _entries.clear();
+    _demands.clear();
+    _budgetMisses.clear();
+    _tooLarge.clear();
     _totalBytes = 0;
   }
 }

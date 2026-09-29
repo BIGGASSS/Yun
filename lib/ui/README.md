@@ -41,7 +41,10 @@ the specified major. Core dependencies must also be installed before running
   new repeats are not offered, including additions from Library.
 - Downloads show per-track byte progress, queued/verifying/failed states, pinned
   selections, storage totals, removal and retries. Artwork is cached privately
-  and remains visible offline.
+  and remains visible offline. Mounted artwork consumers share revision-scoped
+  demand and protect resident images from background eviction. Capacity misses
+  remain placeholders for that demand rather than refetching on cache, busy or
+  connectivity notifications; disposing every consumer allows new demand.
 - Upload picker and desktop drop use persistent core jobs, acknowledged-byte
   progress, cancellation/retry. Sources are copied into durable account-private
   staging storage. Cancelled uploads require selecting the source file again;
