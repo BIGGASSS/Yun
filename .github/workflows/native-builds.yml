@@ -3,7 +3,7 @@ on:
   workflow_call:
     inputs:
       android_signing:
-        description: 'debug-signed evaluation or manual release-signed APK'
+        description: 'debug-signed evaluation or release-signed APK (manual/tag release)'
         type: string
         default: debug-signed
     secrets:
@@ -90,10 +90,16 @@ jobs:
         env:
           MODE: ${{ inputs.android_signing }}
           EVENT: ${{ github.event_name }}
+          REF: ${{ github.ref }}
         run: |
           case "$MODE" in
             debug-signed) ;;
-            release-signed) test "$EVENT" = workflow_dispatch ;;
+            release-signed)
+              if [[ "$EVENT" != workflow_dispatch && !( "$EVENT" == push && "$REF" == refs/tags/v* ) ]]; then
+                echo 'Release signing requires manual dispatch or a v* tag push' >&2
+                exit 1
+              fi
+              ;;
             *) echo 'Unknown Android signing mode' >&2; exit 1 ;;
           esac
       - uses: actions/checkout@v4

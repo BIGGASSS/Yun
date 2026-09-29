@@ -1,13 +1,17 @@
-# Private release candidates
+# Releases and private candidates
 
 ## Scope and provenance
 
-The repository's Actions workflows upload **private workflow artifacts only**.
-They do not create tags, GitHub Releases, publish packages, or push container
-images. Artifact access follows repository permissions; keep this repository
-private. Retention is 14 days; authorized operators should preserve approved
-candidates/checksums in private storage. An artifact is **not** evidence of a
-completed hardware, security, signing, or license review.
+Pushing a `v*` tag triggers **Release**, validates the source, builds all four
+clients and the Linux server, and publishes their archives/APK plus `SHA256SUMS`
+to a GitHub Release with generated release notes. Android uses the configured
+release keystore (no debug fallback); macOS and Windows remain unsigned. All
+builds must succeed before publication. Releases follow repository visibility;
+review the acceptance and license gates below before pushing a release tag.
+
+CI and manual Release runs upload workflow artifacts only (14-day retention).
+They do not publish a GitHub Release, packages, or container images. An artifact
+is **not** evidence of a completed hardware, security, signing, or license review.
 
 - `.fvmrc` is the Flutter version source of truth: currently **3.47.5**.
 - `.github/actions/flutter/action.yml` first bootstraps that exact Flutter/Dart
@@ -22,7 +26,7 @@ completed hardware, security, signing, or license review.
   run, lockfiles, tool versions, and checksums. Runner/base OS and native dependency
   downloads are not fully hermetic; these scripts do not promise reproducible bytes.
 
-## CI and manual candidate build
+## Tag releases and manual candidate builds
 
 `CI` runs Flutter analyze/test; Rust fmt/test/clippy (`-D warnings`) and release
 build; shell lint, Docker/Caddy configuration and container smoke checks; and all
@@ -31,11 +35,24 @@ libsecret, clang, CMake, Ninja, pkg-config, and liblzma development dependencies
 macOS uses the Apple Silicon `macos-15` runner (asserts arm64); Windows uses x64
 MSVC on `windows-2022`; Android uses Java 17 plus the Android SDK.
 
-To make a candidate, select **Actions → Private release candidates → Run
+To publish a release, update `pubspec.yaml`'s version/build number, commit the
+reviewed changes, then push a tag such as:
+
+```sh
+git tag v1.0.0
+git push origin v1.0.0
+```
+
+Tags do not override the version in `pubspec.yaml`. Allow `v*` tags in the
+`release-signing` environment's deployment rules and approve its job if required.
+Missing signing secrets or a failed validation/build prevents publication.
+
+To make an artifact-only candidate, select **Actions → Release → Run
 workflow**, choosing the reviewed branch/commit and `android_signing` mode
 (default `debug-signed`; opt-in `release-signed`). Validation gates client/server
-packaging, including Flutter tests against a freshly built actual server binary. Download the per-target artifacts from that workflow run; there is no
-public release step. Check `SHA256SUMS` against the contained archives, e.g.
+packaging, including Flutter tests against a freshly built actual server binary.
+Download the per-target artifacts from that workflow run; manual dispatch does
+not publish a GitHub Release. Check `SHA256SUMS` against the contained archives, e.g.
 `sha256sum -c SHA256SUMS` (Linux) or `shasum -a 256 -c SHA256SUMS` (macOS).
 On Windows use `Get-FileHash -Algorithm SHA256 <archive>` and compare explicitly.
 Unsigned checksums catch corruption, not an attacker replacing both files.
@@ -46,11 +63,12 @@ Unsigned checksums catch corruption, not an attacker replacing both files.
 | `yun-macos-arm64-unsigned` | ARM64 release app in a drag-to-Applications DMG; **no Developer ID signing/notarization**, at most Flutter's ad-hoc signatures |
 | `yun-windows-x64-unsigned` | Complete release bundle ZIP; **no Authenticode signing**, portable executable with adjacent DLLs/data |
 | `yun-android-arm64-debug-signed` | Default: **debug-mode, debug-key-signed** ARM64 APK, not a production/Play release |
-| `yun-android-arm64-release-signed` | Manual opt-in only: release-mode ARM64 APK signed with the operator's keystore; signature verified with `apksigner`, still subject to acceptance/license gates |
-| `yun-server-linux-x64` | Locked Rust server release binary (CI), or tar.gz with server operations docs and Cargo dependency inventory (manual workflow) |
+| `yun-android-arm64-release-signed` | Tag releases or manual opt-in: release-mode ARM64 APK signed with the operator's keystore; signature verified with `apksigner`, still subject to acceptance/license gates |
+| `yun-server-linux-x64` | Locked Rust server release binary (CI), or tar.gz with server operations docs and Cargo dependency inventory (Release workflow) |
 
-Android signing is implemented as an **opt-in manual path**, not evidence that a
-signed build has been executed or accepted. Windows Authenticode and macOS Developer
+Android release signing runs automatically for tag releases and is opt-in for
+manual candidates; configuration alone is not evidence that a signed build has
+been executed or accepted. Windows Authenticode and macOS Developer
 ID signing/notarization remain operator-only procedures below; their workflow
 artifacts remain explicitly unsigned. Play App Signing/AAB publication is not
 implemented. Never commit signing keys, passwords, or notarization credentials.
@@ -92,10 +110,11 @@ Before running `release-signed`:
    encrypted offline keystore backup and independently record its certificate
    SHA-256 fingerprint; future APK updates require the same key. Check application
    ID, version code, certificate expiry, and key ownership before approval.
-3. Run **Private release candidates**, select `release-signed`, inspect the exact
-   source commit and workflow/dependency changes, and approve the environment job.
-   Only manual dispatch may request release signing. Do not approve untrusted
-   code: Gradle/plugins/build scripts can access the process environment and key.
+3. Push a reviewed `v*` tag, or run **Release** manually with `release-signed`.
+   Inspect the exact source commit and workflow/dependency changes, and approve
+   the environment job. Only manual dispatch or a `v*` tag push may request
+   release signing. Do not approve untrusted code: Gradle/plugins/build scripts
+   can access the process environment and key.
 4. `scripts/release/build-android.sh` fails on absent secrets, invalid base64,
    Gradle signing/build errors, or failed `apksigner verify`; there is **no debug
    fallback**. It uses an owner-only temporary directory on the ephemeral runner,
@@ -291,8 +310,8 @@ restrictions, audio focus, and actual codec support still need device testing.
 ## Dependency/license redistribution gate
 
 `NOTICES.txt` is a warning/checklist pointer, **not a complete notices bundle**.
-The Dart inventory and lockfile are supplied with client artifacts; the manual
-server artifact includes Cargo metadata. These inventories do not enumerate every
+The Dart inventory and lockfile are supplied with client artifacts; the Release
+workflow's server archive includes Cargo metadata. These inventories do not enumerate every
 native binary pulled by plugins. Private artifact upload does not itself satisfy
 third-party obligations. Before sharing a candidate beyond authorized evaluation:
 

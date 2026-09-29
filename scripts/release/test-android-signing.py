@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import subprocess
 import tempfile
+import textwrap
 import unittest
 
 SCRIPT = Path(__file__).resolve().with_name("build-android.sh")
@@ -17,6 +18,31 @@ SECRETS = {
 
 
 class AndroidSigningTests(unittest.TestCase):
+    def test_workflow_signing_request_gate(self):
+        workflow = SCRIPT.parents[2] / ".github/workflows/native-builds.yml"
+        # Exercise the actual shell gate without requiring a YAML dependency.
+        step = workflow.read_text().split("- name: Validate signing request\n", 1)[1]
+        gate = textwrap.dedent(step.split("        run: |\n", 1)[1].split("      - uses:", 1)[0])
+        cases = [
+            ("debug-signed", "pull_request", "refs/pull/1/merge", True),
+            ("release-signed", "workflow_dispatch", "refs/heads/main", True),
+            ("release-signed", "push", "refs/tags/v1.0.0", True),
+            ("release-signed", "push", "refs/tags/v1.0.0-rc.1", True),
+            ("release-signed", "push", "refs/heads/main", False),
+            ("release-signed", "push", "refs/heads/v1.0.0", False),
+            ("release-signed", "push", "refs/tags/other", False),
+            ("release-signed", "pull_request", "refs/tags/v1.0.0", False),
+            ("unknown", "push", "refs/tags/v1.0.0", False),
+        ]
+        for mode, event, ref, allowed in cases:
+            with self.subTest(mode=mode, event=event, ref=ref):
+                result = subprocess.run(
+                    ["bash", "-e", "-c", gate],
+                    env=dict(os.environ, MODE=mode, EVENT=event, REF=ref),
+                    capture_output=True, text=True,
+                )
+                self.assertEqual(result.returncode == 0, allowed, result.stderr)
+
     def run_build(self, mode, secrets=None, fail_build=False, fail_verify=False):
         with tempfile.TemporaryDirectory(prefix="yun signing test ") as directory:
             root = Path(directory)

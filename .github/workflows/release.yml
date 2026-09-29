@@ -1,6 +1,8 @@
-name: Private release candidates
-# Artifacts only: no tags, GitHub Releases, registry pushes, or public distribution.
+name: Release
 on:
+  push:
+    tags:
+      - 'v*'
   workflow_dispatch:
     inputs:
       android_signing:
@@ -14,7 +16,7 @@ on:
 permissions:
   contents: read
 concurrency:
-  group: release-candidate-${{ github.ref }}
+  group: release-${{ github.ref }}
   cancel-in-progress: false
 jobs:
   validate:
@@ -47,7 +49,7 @@ jobs:
     needs: validate
     uses: ./.github/workflows/native-builds.yml
     with:
-      android_signing: ${{ inputs.android_signing }}
+      android_signing: ${{ github.event_name == 'push' && 'release-signed' || inputs.android_signing }}
     # Prefer protected release-signing environment secrets on the called job.
     # Explicit mapping also supports repository/org secrets; do not inherit all.
     secrets:
@@ -78,3 +80,42 @@ jobs:
           path: dist/
           if-no-files-found: error
           retention-days: 14
+  publish:
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: [clients, server]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: yun-*
+          path: artifacts
+          # Each artifact has its own SHA256SUMS and inventory files.
+          merge-multiple: false
+      - name: Verify and collect release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          assets=(
+            yun-linux-x64/yun-linux-x64.tar.gz
+            yun-macos-arm64-unsigned/yun-macos-arm64-unsigned.dmg
+            yun-windows-x64-unsigned/yun-windows-x64-unsigned.zip
+            yun-android-arm64-release-signed/yun-android-arm64-release-signed.apk
+            yun-server-linux-x64/yun-server-linux-x64.tar.gz
+          )
+          for asset in "${assets[@]}"; do
+            (cd "artifacts/$(dirname "$asset")" && sha256sum --check SHA256SUMS)
+            cp "artifacts/$asset" dist/
+          done
+          python3 scripts/release/checksums.py
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          gh release create "$TAG" dist/* --verify-tag --title "$TAG" --generate-notes \
+            --notes 'Android is release-signed. macOS and Windows builds are unsigned. See docs/RELEASE.md for installation and validation caveats.'

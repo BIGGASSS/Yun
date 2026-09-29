@@ -160,8 +160,10 @@ restored data directory, and validates the Caddyfile. It does **not** provision 
 public certificate, test clients, or prove semantic restoration of a full library.
 The CI also builds Linux x64, macOS ARM64, Windows x64, and Android ARM64 artifacts
 using the exact `.fvmrc` version. CI Android artifacts are explicitly debug-signed;
-manual release dispatch can opt into protected-environment Android release signing.
-Artifacts contain inventories, not a license audit. The manual candidate workflow
+manual release dispatch can opt into protected-environment Android release signing,
+and `v*` tag releases require it. Tag runs publish GitHub Releases after all builds
+succeed; CI and manual candidates remain artifact-only.
+Artifacts contain inventories, not a license audit. The Release workflow
 builds the actual server before Flutter integration tests, rather than allowing
 those tests to skip for lack of a binary.
 

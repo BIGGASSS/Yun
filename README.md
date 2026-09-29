@@ -145,10 +145,11 @@ monitoring and verified backup/restore. **Do not publish the HTTP origin port.**
 The server is for authenticated personal uploads, not hostile public hosting; its
 bounded metadata parser is not an OS sandbox.
 
-[RELEASE.md](docs/RELEASE.md) describes native evaluation artifacts and installation.
-Workflows retain artifacts inside the private repository, not public Releases.
-macOS/Windows artifacts are unsigned for distribution; Android evaluation APKs
-use debug signing, with an opt-in fail-closed release-signing workflow for an
-operator-supplied keystore. Production signing/notarization and dependency license/source
+[RELEASE.md](docs/RELEASE.md) describes releases, evaluation artifacts and installation.
+Push a `v*` tag (for example `v1.0.0`) to validate, build all clients and the Linux
+server, and publish a GitHub Release with checksums. Tag releases use the configured
+Android release signing; macOS/Windows artifacts remain unsigned. CI and manual
+Release runs retain workflow artifacts only; manual runs default to debug-signed
+Android APKs with opt-in fail-closed release signing. Production signing/notarization and dependency license/source
 obligations are explicit release gates. No open-source license is granted for
 this private project; third-party dependencies retain their respective licenses.
