@@ -163,8 +163,8 @@ using the exact `.fvmrc` version. CI Android artifacts are explicitly debug-sign
 manual release dispatch can opt into protected-environment Android release signing,
 and `v*` tag releases require it. Tag runs publish GitHub Releases after all builds
 succeed; CI and manual candidates remain artifact-only.
-Artifacts contain inventories, not a license audit. The Release workflow
-builds the actual server before Flutter integration tests, rather than allowing
+Artifacts contain inventories, not a license audit. Both the Release and Private
+release candidates workflows build the actual server before Flutter integration tests, rather than allowing
 those tests to skip for lack of a binary.
 
 ## Required before accepting a private candidate

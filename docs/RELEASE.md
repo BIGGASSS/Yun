@@ -2,14 +2,16 @@
 
 ## Scope and provenance
 
-Pushing a `v*` tag triggers **Release**, validates the source, builds all four
+Pushing a `v*` tag triggers **Release** (`.github/workflows/tag-release.yml`),
+validates the source, builds all four
 clients and the Linux server, and publishes their archives/APK plus `SHA256SUMS`
 to a GitHub Release with generated release notes. Android uses the configured
 release keystore (no debug fallback); macOS and Windows remain unsigned. All
 builds must succeed before publication. Releases follow repository visibility;
 review the acceptance and license gates below before pushing a release tag.
 
-CI and manual Release runs upload workflow artifacts only (14-day retention).
+CI and the separate **Private release candidates** workflow
+(`.github/workflows/release.yml`) upload workflow artifacts only (14-day retention).
 They do not publish a GitHub Release, packages, or container images. An artifact
 is **not** evidence of a completed hardware, security, signing, or license review.
 
@@ -47,7 +49,7 @@ Tags do not override the version in `pubspec.yaml`. Allow `v*` tags in the
 `release-signing` environment's deployment rules and approve its job if required.
 Missing signing secrets or a failed validation/build prevents publication.
 
-To make an artifact-only candidate, select **Actions → Release → Run
+To make an artifact-only candidate, select **Actions → Private release candidates → Run
 workflow**, choosing the reviewed branch/commit and `android_signing` mode
 (default `debug-signed`; opt-in `release-signed`). Validation gates client/server
 packaging, including Flutter tests against a freshly built actual server binary.
@@ -64,7 +66,7 @@ Unsigned checksums catch corruption, not an attacker replacing both files.
 | `yun-windows-x64-unsigned` | Complete release bundle ZIP; **no Authenticode signing**, portable executable with adjacent DLLs/data |
 | `yun-android-arm64-debug-signed` | Default: **debug-mode, debug-key-signed** ARM64 APK, not a production/Play release |
 | `yun-android-arm64-release-signed` | Tag releases or manual opt-in: release-mode ARM64 APK signed with the operator's keystore; signature verified with `apksigner`, still subject to acceptance/license gates |
-| `yun-server-linux-x64` | Locked Rust server release binary (CI), or tar.gz with server operations docs and Cargo dependency inventory (Release workflow) |
+| `yun-server-linux-x64` | Locked Rust server release binary (CI), or tar.gz with server operations docs and Cargo dependency inventory (release/candidate workflows) |
 
 Android release signing runs automatically for tag releases and is opt-in for
 manual candidates; configuration alone is not evidence that a signed build has
@@ -110,7 +112,7 @@ Before running `release-signed`:
    encrypted offline keystore backup and independently record its certificate
    SHA-256 fingerprint; future APK updates require the same key. Check application
    ID, version code, certificate expiry, and key ownership before approval.
-3. Push a reviewed `v*` tag, or run **Release** manually with `release-signed`.
+3. Push a reviewed `v*` tag, or run **Private release candidates** with `release-signed`.
    Inspect the exact source commit and workflow/dependency changes, and approve
    the environment job. Only manual dispatch or a `v*` tag push may request
    release signing. Do not approve untrusted code: Gradle/plugins/build scripts
@@ -310,8 +312,8 @@ restrictions, audio focus, and actual codec support still need device testing.
 ## Dependency/license redistribution gate
 
 `NOTICES.txt` is a warning/checklist pointer, **not a complete notices bundle**.
-The Dart inventory and lockfile are supplied with client artifacts; the Release
-workflow's server archive includes Cargo metadata. These inventories do not enumerate every
+The Dart inventory and lockfile are supplied with client artifacts; both release
+and candidate server archives include Cargo metadata. These inventories do not enumerate every
 native binary pulled by plugins. Private artifact upload does not itself satisfy
 third-party obligations. Before sharing a candidate beyond authorized evaluation:
 

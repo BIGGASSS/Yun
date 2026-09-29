@@ -148,8 +148,8 @@ bounded metadata parser is not an OS sandbox.
 [RELEASE.md](docs/RELEASE.md) describes releases, evaluation artifacts and installation.
 Push a `v*` tag (for example `v1.0.0`) to validate, build all clients and the Linux
 server, and publish a GitHub Release with checksums. Tag releases use the configured
-Android release signing; macOS/Windows artifacts remain unsigned. CI and manual
-Release runs retain workflow artifacts only; manual runs default to debug-signed
+Android release signing; macOS/Windows artifacts remain unsigned. CI and the separate
+**Private release candidates** workflow retain workflow artifacts only; candidates default to debug-signed
 Android APKs with opt-in fail-closed release signing. Production signing/notarization and dependency license/source
 obligations are explicit release gates. No open-source license is granted for
 this private project; third-party dependencies retain their respective licenses.
