@@ -16,7 +16,9 @@ the specified major. Core dependencies must also be installed before running
 - Linux/macOS/Windows: app-local 0–100% volume and mute in the player and
   now-playing sheet. Compact windows use a Volume button/dialog. Muting remembers
   the previous positive level; sliders support keyboard input and spoken percent
-  values. Android keeps its existing system-volume controls, even on wide screens.
+  values. Volume/mute (including the unmute level), shuffle, and repeat persist
+  across restarts. Android keeps its existing system-volume controls, even on
+  wide screens, and remembers shuffle/repeat. Queue/position do not auto-restore.
 - Desktop's expanded player uses balanced side zones around centered transport,
   a seek column capped at 640px, slim slider tracks, and local vector glyphs
   instead of icon-font glyphs. Selected shuffle/repeat have a persistent highlight.

@@ -11,11 +11,15 @@ void main() {
     SharedPreferences.setMockInitialValues({});
     await tester.pumpWidget(
       YunBootstrap(
-        controllerFactory: () => AppController(
-          storageDirectory: () =>
-              Future.error(StateError('Storage unavailable')),
-          enableSystemControls: false,
-        ),
+        controllerFactory:
+            ({required playbackSettings, required savePlaybackSettings}) =>
+                AppController(
+                  playbackSettings: playbackSettings,
+                  savePlaybackSettings: savePlaybackSettings,
+                  storageDirectory: () =>
+                      Future.error(StateError('Storage unavailable')),
+                  enableSystemControls: false,
+                ),
       ),
     );
     await tester.pumpAndSettle();

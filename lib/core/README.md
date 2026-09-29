@@ -1,6 +1,6 @@
 # Client integration API
 
-Import `package:yun/core/app_controller.dart` (re-exports models). `AppController` is a `ChangeNotifier`. Create once, `await app.initialize()`, use `ListenableBuilder`/Provider, and dispose at shutdown. Native playback is initialized lazily on first play. `lib/main.dart` owns initialization, lifecycle checkpoints, orderly exit, and persistent theme settings. All async operations throw actionable exceptions; UI should catch and show them. `error` also reports background failures. No UI dependency beyond Flutter foundation.
+Import `package:yun/core/app_controller.dart` (re-exports models). `AppController` is a `ChangeNotifier`. Create once, `await app.initialize()`, use `ListenableBuilder`/Provider, and dispose at shutdown. Native playback is initialized lazily on first play. `lib/main.dart` owns initialization, lifecycle checkpoints, orderly exit, and persistent theme/playback settings. All async operations throw actionable exceptions; UI should catch and show them. `error` also reports background failures. No UI dependency beyond Flutter foundation.
 
 ## AppController
 - `AppController({ApiClient? api, Future<Directory> Function()? storageDirectory, CacheDatabase Function(File)? databaseFactory, PlaybackEngine? playbackEngine, SystemMediaControls? systemControls, bool enableSystemControls = true, bool automaticRefresh = true})`. Production defaults; injectable adapters permit native-free tests.
@@ -27,10 +27,24 @@ Import `package:yun/core/app_controller.dart` (re-exports models). `AppControlle
 `double volume` (0–100, initially 100), `bool isMuted`, `Future<void> setVolume(double)`,
 `toggleMute()`: serialized app-local gain; mute restores the last positive level.
 Finite input is clamped; nonfinite input is rejected. Before first playback these
-commands update memory only, then apply before audio opens. Native failures do not
-publish an unapplied value. Volume survives stop/track/account changes within this
-app session, but is not persisted across restarts. No native volume override is
-sent unless requested, leaving Android's existing behavior untouched.
+commands do not initialize audio; the saved gain applies before audio opens.
+Native failures do not publish or persist an unapplied value.
+
+Bootstrap restores device-local `PlaybackSettings` before constructing the app:
+desktop volume (including mute and its last positive restore level), shuffle, and
+repeat survive restarts and account changes. Android retains OS-managed volume;
+shuffle/repeat persist there too. Queue, position, and playing state are not saved
+and restoration never starts audio. Untouched volume leaves native defaults alone.
+The core accepts `initialSettings` / `saveSettings`; AppController forwards
+`playbackSettings` / `savePlaybackSettings`. Standalone/test controllers default
+to in-memory preferences unless these are injected.
+
+Changes eagerly queue ordered, complete snapshots in SharedPreferences under
+`playback.settings`, independently of audio commands. `flushSettings()` drains
+accepted commands and writes; lifecycle backgrounding and shutdown drain too.
+Storage errors appear in `playback.error` without reverting successful audio
+changes; another setting command retries (including the same value). Malformed
+stored fields fall back safely. Preferences contain no track/account information.
 
 ## Models
 Track: id/title/artist/album/albumArtist/trackNumber/discNumber/durationMs/sizeBytes/sha256/mimeType/hasArtwork/revision/createdAt; `Duration duration`.

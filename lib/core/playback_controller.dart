@@ -5,11 +5,12 @@ import 'package:flutter/foundation.dart';
 import 'package:uuid/uuid.dart';
 
 import '../models/models.dart';
+import '../models/playback_settings.dart';
 import '../services/playback_engine.dart';
 import '../services/system_media_controls.dart';
 import 'listening_tracker.dart';
 
-enum RepeatMode { off, all, one }
+export '../models/playback_settings.dart' show PlaybackSettings, RepeatMode;
 
 class AudioSource {
   const AudioSource(this.uri, {this.headers, this.local = false});
@@ -25,16 +26,28 @@ class PlaybackController extends ChangeNotifier {
     SystemMediaControls? controls,
     bool enableSystemControls = true,
     Random? random,
+    PlaybackSettings initialSettings = const PlaybackSettings(),
+    this._saveSettings,
   }) : _engine = engine ?? MediaKitEngine(),
        _controls = enableSystemControls
            ? (controls ?? NativeSystemMediaControls())
            : null,
-       _random = random ?? Random();
+       _random = random ?? Random() {
+    final settings = PlaybackSettings.fromJson(initialSettings.toJson());
+    _volume = settings.volume ?? 100;
+    _volumeOverridden = settings.volume != null;
+    _lastPositiveVolume = settings.lastPositiveVolume;
+    shuffle = settings.shuffle;
+    repeatMode = settings.repeatMode;
+  }
   final Future<AudioSource> Function(Track track, bool localFirst)
   resolveSource;
   final PlaybackEngine _engine;
   final SystemMediaControls? _controls;
   final Random _random;
+  final Future<void> Function(PlaybackSettings)? _saveSettings;
+  Future<void>? _settingsWrites;
+  String? _settingsError;
   List<Track> _queue = [];
   List<Track> get queue => List.unmodifiable(_queue);
   int index = -1;
@@ -86,7 +99,7 @@ class PlaybackController extends ChangeNotifier {
   Future<void> _initialize() async {
     if (_initialized) return;
     await _engine.initialize();
-    // Leave native defaults untouched until volume is explicitly adjusted.
+    // Leave native defaults untouched unless volume was adjusted or restored.
     // Apply before opening audio; a failure leaves initialization retryable.
     if (_volumeOverridden) await _engine.setVolume(_volume);
     _subscription = _engine.states.listen(_onState);
@@ -367,7 +380,45 @@ class PlaybackController extends ChangeNotifier {
     _volumeOverridden = true;
     _volume = value;
     if (value > 0) _lastPositiveVolume = value;
+    unawaited(_persistSettings());
     _notify();
+  }
+
+  // Capture only preferences, never account/queue/listening state. Serialize
+  // complete snapshots separately from audio commands so slow storage cannot
+  // make slider dragging lag or allow an older write to replace a newer one.
+  Future<void> _persistSettings() {
+    final save = _saveSettings;
+    if (save == null) return Future.value();
+    final settings = PlaybackSettings(
+      volume: _volumeOverridden ? _volume : null,
+      lastPositiveVolume: _lastPositiveVolume,
+      shuffle: shuffle,
+      repeatMode: repeatMode,
+    );
+    return _settingsWrites = (_settingsWrites ?? Future<void>.value()).then((
+      _,
+    ) async {
+      try {
+        await save(settings);
+        if (_settingsError != null) {
+          if (error == _settingsError) error = null;
+          _settingsError = null;
+          _notify();
+        }
+      } catch (e) {
+        error = _settingsError = 'Could not save playback settings: $e';
+        _notify();
+      }
+    });
+  }
+
+  /// Wait for accepted audio commands and their preference writes. Writes are
+  /// eager; this is a drain, not a save-on-exit requirement. Failures are exposed
+  /// in [error] and a subsequent settings command can retry.
+  Future<void> flushSettings() async {
+    await _operations;
+    await _settingsWrites;
   }
 
   Future<void> seek(Duration value) => _enqueue(() async {
@@ -456,15 +507,25 @@ class PlaybackController extends ChangeNotifier {
   }
 
   void setShuffle(bool value) {
-    if (shuffle == value) return;
+    if (_closing || _disposed) return;
+    if (shuffle == value) {
+      if (_settingsError != null) unawaited(_persistSettings());
+      return;
+    }
     shuffle = value;
     _resetShuffle();
+    unawaited(_persistSettings());
     _notify();
   }
 
   void setRepeat(RepeatMode value) {
-    if (repeatMode == value) return;
+    if (_closing || _disposed) return;
+    if (repeatMode == value) {
+      if (_settingsError != null) unawaited(_persistSettings());
+      return;
+    }
     repeatMode = value;
+    unawaited(_persistSettings());
     _notify();
   }
 
@@ -503,6 +564,7 @@ class PlaybackController extends ChangeNotifier {
     try {
       await _enqueue(_stop, allowClosing: true);
     } finally {
+      await _settingsWrites;
       _disposed = true;
       _timer?.cancel();
       await _subscription?.cancel();

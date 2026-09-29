@@ -4,6 +4,22 @@ This document separates implemented automation from executed evidence. A green
 compiler/unit-test run does not certify audio playback, background behavior,
 secure storage, recovery, signing, or third-party redistribution rights.
 
+## Playback preference persistence follow-up
+
+Local validation: formatting and analysis clean, **208 Flutter tests passed**
+(with the opt-in native smoke skipped), and Linux release build passed. The full
+suite used an isolated temporary directory under the user cache after the host's
+`/tmp` quota interrupted a run; no application storage was used for testing.
+
+New coverage exercises the versioned SharedPreferences codec, missing/corrupt
+values, fractional volume, mute/unmute restoration, all repeat modes, shuffle,
+eager serialized writes, slow/failed storage, native failures, and shutdown.
+Bootstrap remount tests cover Linux/macOS/Windows and Android, checking restored
+settings before account initialization and before the first audio open. Android
+retains native volume behavior. Queue/position/autoplay are intentionally not
+restored. Tests use mocked preference storage; they do not certify sudden power
+loss or real-device storage behavior. Hosted results will be recorded separately.
+
 ## Desktop volume follow-up
 
 **All nine hosted CI jobs passed** for code commit `0c08d86`:

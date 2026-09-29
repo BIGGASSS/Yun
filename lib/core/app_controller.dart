@@ -21,7 +21,8 @@ import 'playback_controller.dart';
 export '../models/models.dart';
 export '../services/transfer_service.dart'
     show DownloadProgress, DownloadStatus;
-export 'playback_controller.dart' show PlaybackController, RepeatMode;
+export 'playback_controller.dart'
+    show PlaybackController, PlaybackSettings, RepeatMode;
 
 /// UI-facing, account-scoped application state. All writes except listening
 /// segments, upload jobs and offline pins are online-only. See README.md.
@@ -33,6 +34,8 @@ class AppController extends ChangeNotifier {
     PlaybackEngine? playbackEngine,
     SystemMediaControls? systemControls,
     bool enableSystemControls = true,
+    PlaybackSettings playbackSettings = const PlaybackSettings(),
+    Future<void> Function(PlaybackSettings)? savePlaybackSettings,
     this.automaticRefresh = true,
   }) : _api = api ?? ApiClient(),
        _storageDirectory = storageDirectory ?? getApplicationSupportDirectory,
@@ -42,6 +45,8 @@ class AppController extends ChangeNotifier {
       engine: playbackEngine,
       controls: systemControls,
       enableSystemControls: enableSystemControls,
+      initialSettings: playbackSettings,
+      saveSettings: savePlaybackSettings,
     );
     playback.addListener(_playbackChanged);
   }

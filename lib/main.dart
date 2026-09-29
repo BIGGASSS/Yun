@@ -1,10 +1,12 @@
 import 'dart:async';
 import 'dart:ui' show AppExitResponse;
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'core/app_controller.dart';
+import 'services/playback_settings_store.dart';
 import 'ui/app.dart';
 import 'ui/theme.dart';
 
@@ -19,7 +21,11 @@ void main() {
 class YunBootstrap extends StatefulWidget {
   const YunBootstrap({super.key, this.controllerFactory});
 
-  final AppController Function()? controllerFactory;
+  final AppController Function({
+    required PlaybackSettings playbackSettings,
+    required Future<void> Function(PlaybackSettings) savePlaybackSettings,
+  })?
+  controllerFactory;
 
   @override
   State<YunBootstrap> createState() => _YunBootstrapState();
@@ -37,8 +43,8 @@ class _YunBootstrapState extends State<YunBootstrap> {
     super.initState();
     _lifecycle = AppLifecycleListener(
       onResume: () => _bestEffort(() => _controller?.refresh()),
-      onInactive: () => _bestEffort(() => _controller?.playback.checkpoint()),
-      onPause: () => _bestEffort(() => _controller?.playback.checkpoint()),
+      onInactive: () => _bestEffort(_checkpoint),
+      onPause: () => _bestEffort(_checkpoint),
       onExitRequested: () async {
         try {
           await _controller?.shutdown();
@@ -63,6 +69,14 @@ class _YunBootstrapState extends State<YunBootstrap> {
     }());
   }
 
+  Future<void> _checkpoint() async {
+    try {
+      await _controller?.playback.checkpoint();
+    } finally {
+      await _controller?.playback.flushSettings();
+    }
+  }
+
   Future<void> _initialize() async {
     setState(() {
       _failure = null;
@@ -76,7 +90,29 @@ class _YunBootstrapState extends State<YunBootstrap> {
         old.dispose();
       }
       _preferences = await SharedPreferences.getInstance();
-      final controller = widget.controllerFactory?.call() ?? AppController();
+      final store = SharedPreferencesPlaybackSettingsStore(_preferences!);
+      final saved = await store.read();
+      final desktop =
+          !kIsWeb &&
+          switch (defaultTargetPlatform) {
+            TargetPlatform.linux ||
+            TargetPlatform.macOS ||
+            TargetPlatform.windows => true,
+            _ => false,
+          };
+      // Touch devices retain their OS-managed volume. Shuffle and repeat are
+      // shared preferences on every platform; never start playback on restore.
+      final settings = PlaybackSettings(
+        volume: desktop ? saved.volume : null,
+        lastPositiveVolume: desktop ? saved.lastPositiveVolume : 100,
+        shuffle: saved.shuffle,
+        repeatMode: saved.repeatMode,
+      );
+      final factory = widget.controllerFactory ?? AppController.new;
+      final controller = factory(
+        playbackSettings: settings,
+        savePlaybackSettings: store.write,
+      );
       _controller = controller;
       await controller.initialize();
       if (mounted) setState(() => _ready = true);
