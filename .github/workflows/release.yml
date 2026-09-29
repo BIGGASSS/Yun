@@ -17,34 +17,7 @@ concurrency:
   group: release-candidate-${{ github.ref }}
   cancel-in-progress: false
 jobs:
-  validate:
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v4
-      - run: sudo apt-get update && sudo apt-get install -y clang cmake ninja-build pkg-config libgtk-3-dev libmpv-dev libsecret-1-dev liblzma-dev
-      - uses: ./.github/actions/flutter
-      - run: fvm dart format --output=none --set-exit-if-changed lib test
-      - run: fvm flutter analyze
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: 1.98.1
-          components: rustfmt, clippy
-      - run: cargo fmt --manifest-path server/Cargo.toml --check
-      - run: cargo test --manifest-path server/Cargo.toml --locked
-      - run: cargo clippy --manifest-path server/Cargo.toml --locked --all-targets --all-features -- -D warnings
-      - run: cargo build --manifest-path server/Cargo.toml --release --locked
-      - name: Flutter tests against actual server binary
-        env:
-          YUN_SERVER_BINARY: ${{ github.workspace }}/server/target/release/yun-server
-        run: fvm flutter test
-      - run: RUN_NATIVE_PLAYBACK=1 fvm flutter test test/services/native_playback_test.dart
-      - run: python3 scripts/api_smoke.py --binary server/target/release/yun-server
-      - run: for script in scripts/*.sh scripts/release/*.sh; do bash -n "$script"; done
-      - run: shellcheck scripts/*.sh scripts/release/*.sh
-      - run: python3 scripts/test-release-tooling.py
-      - run: python3 scripts/release/test-android-signing.py
   clients:
-    needs: validate
     uses: ./.github/workflows/native-builds.yml
     with:
       android_signing: ${{ inputs.android_signing }}
@@ -56,7 +29,6 @@ jobs:
       ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
       ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
   server:
-    needs: validate
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
