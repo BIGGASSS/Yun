@@ -1,6 +1,7 @@
 import 'dart:async';
+import 'dart:math';
 
-import 'package:flutter/material.dart';
+import 'package:flutter/material.dart' hide RepeatMode;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:yun/core/app_controller.dart';
 import 'package:yun/core/playback_controller.dart' show AudioSource;
@@ -56,17 +57,30 @@ Playlist _playlist({
       ],
 );
 
-class _PlaylistApp extends ChangeNotifier implements AppController {
-  _PlaylistApp()
-    : playback = PlaybackController(
-        resolveSource: (_, _) async =>
-            const AudioSource('fake.audio', local: true),
-        engine: FakeEngine(),
-        enableSystemControls: false,
-      );
+// Make the shuffled start observably different from an explicit first row.
+class _LastRandom implements Random {
+  @override
+  int nextInt(int max) => max - 1;
 
   @override
-  final PlaybackController playback;
+  dynamic noSuchMethod(Invocation invocation) =>
+      throw UnsupportedError('Unexpected random operation');
+}
+
+class _PlaylistApp extends ChangeNotifier implements AppController {
+  _PlaylistApp() {
+    playback = PlaybackController(
+      resolveSource: (_, _) async =>
+          const AudioSource('fake.audio', local: true),
+      engine: engine,
+      random: _LastRandom(),
+      enableSystemControls: false,
+    );
+  }
+
+  final engine = FakeEngine();
+  @override
+  late final PlaybackController playback;
   @override
   Account? account = const Account(
     server: 'https://one.example',
@@ -221,6 +235,49 @@ Finder _dialogText(String text) =>
     find.descendant(of: find.byType(AlertDialog), matching: find.text(text));
 
 void main() {
+  for (final selected in [false, true]) {
+    _test(
+      '${selected ? 'Play selected' : 'Play'} honors shuffle and settings; entry taps stay explicit',
+      (tester, app) async {
+        app.playback.setShuffle(true);
+        app.playback.setRepeat(RepeatMode.all);
+        await app.playback.setVolume(37);
+        await _open(tester);
+        await _sort(tester, 'Title');
+        await _tap(tester, find.byTooltip('Sort descending'));
+        if (selected) {
+          await _tap(tester, find.text('Select all'));
+          await _tap(tester, _check('eb'));
+        }
+        await _tap(tester, find.text(selected ? 'Play selected' : 'Play'));
+        expect(app.playback.queue.map((track) => track.id), [
+          'z',
+          if (!selected) 'b',
+          'a',
+        ]);
+        expect(app.playback.currentTrack?.id, 'a');
+        expect(app.playback.isPlaying, isTrue);
+        expect(app.playback.shuffle, isTrue);
+        expect(app.playback.repeatMode, RepeatMode.all);
+        expect(app.playback.volume, 37);
+        expect(app.engine.volume, 37);
+
+        // Unavailable entries never enter the queue; explicit indices still
+        // select their track, including index zero, while shuffle stays on.
+        for (final (entry, track) in [('eb', 'b'), ('ez', 'z')]) {
+          await _tap(tester, _entry(entry));
+          expect(app.playback.currentTrack?.id, track);
+          expect(app.playback.queue.map((track) => track.id), ['z', 'b', 'a']);
+          expect(app.playback.shuffle, isTrue);
+          expect(app.playback.repeatMode, RepeatMode.all);
+          expect(app.playback.volume, 37);
+          expect(app.engine.volume, 37);
+        }
+        expect(app.saves, isEmpty);
+      },
+    );
+  }
+
   for (final server in [false, true]) {
     _test(
       'selection resets on ${server ? 'server' : 'user'} change without parent rebuild',

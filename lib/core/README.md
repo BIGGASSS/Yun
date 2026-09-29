@@ -22,7 +22,9 @@ Import `package:yun/core/app_controller.dart` (re-exports models). `AppControlle
 
 ## PlaybackController
 `Track? currentTrack`; `List<Track> queue`; `int index`; `bool isPlaying, isBuffering, shuffle`; `Duration position, duration`; `RepeatMode repeatMode` (`off`, `all`, `one`); `String? error`.
-`Future<void> playQueue(List<Track> tracks, {int index = 0})`, `play()`, `pause()`, `toggle()`, `next()`, `previous()`, `seek(Duration position)`, `stop()`, `checkpoint()`, `shutdown()`; `void setShuffle(bool)`, `setRepeat(RepeatMode)`. UI may listen directly or via app. `checkpoint()` persists measured time without pausing (useful on application lifecycle transitions). The controller also checkpoints automatically every 10 seconds and on pause/buffering/seek/track transitions.
+`Future<void> playQueue(List<Track> tracks, {int? index})`, `play()`, `pause()`, `toggle()`, `next()`, `previous()`, `seek(Duration position)`, `stop()`, `checkpoint()`, `shutdown()`; `void setShuffle(bool)`, `setRepeat(RepeatMode)`. UI may listen directly or via app. `checkpoint()` persists measured time without pausing (useful on application lifecycle transitions). The controller also checkpoints automatically every 10 seconds and on pause/buffering/seek/track transitions.
+
+Without an explicit `index`, `playQueue` starts at a random track when shuffle is enabled, otherwise the first track. An explicit index always selects that entry. Queue order, shuffle, repeat, and volume preferences are preserved.
 
 `double volume` (0–100, initially 100), `bool isMuted`, `Future<void> setVolume(double)`,
 `toggleMute()`: serialized app-local gain; mute restores the last positive level.

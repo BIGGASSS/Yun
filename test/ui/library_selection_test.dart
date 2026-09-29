@@ -1,4 +1,6 @@
-import 'package:flutter/material.dart';
+import 'dart:math';
+
+import 'package:flutter/material.dart' hide RepeatMode;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:yun/core/app_controller.dart';
 import 'package:yun/core/playback_controller.dart' show AudioSource;
@@ -51,21 +53,34 @@ const _tracks = [
   ),
 ];
 
+// Always choose a non-first start for multi-track queues, without relying on
+// the implementation of seeded Random or on shuffle's other random draws.
+class _LastRandom implements Random {
+  @override
+  int nextInt(int max) => max - 1;
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) =>
+      throw UnsupportedError('Unexpected random operation');
+}
+
 class _LibraryApp extends ChangeNotifier implements AppController {
-  _LibraryApp()
-    : playback = PlaybackController(
-        resolveSource: (_, _) async =>
-            const AudioSource('fake.audio', local: true),
-        engine: FakeEngine(),
-        enableSystemControls: false,
-      ) {
+  _LibraryApp() {
+    playback = PlaybackController(
+      resolveSource: (_, _) async =>
+          const AudioSource('fake.audio', local: true),
+      engine: engine,
+      random: _LastRandom(),
+      enableSystemControls: false,
+    );
     playback.addListener(notifyListeners);
   }
 
+  final engine = FakeEngine();
   @override
-  final PlaybackController playback;
+  late final PlaybackController playback;
   @override
-  bool get isAuthenticated => true;
+  bool isAuthenticated = true;
   @override
   bool get busy => false;
   @override
@@ -104,11 +119,13 @@ class _LibraryApp extends ChangeNotifier implements AppController {
   ];
 
   @override
-  Account get account => Account(
-    server: 'https://music.example.test',
-    userId: userId,
-    username: 'Listener',
-  );
+  Account? get account => isAuthenticated
+      ? Account(
+          server: 'https://music.example.test',
+          userId: userId,
+          username: 'Listener',
+        )
+      : null;
   @override
   bool get isOffline => offline;
   @override
@@ -231,6 +248,108 @@ Future<void> _selectAll(WidgetTester tester) async {
 }
 
 void main() {
+  _libraryTest('Play queues the filtered tracks in the current sort order', (
+    tester,
+    app,
+  ) async {
+    await tester.enterText(find.byType(TextField), 'Collection');
+    await tester.pumpAndSettle();
+    await _sort(tester, 'Duration');
+    await tester.tap(find.byTooltip('Sort descending'));
+    await tester.pumpAndSettle();
+    await _tap(tester, 'Play');
+    expect(app.playback.queue.map((track) => track.id), [
+      'coda',
+      'alpha',
+      'zulu',
+    ]);
+    expect(app.playback.currentTrack?.id, 'coda');
+    expect(app.playback.isPlaying, isTrue);
+  });
+
+  _libraryTest(
+    'Play is disabled for no matches, an empty library or sign-out',
+    (tester, app) async {
+      FilledButton playButton() => tester.widget<FilledButton>(
+        find.widgetWithText(FilledButton, 'Play'),
+      );
+      expect(playButton().onPressed, isNotNull);
+      await tester.enterText(find.byType(TextField), 'no matching songs');
+      await tester.pumpAndSettle();
+      expect(playButton().onPressed, isNull);
+      await tester.tap(find.byTooltip('Clear search'));
+      await tester.pumpAndSettle();
+      expect(playButton().onPressed, isNotNull);
+
+      app.library = [];
+      app.update();
+      await tester.pumpAndSettle();
+      expect(playButton().onPressed, isNull);
+
+      // Retain tracks to ensure authentication, not emptiness, disables Play.
+      app.library = [..._tracks];
+      app.isAuthenticated = false;
+      app.update();
+      await tester.pumpAndSettle();
+      expect(playButton().onPressed, isNull);
+      expect(app.playback.queue, isEmpty);
+    },
+  );
+
+  for (final action in ['Play', 'Play all', 'Play selected']) {
+    _libraryTest(
+      '$action honors shuffle and settings; row taps stay explicit',
+      (tester, app) async {
+        app.playback.setShuffle(true);
+        app.playback.setRepeat(RepeatMode.one);
+        await app.playback.setVolume(37);
+        await tester.pumpAndSettle();
+        await _tap(tester, 'Albums');
+        await _tap(tester, 'Collection');
+        await _sort(tester, 'Duration');
+        await tester.tap(find.byTooltip('Sort descending'));
+        await tester.pumpAndSettle();
+        if (action == 'Play selected') {
+          await _selectAll(tester);
+          await _tap(tester, 'Alpha');
+        }
+        if (action == 'Play all') {
+          await tester.tap(find.byTooltip(action));
+          await tester.pumpAndSettle();
+        } else {
+          await _tap(tester, action);
+        }
+        expect(app.playback.queue.map((track) => track.id), [
+          'coda',
+          if (action != 'Play selected') 'alpha',
+          'zulu',
+        ]);
+        expect(app.playback.currentTrack?.id, 'zulu');
+        expect(app.playback.shuffle, isTrue);
+        expect(app.playback.repeatMode, RepeatMode.one);
+        expect(app.playback.volume, 37);
+        expect(app.engine.volume, 37);
+        expect(app.playback.isPlaying, isTrue);
+
+        if (action == 'Play selected') await _tap(tester, 'Done selecting');
+        // Neither an explicit nonzero index nor an explicit zero may randomize.
+        for (final title in ['Alpha', 'Coda']) {
+          await _tap(tester, title);
+          expect(app.playback.currentTrack?.title, title);
+          expect(app.playback.queue.map((track) => track.id), [
+            'coda',
+            'alpha',
+            'zulu',
+          ]);
+          expect(app.playback.shuffle, isTrue);
+          expect(app.playback.repeatMode, RepeatMode.one);
+          expect(app.playback.volume, 37);
+          expect(app.engine.volume, 37);
+        }
+      },
+    );
+  }
+
   _libraryTest('select all includes filtered tracks outside the viewport', (
     tester,
     app,

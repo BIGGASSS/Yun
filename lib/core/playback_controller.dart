@@ -248,19 +248,21 @@ class PlaybackController extends ChangeNotifier {
     }
   }
 
-  Future<void> playQueue(List<Track> tracks, {int index = 0}) =>
+  /// Start a collection using shuffle unless a specific [index] is requested.
+  /// Keep queue order and playback preferences unchanged.
+  Future<void> playQueue(List<Track> tracks, {int? index}) =>
       _enqueue(() async {
         if (tracks.isEmpty) {
           await _stop();
           return;
         }
-        if (index < 0 || index >= tracks.length) {
+        if (index != null && (index < 0 || index >= tracks.length)) {
           throw RangeError.index(index, tracks);
         }
         await _initialize();
         await _haltForTransition();
         _queue = List.of(tracks);
-        this.index = index;
+        this.index = index ?? (shuffle ? _random.nextInt(tracks.length) : 0);
         _resetShuffle();
         await _openCurrent();
       });
