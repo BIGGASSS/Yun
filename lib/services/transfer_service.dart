@@ -542,6 +542,18 @@ class TransferService {
     }
   }
 
+  /// Clear completed history without touching pending, failed or cancelled jobs.
+  Future<void> clearDoneUploads() async {
+    await database.transaction(() async {
+      for (final record in await database.list('upload')) {
+        if (record['status'] == 'done') {
+          await database.remove('upload', record['id'] as String);
+        }
+      }
+    });
+    onChanged();
+  }
+
   Future<void> retryUpload(String id) async {
     _cancelled.remove(id);
     final j = await database.get('upload', id);
