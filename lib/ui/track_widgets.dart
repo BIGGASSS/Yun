@@ -224,6 +224,8 @@ class TrackMenu extends StatelessWidget {
     tooltip: 'Options for ${track.title}',
     onSelected: (value) => runUiAction(context, () async {
       switch (value) {
+        case 'next':
+          await app.queueNext(track);
         case 'playlist':
           await addTrackToPlaylist(context, app, track);
         case 'download':
@@ -248,6 +250,7 @@ class TrackMenu extends StatelessWidget {
       }
     }),
     itemBuilder: (_) => [
+      const PopupMenuItem(value: 'next', child: Text('Play next')),
       const PopupMenuItem(value: 'playlist', child: Text('Add to playlist')),
       PopupMenuItem(
         value: 'download',

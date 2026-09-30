@@ -440,9 +440,17 @@ void main() {
         playbackEngine: FakeEngine(),
         enableSystemControls: false,
         automaticRefresh: false,
+        listeningMonotonicMs: () => 0,
       );
       await app.initialize();
+      await app.play(app.tracks.single);
+      await app.queueNext(app.tracks.single);
       await app.logout();
+      expect(app.playback.effectiveQueue, isEmpty);
+      await expectLater(
+        app.queueNext(const Track(id: 't', title: 'Offline track')),
+        throwsStateError,
+      );
       expect(
         await File(p.join(directory.path, 'offline.audio')).exists(),
         isTrue,

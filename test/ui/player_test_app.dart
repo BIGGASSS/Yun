@@ -1,3 +1,5 @@
+import 'dart:math';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -11,12 +13,13 @@ import '../core/fakes.dart';
 /// A signed-in app snapshot with real playback over a local [FakeEngine]; no
 /// credential store, database, native player, or network is needed.
 class PlayerTestApp extends ChangeNotifier implements AppController {
-  PlayerTestApp(this.engine)
+  PlayerTestApp(this.engine, {Random? random})
     : playback = PlaybackController(
         resolveSource: (_, _) async =>
             const AudioSource('fake.audio', local: true),
         engine: engine,
         enableSystemControls: false,
+        random: random,
       );
 
   @override
