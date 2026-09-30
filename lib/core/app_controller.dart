@@ -92,6 +92,7 @@ class AppController extends ChangeNotifier {
   bool _disposed = false, _locking = false, _notifierDisposed = false;
   final Set<Future<dynamic>> _onlineOperations = {};
   final Set<Future<void>> _uploadOperations = {};
+  final Set<Future<void>> _downloadHistoryOperations = {};
   Future<void>? _reloadRunning;
   bool _reloadRequested = false,
       _uploadsRequested = false,
@@ -418,6 +419,11 @@ class AppController extends ChangeNotifier {
         ..._uploadOperations,
       ].map((f) => f.then<void>((_) {}, onError: (Object _, StackTrace _) {})),
     );
+    // History transactions must finish before their database closes. The
+    // cleanup boundary still closes resources, then rethrows any failure.
+    await cleanup(() async {
+      await Future.wait(_downloadHistoryOperations);
+    });
     try {
       await _reloadRunning;
     } catch (_) {}
@@ -708,8 +714,12 @@ class AppController extends ChangeNotifier {
 
   Future<void> clearDoneDownloads() async {
     _requireDatabase();
-    await _transfers!.clearDoneDownloads(
+    final operation = _transfers!.clearDoneDownloads(
       tracks.where((track) => _downloadedTrackIds.contains(track.id)).toList(),
+    );
+    _downloadHistoryOperations.add(operation);
+    await operation.whenComplete(
+      () => _downloadHistoryOperations.remove(operation),
     );
   }
 

@@ -14,7 +14,7 @@ class _DownloadsApp extends PlayerTestApp {
   final List<PinSelection> selections;
   final Map<String, DownloadProgress> progress = {};
   Set<String> localIds = const {};
-  int revision = 0, clearCalls = 0, retryCalls = 0;
+  int revision = 0, clearCalls = 0, retryCalls = 0, trackReads = 0;
 
   @override
   bool get isAuthenticated => true;
@@ -32,7 +32,11 @@ class _DownloadsApp extends PlayerTestApp {
   bool isPinned(String type, String id) =>
       selections.any((pin) => pin.type == type && pin.id == id);
   @override
-  Track? trackById(String id) => library.where((t) => t.id == id).firstOrNull;
+  Track? trackById(String id) {
+    trackReads++;
+    return library.where((t) => t.id == id).firstOrNull;
+  }
+
   @override
   DownloadProgress downloadProgress(Track track) =>
       progress[track.id] ??
@@ -110,18 +114,23 @@ void main() {
     WidgetTester tester, {
     Size size = const Size(1000, 1000),
     double textScale = 1,
+    _DownloadsApp? initialApp,
   }) async {
-    final app = _DownloadsApp(
-      library: library,
-      selections: const [
-        PinSelection('track', 'done'),
-        PinSelection('track', 'pending'),
-        PinSelection('track', 'failed'),
-      ],
-    );
+    final app =
+        initialApp ??
+        _DownloadsApp(
+          library: library,
+          selections: const [
+            PinSelection('track', 'done'),
+            PinSelection('track', 'pending'),
+            PinSelection('track', 'failed'),
+          ],
+        );
     openApp = app;
-    app.localIds = const {'done', 'unpinned'};
-    app.setProgress('failed', DownloadStatus.failed);
+    if (initialApp == null) {
+      app.localIds = const {'done', 'unpinned'};
+      app.setProgress('failed', DownloadStatus.failed);
+    }
     tester.view.physicalSize = size;
     tester.view.devicePixelRatio = 1;
     tester.platformDispatcher.textScaleFactorTestValue = textScale;
@@ -249,6 +258,83 @@ void main() {
       await position(tester, 'Waiting song'),
       greaterThan(await position(tester, 'Pending')),
     );
+    expect(tester.takeException(), isNull);
+  });
+
+  downloadsTest('offline selections stay lazy across download rebuilds', (
+    tester,
+  ) async {
+    final app = _DownloadsApp(
+      library: List.generate(
+        5000,
+        (i) => Track(id: '$i', title: 'Pinned song $i', sizeBytes: 100),
+      ),
+      selections: List.generate(5000, (i) => PinSelection('track', '$i')),
+    );
+    await open(tester, initialApp: app);
+    await tester.tap(find.text('On this device'));
+    await tester.pumpAndSettle();
+    final device = find.byKey(const PageStorageKey('device-downloads'));
+    final rows = find.descendant(
+      of: device,
+      matching: find.byTooltip('Remove offline selection'),
+    );
+    expect(find.text('5000 selections'), findsOneWidget);
+    expect(rows, findsNothing);
+    expect(app.trackReads, 0);
+
+    await tester.tap(find.text('Manage offline selections'));
+    await tester.pumpAndSettle();
+    expect(rows.evaluate().length, inExclusiveRange(0, 40));
+    expect(app.trackReads, inExclusiveRange(0, 40));
+    expect(find.text('Pinned song 4999'), findsNothing);
+
+    // Byte updates do not rebuild the screen or resolve selection names.
+    final beforeTick = tester.widget<CustomScrollView>(device);
+    app.trackReads = 0;
+    app.setProgress('0', DownloadStatus.downloading, received: 50);
+    await tester.pump();
+    expect(identical(tester.widget(device), beforeTick), isTrue);
+    expect(app.trackReads, 0);
+
+    // Completion and failure regroup activity and rebuild the device tab,
+    // but keep the selection section expanded and only build viewport rows.
+    for (final status in [DownloadStatus.downloaded, DownloadStatus.failed]) {
+      final beforeChange = tester.widget<CustomScrollView>(device);
+      app.trackReads = 0;
+      app.setProgress('0', status, received: 100);
+      await tester.pumpAndSettle();
+      expect(identical(tester.widget(device), beforeChange), isFalse);
+      expect(rows.evaluate().length, inExclusiveRange(0, 40));
+      expect(app.trackReads, inExclusiveRange(0, 40));
+    }
+
+    final scroll = find.descendant(
+      of: device,
+      matching: find.byType(Scrollable),
+    );
+    app.trackReads = 0;
+    await tester.scrollUntilVisible(
+      find.text('Pinned song 60'),
+      500,
+      scrollable: scroll,
+    );
+    expect(find.text('Pinned song 60'), findsOneWidget);
+    expect(rows.evaluate().length, inExclusiveRange(0, 40));
+    expect(app.trackReads, inExclusiveRange(0, 300));
+    expect(find.text('Pinned song 4999'), findsNothing);
+
+    tester.state<ScrollableState>(scroll).position.jumpTo(0);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Manage offline selections'));
+    await tester.pumpAndSettle();
+    expect(rows, findsNothing);
+    app.trackReads = 0;
+    app.setProgress('0', DownloadStatus.downloaded, received: 100);
+    await tester.pumpAndSettle();
+    expect(rows, findsNothing);
+    expect(app.trackReads, 0);
+    expect(find.text('Pinned song 0'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
 

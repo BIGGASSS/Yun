@@ -203,13 +203,7 @@ class DownloadsScreen extends StatelessWidget {
                   key: const PageStorageKey('device-downloads'),
                   slivers: [
                     if (pins.isNotEmpty)
-                      SliverToBoxAdapter(
-                        child: ExpansionTile(
-                          title: const Text('Manage offline selections'),
-                          subtitle: Text('${pins.length} selections'),
-                          children: pins.map(_pinTile).toList(),
-                        ),
-                      ),
+                      _OfflineSelections(pins: pins, itemBuilder: _pinTile),
                     if (downloaded.isEmpty)
                       const SliverFillRemaining(
                         hasScrollBody: false,
@@ -368,4 +362,43 @@ class DownloadsScreen extends StatelessWidget {
     'album' => (jsonDecode(pin.id) as List).first as String,
     _ => pin.id,
   };
+}
+
+class _OfflineSelections extends StatefulWidget {
+  const _OfflineSelections({required this.pins, required this.itemBuilder});
+
+  final List<PinSelection> pins;
+  final Widget Function(PinSelection) itemBuilder;
+
+  @override
+  State<_OfflineSelections> createState() => _OfflineSelectionsState();
+}
+
+class _OfflineSelectionsState extends State<_OfflineSelections> {
+  bool _expanded = false;
+
+  @override
+  Widget build(BuildContext context) => SliverMainAxisGroup(
+    slivers: [
+      SliverToBoxAdapter(
+        child: Semantics(
+          expanded: _expanded,
+          child: ListTile(
+            title: const Text('Manage offline selections'),
+            subtitle: Text('${widget.pins.length} selections'),
+            trailing: Icon(
+              _expanded ? Icons.expand_less_rounded : Icons.expand_more_rounded,
+            ),
+            onTap: () => setState(() => _expanded = !_expanded),
+          ),
+        ),
+      ),
+      if (_expanded)
+        SliverList.builder(
+          itemCount: widget.pins.length,
+          itemBuilder: (context, index) =>
+              widget.itemBuilder(widget.pins[index]),
+        ),
+    ],
+  );
 }

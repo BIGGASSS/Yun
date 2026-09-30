@@ -136,6 +136,72 @@ void main() {
     await app.shutdown();
     app.dispose();
   });
+  for (final closingAction in ['logout', 'shutdown']) {
+    test('$closingAction drains concurrent download history clears', () async {
+      final directory = await seedAccount();
+      final databaseFile = File(p.join(directory.path, 'cache.sqlite'));
+      final seed = CacheDatabase(databaseFile);
+      final fileRecord = (await seed.get('file', 't'))!;
+      await seed.transaction(() async {
+        for (var i = 0; i < 100; i++) {
+          final track = Track(id: 'download-$i', title: 'Download $i');
+          await seed.put('track', track.id, track.toJson());
+          await seed.put('file', track.id, {...fileRecord, 'id': track.id});
+        }
+      });
+      await seed.close();
+      final app = AppController(
+        api: ApiClient(
+          dio: Dio()
+            ..httpClientAdapter = FakeAdapter((options, _) {
+              if (options.path.endsWith('/auth/logout')) {
+                return jsonResponse({});
+              }
+              throw StateError('Unexpected network request');
+            }),
+          credentials: credentials,
+        ),
+        storageDirectory: () async => root,
+        playbackEngine: FakeEngine(),
+        enableSystemControls: false,
+        automaticRefresh: false,
+      );
+      try {
+        await app.initialize();
+        expect(app.downloadedTrackIds, hasLength(101));
+        final cleared = <int>[];
+        final clearing = [
+          for (var i = 0; i < 2; i++)
+            app.clearDoneDownloads().then((_) => cleared.add(i)),
+        ];
+        final closing =
+            (closingAction == 'logout' ? app.logout() : app.shutdown()).then((
+              _,
+            ) {
+              expect(cleared, hasLength(2));
+            });
+        await Future.wait([...clearing, closing]);
+        expect(app.isAuthenticated, isFalse);
+        final reopened = CacheDatabase(databaseFile);
+        try {
+          final history = await reopened.list('download');
+          expect(history, hasLength(101));
+          expect(
+            history.every((row) => row['history_cleared'] == true),
+            isTrue,
+          );
+          expect(await reopened.list('file'), hasLength(101));
+          expect(await File(fileRecord['path'] as String).exists(), isTrue);
+        } finally {
+          await reopened.close();
+        }
+      } finally {
+        await app.shutdown();
+        app.dispose();
+      }
+    });
+  }
+
   for (final type in [
     DioExceptionType.connectionError,
     DioExceptionType.connectionTimeout,
