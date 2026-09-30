@@ -55,6 +55,7 @@ class MediaKitEngine implements PlaybackEngine {
       _disposed = false;
   int _intent = 0;
   bool _wantsPlayback = false;
+  bool _localSource = false;
 
   static Future<Player> _nativePlayer() async {
     MediaKit.ensureInitialized();
@@ -116,7 +117,14 @@ class MediaKitEngine implements PlaybackEngine {
         player.stream.position.listen((_) => emit()),
         player.stream.duration.listen((_) => emit()),
         player.stream.completed.listen((_) => emit()),
-        player.stream.error.listen(emit),
+        player.stream.error.listen((message) {
+          // media_kit forwards ffmpeg TCP log messages through its error stream,
+          // even when they do not end playback. A late stream diagnostic must
+          // not stop a local file and send the controller back to the network.
+          // Keep file/decoder errors so genuinely unreadable files can recover.
+          if (_localSource && message.startsWith('tcp:')) return;
+          emit(message);
+        }),
       ]);
       if (session != null) {
         _subscriptions.add(
@@ -181,6 +189,14 @@ class MediaKitEngine implements PlaybackEngine {
     final intent = ++_intent;
     _wantsPlayback = true;
     _resumeAfterInterruption = false;
+    final scheme = Uri.tryParse(uri)?.scheme.toLowerCase();
+    _localSource =
+        scheme == '' ||
+        scheme == 'file' ||
+        scheme == 'content' ||
+        scheme == 'fd' ||
+        scheme == 'asset' ||
+        File(uri).isAbsolute;
     await initialize();
     if (intent != _intent || _disposed) return;
     if (!await _activate(intent) || intent != _intent || _disposed) return;
@@ -231,6 +247,7 @@ class MediaKitEngine implements PlaybackEngine {
   @override
   Future<void> stop() async {
     _wantsPlayback = false;
+    _localSource = false;
     _intent++;
     _resumeAfterInterruption = false;
     await _player?.stop();
@@ -242,6 +259,7 @@ class MediaKitEngine implements PlaybackEngine {
     if (_disposed) return;
     _disposed = true;
     _wantsPlayback = false;
+    _localSource = false;
     _intent++;
     _resumeAfterInterruption = false;
     try {

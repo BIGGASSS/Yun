@@ -4,6 +4,8 @@ import 'dart:math' as math;
 import 'package:audio_session/audio_session.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:media_kit/media_kit.dart';
+import 'package:yun/core/playback_controller.dart';
+import 'package:yun/models/models.dart' as yun;
 import 'package:yun/services/playback_engine.dart';
 
 void main() {
@@ -23,6 +25,141 @@ void main() {
     await session.interruptions.close();
     await session.noisy.close();
   });
+
+  for (final uri in ['/cache/download.audio', 'file:///cache/download.audio']) {
+    test(
+      'local $uri survives TCP diagnostics before the first audio tick',
+      () async {
+        var remoteResolutions = 0;
+        final playback = PlaybackController(
+          engine: engine,
+          enableSystemControls: false,
+          resolveSource: (_, localFirst) async {
+            if (!localFirst) {
+              remoteResolutions++;
+              throw StateError('Internet unavailable');
+            }
+            return AudioSource(uri, local: true);
+          },
+        );
+        addTearDown(() async {
+          await playback.shutdown();
+          playback.dispose();
+        });
+        player.onOpen = () {
+          player.stream.errors.add('tcp: Connection to server failed');
+        };
+        await playback.playQueue([
+          const yun.Track(id: 'local', title: 'Local'),
+        ]);
+        expect(playback.isPlaying, isTrue);
+        expect(playback.currentTrack?.id, 'local');
+        expect(playback.error, isNull);
+        expect(player.opens, 1);
+        expect(remoteResolutions, 0);
+      },
+    );
+  }
+
+  test(
+    'late TCP diagnostics after switching to local audio do not stop it',
+    () async {
+      final playback = PlaybackController(
+        engine: engine,
+        enableSystemControls: false,
+        resolveSource: (track, _) async => track.id == 'remote'
+            ? const AudioSource('https://yun.test/audio')
+            : const AudioSource('/cache/download.audio', local: true),
+      );
+      addTearDown(() async {
+        await playback.shutdown();
+        playback.dispose();
+      });
+      await playback.playQueue([
+        const yun.Track(id: 'remote', title: 'Remote'),
+      ]);
+      await playback.playQueue([const yun.Track(id: 'local', title: 'Local')]);
+      final stops = player.stops;
+      player.stream.errors.add('tcp: Connection reset by peer');
+      await Future<void>.delayed(Duration.zero);
+      expect(player.opens, 2);
+      expect(player.stops, stops);
+      expect(playback.currentTrack?.id, 'local');
+      expect(playback.isPlaying, isTrue);
+      expect(playback.error, isNull);
+    },
+  );
+
+  test(
+    'TCP diagnostics during local audio focus acquisition do not fail open',
+    () async {
+      var remoteResolutions = 0;
+      final playback = PlaybackController(
+        engine: engine,
+        enableSystemControls: false,
+        resolveSource: (_, localFirst) async {
+          if (!localFirst) {
+            remoteResolutions++;
+            throw StateError('Internet unavailable');
+          }
+          return const AudioSource('/cache/download.audio', local: true);
+        },
+      );
+      addTearDown(() async {
+        await playback.shutdown();
+        playback.dispose();
+      });
+      session.activation = Completer<bool>();
+      final opening = playback.playQueue([
+        const yun.Track(id: 'local', title: 'Local'),
+      ]);
+      await Future<void>.delayed(Duration.zero);
+      expect(session.activations.last, isTrue);
+      player.stream.errors.add('tcp: Connection reset by peer');
+      session.activation!.complete(true);
+      await opening;
+      expect(remoteResolutions, 0);
+      expect(player.opens, 1);
+      expect(playback.isPlaying, isTrue);
+      expect(playback.error, isNull);
+    },
+  );
+
+  test('local file and decoder errors still reach playback recovery', () async {
+    final playback = PlaybackController(
+      engine: engine,
+      enableSystemControls: false,
+      resolveSource: (_, localFirst) async => localFirst
+          ? const AudioSource('/cache/download.audio', local: true)
+          : const AudioSource('https://yun.test/audio'),
+    );
+    addTearDown(() async {
+      await playback.shutdown();
+      playback.dispose();
+    });
+    await playback.playQueue([const yun.Track(id: 'local', title: 'Local')]);
+    player.stream.errors.add('Failed to decode audio');
+    await playback.flushSettings();
+    expect(player.opens, 2);
+    expect(player.opened, 'https://yun.test/audio');
+    expect(playback.isPlaying, isTrue);
+  });
+
+  test(
+    'TCP diagnostics remain errors for remote audio after a local source',
+    () async {
+      final states = <EngineState>[];
+      final subscription = engine.states.listen(states.add);
+      addTearDown(subscription.cancel);
+      await engine.open('/cache/download.audio');
+      await engine.stop();
+      player.stream.errors.add('tcp: Connection timed out after stop');
+      expect(states.last.error, 'tcp: Connection timed out after stop');
+      await engine.open('https://yun.test/audio');
+      player.stream.errors.add('tcp: Connection timed out');
+      expect(states.last.error, 'tcp: Connection timed out');
+    },
+  );
 
   test(
     'volume maps loudness percentages without activating audio focus',
@@ -232,10 +369,24 @@ class TestPlayer implements Player {
   @override
   PlayerState state = const PlayerState();
   @override
-  final PlayerStream stream = TestPlayerStream();
-  int plays = 0;
+  final TestPlayerStream stream = TestPlayerStream();
+  int plays = 0, opens = 0, stops = 0;
+  String? opened;
+  void Function()? onOpen;
   bool disposed = false, failVolume = false;
   final volumeCalls = <double>[];
+  @override
+  Future<void> open(Playable playable, {bool play = true}) async {
+    opened = (playable as Media).uri;
+    opens++;
+    onOpen?.call();
+    state = state.copyWith(
+      playing: play,
+      duration: const Duration(seconds: 120),
+    );
+    stream.playingEvents.add(play);
+  }
+
   @override
   Future<void> setVolume(double volume) async {
     volumeCalls.add(volume);
@@ -247,18 +398,30 @@ class TestPlayer implements Player {
   Future<void> play() async {
     plays++;
     state = state.copyWith(playing: true);
+    stream.playingEvents.add(true);
   }
 
   @override
   Future<void> pause() async {
     state = state.copyWith(playing: false);
+    stream.playingEvents.add(false);
   }
 
   @override
-  Future<void> stop() => pause();
+  Future<void> stop() async {
+    stops++;
+    await pause();
+  }
+
+  @override
+  Future<void> seek(Duration position) async {
+    state = state.copyWith(position: position);
+  }
+
   @override
   Future<void> dispose() async {
     disposed = true;
+    await stream.close();
   }
 
   @override
@@ -266,8 +429,15 @@ class TestPlayer implements Player {
 }
 
 class TestPlayerStream implements PlayerStream {
+  final playingEvents = StreamController<bool>.broadcast(sync: true);
+  final errors = StreamController<String>.broadcast(sync: true);
+  Future<void> close() async {
+    await playingEvents.close();
+    await errors.close();
+  }
+
   @override
-  Stream<bool> get playing => const Stream.empty();
+  Stream<bool> get playing => playingEvents.stream;
   @override
   Stream<bool> get buffering => const Stream.empty();
   @override
@@ -277,7 +447,7 @@ class TestPlayerStream implements PlayerStream {
   @override
   Stream<Duration> get duration => const Stream.empty();
   @override
-  Stream<String> get error => const Stream.empty();
+  Stream<String> get error => errors.stream;
   @override
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
