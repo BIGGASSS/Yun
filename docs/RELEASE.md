@@ -126,9 +126,14 @@ Before running `release-signed`:
    environment in YAML does not protect it. If the GitHub plan cannot enforce
    approval rules, do not enable hosted signing.
 2. Store these four secrets **only** on that environment, never as repository or
-   organization secrets. Caller workflows do not forward signing secrets; the
-   environment supplies them to the signed Android job. CI uses `native-evaluation`,
-   never the release environment.
+   organization secrets. The two release callers explicitly bind just these four
+   names, and `native-builds.yml` declares them optional so debug/CI callers do not
+   require signing credentials. These bindings do not transfer environment values
+   from the caller: the called Android job still selects `release-signing`, waits
+   for its approval/ref gates, and resolves its environment secrets there. CI has
+   no secret mappings and uses `native-evaluation`, never the release environment.
+   Manual debug candidates map empty values. Do not add repository/org copies as
+   a workaround or replace the explicit mapping with `secrets: inherit`.
 
    | Secret | Value |
    | --- | --- |
@@ -184,6 +189,26 @@ Before running `release-signed`:
    identity. Local `flutter build apk --release` without explicit signing variables
    is unsigned, never silently debug-signed. For local signing use the same script
    with the four secrets securely injected into its environment.
+
+### Reusable-workflow secret resolution verification
+
+The explicit four-name contract is a bounded compatibility workaround for empty
+signing values in a called workflow. [GitHub documents job-level environment
+secrets taking precedence](https://docs.github.com/en/actions/how-tos/reuse-automations/reuse-workflows#using-inputs-and-secrets-in-a-reusable-workflow),
+while [actions/runner#1490](https://github.com/actions/runner/issues/1490) reports
+empty environment secrets and explicit caller bindings as a workaround. This
+report is supporting evidence, not proof of the cause or fix in Yun. Optional
+secret declarations preserve unsigned CI; the signing script still requires all
+four nonempty values and fails closed. Offline tests cannot emulate GitHub's
+secret-resolution service or verify actual environment settings.
+
+After review and merging, a separately authorized **Release candidates** run on
+`main` with `release-signed` can verify the changed workflow without publishing a
+GitHub Release. Approve only the intended source commit; check the signed APK and
+its independent certificate fingerprint as above. Do not print secret values or
+lengths to diagnose resolution. A rerun of an old tag keeps its original source
+and workflow; merging this change does not repair that tag's workflow snapshot.
+Any new release tag or existing-tag change requires a separate release decision.
 
 ## Windows Authenticode: secure operator procedure (not automated)
 

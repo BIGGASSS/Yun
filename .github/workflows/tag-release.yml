@@ -43,7 +43,13 @@ jobs:
     uses: ./.github/workflows/native-builds.yml
     with:
       android_signing: release-signed
-    # The called Android job reads only release-signing environment secrets.
+    # Explicit name bindings for reusable-workflow environment-secret resolution.
+    # Keep values ONLY in release-signing; never use secrets: inherit here.
+    secrets:
+      ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+      ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+      ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+      ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
   server:
     needs: validate
     runs-on: ubuntu-24.04
