@@ -26,21 +26,46 @@ void main() {
   tearDown(() async {
     await root.delete(recursive: true);
   });
-  Future<Directory> seedAccount() async {
+  Future<Directory> seedAccount({DownloadStatus? interrupted}) async {
     final key = sha256
         .convert(utf8.encode(jsonEncode([account.server, account.userId])))
         .toString();
     final directory = Directory(p.join(root.path, 'accounts', key));
     await directory.create(recursive: true);
     final db = CacheDatabase(File(p.join(directory.path, 'cache.sqlite')));
+    final track = interrupted == null
+        ? const Track(id: 't', title: 'Offline track')
+        : Track(
+            id: 't',
+            title: 'Offline track',
+            sizeBytes: 3,
+            sha256: sha256.convert([1, 2, 3]).toString(),
+          );
     await db.applyLibrary({
       'cursor': 5,
       'reset': true,
-      'tracks': [const Track(id: 't', title: 'Offline track').toJson()],
+      'tracks': [track.toJson()],
     });
     final file = await File(p.join(directory.path, 'offline.audio'))
         .writeAsBytes([1, 2, 3]);
-    await db.put('file', 't', {'id': 't', 'path': file.path, 'sha256': ''});
+    await db.put('file', 't', {
+      'id': 't',
+      'path': file.path,
+      'sha256': track.sha256,
+    });
+    if (interrupted != null) {
+      await db.put('pin', 'track:t', const PinSelection('track', 't').toJson());
+      // Crash after the verified file record commits, before progress saves.
+      await db.put(
+        'download',
+        't',
+        DownloadProgress(
+          trackId: 't',
+          totalBytes: track.sizeBytes,
+          status: interrupted,
+        ).toJson(),
+      );
+    }
     await db.put('event', 'pending', {'id': 'pending', 'track_id': 't'});
     await db.close();
     await credentials.write(
@@ -95,47 +120,75 @@ void main() {
     app.dispose();
   });
 
-  test('cleared Done entries stay cleared after restart and audio remains playable', () async {
-    await seedAccount();
-    var requests = 0;
-    AppController create() => AppController(
-      api: ApiClient(
-        dio: Dio()
-          ..httpClientAdapter = FakeAdapter((options, _) {
-            requests++;
-            throw DioException(
-              requestOptions: options,
-              type: DioExceptionType.connectionError,
-            );
-          }),
-        credentials: credentials,
-      ),
-      storageDirectory: () async => root,
-      playbackEngine: FakeEngine(),
-      enableSystemControls: false,
-      automaticRefresh: false,
-    );
-    var app = create();
-    await app.initialize();
-    final path = app.localPath('t');
-    expect(app.downloadProgress(app.tracks.single).historyCleared, isFalse);
-    await app.clearDoneDownloads();
-    expect(app.downloadProgress(app.tracks.single).historyCleared, isTrue);
-    expect(app.downloadedTrackIds, {'t'});
-    expect(await File(path!).readAsBytes(), [1, 2, 3]);
-    await app.shutdown();
-    app.dispose();
+  for (final interrupted in [
+    null,
+    DownloadStatus.downloading,
+    DownloadStatus.verifying,
+  ]) {
+    test(
+      'cleared Done entries stay cleared offline after restart (saved: $interrupted)',
+      () async {
+        final directory = await seedAccount(interrupted: interrupted);
+        var requests = 0;
+        AppController create() {
+          final app = AppController(
+            api: ApiClient(
+              dio: Dio()
+                ..httpClientAdapter = FakeAdapter((options, _) {
+                  requests++;
+                  throw DioException(
+                    requestOptions: options,
+                    type: DioExceptionType.connectionError,
+                  );
+                }),
+              credentials: credentials,
+            ),
+            storageDirectory: () async => root,
+            playbackEngine: FakeEngine(),
+            enableSystemControls: false,
+            automaticRefresh: false,
+          );
+          addTearDown(() async {
+            await app.shutdown();
+            app.dispose();
+          });
+          return app;
+        }
 
-    app = create();
-    await app.initialize();
-    expect(app.downloadProgress(app.tracks.single).historyCleared, isTrue);
-    expect(app.localPath('t'), path);
-    await app.play(app.tracks.single);
-    expect(app.playback.currentTrack?.id, 't');
-    expect(requests, 0);
-    await app.shutdown();
-    app.dispose();
-  });
+        var app = create();
+        await app.initialize();
+        final path = app.localPath('t');
+        expect(app.downloadProgress(app.tracks.single).historyCleared, isFalse);
+        await app.clearDoneDownloads();
+        expect(app.downloadProgress(app.tracks.single).historyCleared, isTrue);
+        expect(app.downloadedTrackIds, {'t'});
+        expect(await File(path!).readAsBytes(), [1, 2, 3]);
+        await app.shutdown();
+        final persisted = CacheDatabase(
+          File(p.join(directory.path, 'cache.sqlite')),
+        );
+        try {
+          final progress = (await persisted.get('download', 't'))!;
+          expect(progress['status'], DownloadStatus.downloaded.name);
+          expect(progress['history_cleared'], isTrue);
+          expect((await persisted.get('file', 't'))!['path'], path);
+          if (interrupted != null) {
+            expect(await persisted.get('pin', 'track:t'), isNotNull);
+          }
+        } finally {
+          await persisted.close();
+        }
+
+        app = create();
+        await app.initialize();
+        expect(app.downloadProgress(app.tracks.single).historyCleared, isTrue);
+        expect(app.localPath('t'), path);
+        await app.play(app.tracks.single);
+        expect(app.playback.currentTrack?.id, 't');
+        expect(requests, 0);
+      },
+    );
+  }
   for (final closingAction in ['logout', 'shutdown']) {
     test('$closingAction drains concurrent download history clears', () async {
       final directory = await seedAccount();

@@ -272,18 +272,42 @@ class TransferService {
   /// Changes only when activity moves between sections, not on byte ticks.
   int get downloadSectionsRevision => _downloadSectionsRevision;
 
+  /// Startup only, before accepting reconciliations or history clears.
   Future<void> restoreDownloads() async {
     for (final record in await database.list('download')) {
       final saved = DownloadProgress.fromJson(record);
+      final interrupted =
+          saved.status == DownloadStatus.downloading ||
+          saved.status == DownloadStatus.verifying;
+      if (interrupted) {
+        // A crash can leave progress behind the committed, verified file. Only
+        // recover completion if that file still matches the current library;
+        // an older revision must not dismiss an interrupted replacement.
+        final trackRecord = await database.get('track', saved.trackId);
+        final fileRecord = await database.get('file', saved.trackId);
+        if (trackRecord != null && fileRecord != null) {
+          final track = Track.fromJson(trackRecord);
+          final stat = await File(fileRecord['path'] as String).stat();
+          if (fileRecord['sha256'] == track.sha256 &&
+              stat.type == FileSystemEntityType.file &&
+              stat.size == track.sizeBytes) {
+            _downloads[saved.trackId] = DownloadProgress(
+              trackId: saved.trackId,
+              totalBytes: track.sizeBytes,
+              receivedBytes: track.sizeBytes,
+              status: DownloadStatus.downloaded,
+            );
+            await _saveDownload(saved.trackId);
+            continue;
+          }
+        }
+      }
       final partial = File(
         p.join(
           directory.path,
           '${Uri.encodeComponent(saved.trackId)}.audio.part',
         ),
       );
-      final interrupted =
-          saved.status == DownloadStatus.downloading ||
-          saved.status == DownloadStatus.verifying;
       _downloads[saved.trackId] = DownloadProgress(
         trackId: saved.trackId,
         totalBytes: saved.totalBytes,
