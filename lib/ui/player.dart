@@ -763,15 +763,20 @@ class QueuePanel extends StatelessWidget {
   @override
   Widget build(BuildContext context) => SelectedBuilder(
     listenable: app.playback,
-    select: () => (app.playback.effectiveQueue, app.playback.effectiveIndex),
+    select: () => (
+      app.playback.effectiveQueue,
+      app.playback.effectiveIndex,
+      app.playback.shuffle,
+    ),
     builder: (context, snapshot, _) =>
-        _build(context, snapshot.$1, snapshot.$2),
+        _build(context, snapshot.$1, snapshot.$2, snapshot.$3),
   );
 
   Widget _build(
     BuildContext context,
     List<PlaybackQueueEntry> queue,
     int currentIndex,
+    bool shuffle,
   ) => Column(
     crossAxisAlignment: CrossAxisAlignment.stretch,
     children: [
@@ -780,9 +785,23 @@ class QueuePanel extends StatelessWidget {
         child: Row(
           children: [
             Expanded(
-              child: Text(
-                'Play queue',
-                style: Theme.of(context).textTheme.titleLarge,
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'Play queue',
+                    style: Theme.of(context).textTheme.titleLarge,
+                  ),
+                  if (queue.isNotEmpty) ...[
+                    const SizedBox(height: 4),
+                    Text(
+                      'Playing ${currentIndex + 1} of ${queue.length}'
+                      '${shuffle ? ' · Shuffled' : ''}',
+                      key: const ValueKey('queue-position'),
+                      style: Theme.of(context).textTheme.bodySmall,
+                    ),
+                  ],
+                ],
               ),
             ),
             if (onClose != null)
@@ -801,34 +820,146 @@ class QueuePanel extends StatelessWidget {
                 title: 'A quiet queue',
                 message: 'Play a track or playlist to get started.',
               )
-            : ListView.builder(
-                itemCount: queue.length,
-                itemBuilder: (context, index) {
-                  final entry = queue[index];
-                  final track = entry.track;
-                  return ListTile(
-                    selected: index == currentIndex,
-                    leading: index == currentIndex
-                        ? const Icon(Icons.graphic_eq_rounded)
-                        : Text('${index + 1}'),
-                    title: Text(
-                      track.title,
-                      maxLines: 2,
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                    subtitle: Text(
-                      track.artist,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                    onTap: () => runUiAction(
-                      context,
-                      () => app.playback.selectQueueEntry(entry),
-                    ),
-                  );
-                },
-              ),
+            : _QueueList(app: app, queue: queue, currentIndex: currentIndex),
       ),
     ],
   );
+}
+
+class _QueueList extends StatefulWidget {
+  const _QueueList({
+    required this.app,
+    required this.queue,
+    required this.currentIndex,
+  });
+
+  final AppController app;
+  final List<PlaybackQueueEntry> queue;
+  final int currentIndex;
+
+  @override
+  State<_QueueList> createState() => _QueueListState();
+}
+
+class _QueueListState extends State<_QueueList> {
+  final _scroll = ScrollController();
+  double _rowHeight = 80, _viewportHeight = 0;
+  bool _revealScheduled = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _revealCurrent();
+  }
+
+  @override
+  void didUpdateWidget(covariant _QueueList oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.currentIndex != widget.currentIndex ||
+        !identical(oldWidget.queue, widget.queue)) {
+      _revealCurrent();
+    }
+  }
+
+  // Fixed-height rows make the current occurrence reachable without building
+  // every track in large queues. Position ticks leave this scroll state alone.
+  void _revealCurrent() {
+    if (_revealScheduled) return;
+    _revealScheduled = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _revealScheduled = false;
+      if (!mounted || !_scroll.hasClients || widget.currentIndex < 0) return;
+      final offset = widget.currentIndex * _rowHeight - _viewportHeight / 4;
+      _scroll.jumpTo(offset.clamp(0, _scroll.position.maxScrollExtent));
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) => LayoutBuilder(
+    builder: (context, constraints) {
+      final textScale = math.max(
+        1.0,
+        MediaQuery.textScalerOf(context).scale(14) / 14,
+      );
+      final rowHeight = 80 * textScale;
+      final numberWidth =
+          math.max(32.0, widget.queue.length.toString().length * 9.0) *
+          textScale;
+      if (_rowHeight != rowHeight || _viewportHeight != constraints.maxHeight) {
+        _rowHeight = rowHeight;
+        _viewportHeight = constraints.maxHeight;
+        _revealCurrent();
+      }
+      return ListView.builder(
+        key: const ValueKey('play-queue-list'),
+        controller: _scroll,
+        itemExtent: _rowHeight,
+        itemCount: widget.queue.length,
+        itemBuilder: (context, index) {
+          final entry = widget.queue[index];
+          final current = index == widget.currentIndex;
+          final status = current
+              ? 'Now playing'
+              : entry.isManuallyQueued
+              ? index > widget.currentIndex
+                    ? 'Queued next'
+                    : 'Queued'
+              : null;
+          return ListTile(
+            key: ObjectKey(entry),
+            selected: current,
+            leading: SizedBox(
+              width: numberWidth,
+              child: Center(child: Text('${index + 1}')),
+            ),
+            // Keep the icon beside the text: leading has a fixed height cap,
+            // even when accessibility text scaling increases the row height.
+            trailing: current
+                ? const Icon(Icons.graphic_eq_rounded, size: 18)
+                : null,
+            title: Text(
+              entry.track.title,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+            ),
+            subtitle: Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    entry.track.artist,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+                if (status != null) ...[
+                  const SizedBox(width: 8),
+                  Flexible(
+                    child: Tooltip(
+                      message: status,
+                      child: Text(
+                        status,
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                        style: Theme.of(context).textTheme.labelSmall,
+                      ),
+                    ),
+                  ),
+                ],
+              ],
+            ),
+            onTap: () => runUiAction(
+              context,
+              () => widget.app.playback.selectQueueEntry(entry),
+            ),
+          );
+        },
+      );
+    },
+  );
+
+  @override
+  void dispose() {
+    _scroll.dispose();
+    super.dispose();
+  }
 }
