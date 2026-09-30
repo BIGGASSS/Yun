@@ -6,6 +6,16 @@ on:
         description: 'debug-signed evaluation or release-signed APK (manual/tag release)'
         type: string
         default: debug-signed
+    # Optional for debug/CI callers; release values come from the job environment.
+    secrets:
+      ANDROID_KEYSTORE_BASE64:
+        required: false
+      ANDROID_KEYSTORE_PASSWORD:
+        required: false
+      ANDROID_KEY_ALIAS:
+        required: false
+      ANDROID_KEY_PASSWORD:
+        required: false
 permissions:
   contents: read
 jobs:

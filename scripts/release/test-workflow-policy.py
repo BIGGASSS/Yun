@@ -149,20 +149,42 @@ class WorkflowPolicyTests(unittest.TestCase):
                             count += 1
         self.assertGreater(count, 0)
 
-    def test_no_secret_declarations_forwarding_or_other_consumers(self):
+    def test_only_explicit_signing_secret_contract_and_consumer(self):
         signed = block(self.android, "      - name: Build and verify release-signed APK (no fallback)")
         self.assertIn("        if: inputs.android_signing == 'release-signed'\n", signed)
         self.assertIn("        run: bash scripts/release/build-android.sh release-signed\n", signed)
         for name in SIGNING_SECRETS:
             self.assertIn(f"          {name}: ${{{{ secrets.{name} }}}}\n", signed)
+        declaration = "    secrets:\n" + "".join(
+            f"      {name}:\n        required: false\n" for name in SIGNING_SECRETS
+        )
+        call = block(self.native, "  workflow_call:")
+        self.assertEqual(block(call, "    secrets:"), declaration)
+        allowed = {".github/workflows/native-builds.yml": (declaration, signed)}
+        for filename in ("tag-release.yml", "release.yml"):
+            path = f".github/workflows/{filename}"
+            clients = block(self.files[path], "  clients:")
+            self.assertIn("    uses: ./.github/workflows/native-builds.yml\n", clients)
+            mapping = "    secrets:\n"
+            for name in SIGNING_SECRETS:
+                expression = f"secrets.{name}" if filename == "tag-release.yml" else (
+                    f"inputs.android_signing == 'release-signed' && secrets.{name} || ''"
+                )
+                mapping += f"      {name}: ${{{{ {expression} }}}}\n"
+            self.assertEqual(block(clients, "    secrets:"), mapping)
+            allowed[path] = (mapping,)
         for path, text in self.files.items():
             with self.subTest(path=path):
-                self.assertNotRegex(text, r"(?m)^\s*(?:- )?secrets:")
-                remainder = text.replace(signed, "") if path.endswith("/native-builds.yml") else text
-                code = "\n".join(line for line in remainder.splitlines() if not line.lstrip().startswith("#"))
+                remainder = text
+                for permitted in allowed.get(path, ()):
+                    self.assertEqual(remainder.count(permitted), 1)
+                    remainder = remainder.replace(permitted, "", 1)
+                code = "\n".join(line for line in remainder.splitlines()
+                                 if not line.lstrip().startswith("#"))
+                self.assertNotRegex(code, r"(?m)^\s*(?:- )?secrets:")
                 self.assertNotRegex(code, r"\bsecrets\s*[.\[]")
                 for name in SIGNING_SECRETS:
-                    self.assertNotIn(name, remainder)
+                    self.assertNotIn(name, code)
         self.assertEqual(len(re.findall(r"\bsecrets\.", signed)), len(SIGNING_SECRETS))
 
     def test_android_job_guards_environment_before_any_steps(self):
