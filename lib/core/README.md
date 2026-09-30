@@ -60,12 +60,16 @@ Bootstrap loads device-local sorting preferences from `collections.sorting` and
 shares the controller with browsing screens. Library tracks, album details,
 artist details, playlist overview, playlist entries, and the Add tracks picker
 remember independent sort fields and directions. Defaults retain title order,
-album order, and playlist order as appropriate. Unknown or corrupt fields fall
-back independently without affecting valid settings.
+album order, and playlist order as appropriate. Missing preferences use defaults;
+malformed JSON or a non-object stored value fails bootstrap without rewriting it.
+Within a valid object, unknown or corrupt fields fall back independently without
+affecting valid settings.
 
 Edits update the view immediately and queue complete snapshots in order. Storage
-failures are surfaced by the initiating UI action; later edits retry the current
-snapshot. Lifecycle checkpoints and orderly shutdown drain accepted writes.
+failures are surfaced by the initiating UI action and retained for `flushSettings()`
+until a later complete snapshot saves successfully. Later edits retry the current
+snapshot. Lifecycle checkpoints and orderly shutdown drain accepted writes;
+unresolved save failures prevent orderly shutdown from reporting success.
 Preferences contain no collection IDs, search queries, selections, or playback
 state, and never change the persisted entry order of a playlist.
 

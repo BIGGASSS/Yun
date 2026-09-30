@@ -14,6 +14,7 @@ class CollectionSettingsController {
   CollectionSettings get settings => _settings;
   final Future<void> Function(CollectionSettings)? _saveSettings;
   Future<void> _writes = Future.value();
+  (Object, StackTrace)? _saveFailure;
 
   Future<void> setTrackSort(
     TrackSortSurface surface,
@@ -43,10 +44,23 @@ class CollectionSettingsController {
     if (save == null) return Future.value();
     final snapshot = settings;
     final write = _writes.then((_) => save(snapshot));
-    // The caller surfaces the failure, but it must not block subsequent edits.
-    _writes = write.catchError((Object _) {});
+    // A failed storage write must not block later full snapshots. Keep its
+    // error for flush callers as well as the initiating caller; only a durable
+    // snapshot resolves the failure.
+    _writes = write.then<void>(
+      (_) => _saveFailure = null,
+      onError: (Object error, StackTrace stackTrace) {
+        _saveFailure = (error, stackTrace);
+      },
+    );
     return write;
   }
 
-  Future<void> flushSettings() => _writes;
+  Future<void> flushSettings() async {
+    await _writes;
+    final failure = _saveFailure;
+    if (failure != null) {
+      Error.throwWithStackTrace(failure.$1, failure.$2);
+    }
+  }
 }

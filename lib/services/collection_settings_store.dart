@@ -12,15 +12,15 @@ class SharedPreferencesCollectionSettingsStore {
 
   Future<CollectionSettings> read() async {
     final saved = preferences.get(key);
-    if (saved is! String) return CollectionSettings();
-    try {
-      final json = jsonDecode(saved);
-      return json is Map<String, dynamic>
-          ? CollectionSettings.fromJson(json)
-          : CollectionSettings();
-    } on FormatException {
-      return CollectionSettings();
+    if (saved == null) return CollectionSettings();
+    if (saved is! String) {
+      throw const FormatException('Sorting preferences must be a JSON string');
     }
+    final json = jsonDecode(saved);
+    if (json is! Map<String, dynamic>) {
+      throw const FormatException('Sorting preferences must be a JSON object');
+    }
+    return CollectionSettings.fromJson(json);
   }
 
   Future<void> write(CollectionSettings settings) async {

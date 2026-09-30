@@ -75,6 +75,50 @@ Future<void> _initializeAudio(_BootstrapApp app) async {
 void main() {
   setUp(mockDesktopDrop);
 
+  testWidgets(
+    'malformed collection JSON reaches the bootstrap error boundary',
+    (tester) async {
+      await tester.runAsync(() async {
+        const key = SharedPreferencesCollectionSettingsStore.key;
+        const malformed = '{broken';
+        SharedPreferences.setMockInitialValues({key: malformed});
+        var controllerCreated = false;
+        try {
+          await tester.pumpWidget(
+            YunBootstrap(
+              controllerFactory:
+                  ({required playbackSettings, required savePlaybackSettings}) {
+                    controllerCreated = true;
+                    throw StateError(
+                      'Controller must not start after corrupt settings',
+                    );
+                  },
+              desktopHostFactory: () => throw StateError(
+                'Desktop must not start after corrupt settings',
+              ),
+            ),
+          );
+          for (var i = 0; i < 100; i++) {
+            await Future<void>.delayed(Duration.zero);
+            await tester.pumpAndSettle();
+            if (find.text('Retry').evaluate().isNotEmpty) break;
+          }
+          expect(
+            find.text('Your library could not be opened.'),
+            findsOneWidget,
+          );
+          expect(find.text('Retry'), findsOneWidget);
+          expect(find.byType(YunApp), findsNothing);
+          expect(controllerCreated, isFalse);
+          expect((await SharedPreferences.getInstance()).get(key), malformed);
+          expect(tester.takeException(), isNull);
+        } finally {
+          await tester.pumpWidget(const SizedBox.shrink());
+        }
+      });
+    },
+  );
+
   for (final platform in [
     TargetPlatform.linux,
     TargetPlatform.macOS,

@@ -88,7 +88,7 @@ void main() {
     },
   );
 
-  test('corrupt or wrong-type data uses defaults without rewriting', () async {
+  test('corrupt or wrong-type data fails without rewriting', () async {
     for (final value in <Object>[
       '{broken',
       'null',
@@ -99,9 +99,7 @@ void main() {
       ['title'],
     ]) {
       SharedPreferences.setMockInitialValues({key: value});
-      final saved = await (await store()).read();
-      expect(saved.trackSort(TrackSortSurface.library).sort, TrackSort.title);
-      expect(saved.playlists.sort, PlaylistSort.name);
+      await expectLater((await store()).read(), throwsFormatException);
       expect((await SharedPreferences.getInstance()).get(key), value);
     }
   });
@@ -185,13 +183,17 @@ void main() {
   );
 
   test(
-    'a failed save surfaces the error and a later edit can persist',
+    'failed saves remain visible to flush until a later snapshot persists',
     () async {
       final adapter = await store();
       var reject = true;
+      final failure = StateError('disk unavailable');
+      final stack = StackTrace.current;
+      final recoveryGate = Completer<void>();
       final settings = CollectionSettingsController(
         saveSettings: (snapshot) async {
-          if (reject) throw StateError('disk unavailable');
+          if (reject) Error.throwWithStackTrace(failure, stack);
+          await recoveryGate.future;
           await adapter.write(snapshot);
         },
       );
@@ -201,10 +203,31 @@ void main() {
           TrackSort.added,
           descending: true,
         ),
-        throwsStateError,
+        throwsA(same(failure)),
+      );
+      for (var i = 0; i < 2; i++) {
+        await expectLater(settings.flushSettings(), throwsA(same(failure)));
+      }
+      await settings.flushSettings().then<void>(
+        (_) => fail('Expected the retained save failure'),
+        onError: (Object error, StackTrace trace) {
+          expect(error, same(failure));
+          expect(trace, same(stack));
+        },
       );
       reject = false;
-      await settings.setPlaylistSort(PlaylistSort.count, descending: false);
+      final recovery = settings.setPlaylistSort(
+        PlaylistSort.count,
+        descending: false,
+      );
+      var flushed = false;
+      final flushing = settings.flushSettings().then((_) => flushed = true);
+      await Future<void>.delayed(Duration.zero);
+      expect(flushed, isFalse);
+      recoveryGate.complete();
+      await recovery;
+      await flushing;
+      await settings.flushSettings();
       final restored = await (await store()).read();
       expect(restored.trackSort(TrackSortSurface.album).sort, TrackSort.added);
       expect(restored.trackSort(TrackSortSurface.album).descending, isTrue);
