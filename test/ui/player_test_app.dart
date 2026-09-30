@@ -26,6 +26,8 @@ class PlayerTestApp extends ChangeNotifier implements AppController {
   final downloadChanges = ChangeNotifier();
   @override
   final artworkChanges = ChangeNotifier();
+  @override
+  int get downloadSectionsRevision => 0;
 
   final FakeEngine engine;
 

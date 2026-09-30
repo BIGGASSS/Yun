@@ -26,21 +26,46 @@ void main() {
   tearDown(() async {
     await root.delete(recursive: true);
   });
-  Future<Directory> seedAccount() async {
+  Future<Directory> seedAccount({DownloadStatus? interrupted}) async {
     final key = sha256
         .convert(utf8.encode(jsonEncode([account.server, account.userId])))
         .toString();
     final directory = Directory(p.join(root.path, 'accounts', key));
     await directory.create(recursive: true);
     final db = CacheDatabase(File(p.join(directory.path, 'cache.sqlite')));
+    final track = interrupted == null
+        ? const Track(id: 't', title: 'Offline track')
+        : Track(
+            id: 't',
+            title: 'Offline track',
+            sizeBytes: 3,
+            sha256: sha256.convert([1, 2, 3]).toString(),
+          );
     await db.applyLibrary({
       'cursor': 5,
       'reset': true,
-      'tracks': [const Track(id: 't', title: 'Offline track').toJson()],
+      'tracks': [track.toJson()],
     });
     final file = await File(p.join(directory.path, 'offline.audio'))
         .writeAsBytes([1, 2, 3]);
-    await db.put('file', 't', {'id': 't', 'path': file.path, 'sha256': ''});
+    await db.put('file', 't', {
+      'id': 't',
+      'path': file.path,
+      'sha256': track.sha256,
+    });
+    if (interrupted != null) {
+      await db.put('pin', 'track:t', const PinSelection('track', 't').toJson());
+      // Crash after the verified file record commits, before progress saves.
+      await db.put(
+        'download',
+        't',
+        DownloadProgress(
+          trackId: 't',
+          totalBytes: track.sizeBytes,
+          status: interrupted,
+        ).toJson(),
+      );
+    }
     await db.put('event', 'pending', {'id': 'pending', 'track_id': 't'});
     await db.close();
     await credentials.write(
@@ -94,6 +119,142 @@ void main() {
     await app.shutdown();
     app.dispose();
   });
+
+  for (final interrupted in [
+    null,
+    DownloadStatus.downloading,
+    DownloadStatus.verifying,
+  ]) {
+    test(
+      'cleared Done entries stay cleared offline after restart (saved: $interrupted)',
+      () async {
+        final directory = await seedAccount(interrupted: interrupted);
+        var requests = 0;
+        AppController create() {
+          final app = AppController(
+            api: ApiClient(
+              dio: Dio()
+                ..httpClientAdapter = FakeAdapter((options, _) {
+                  requests++;
+                  throw DioException(
+                    requestOptions: options,
+                    type: DioExceptionType.connectionError,
+                  );
+                }),
+              credentials: credentials,
+            ),
+            storageDirectory: () async => root,
+            playbackEngine: FakeEngine(),
+            enableSystemControls: false,
+            automaticRefresh: false,
+          );
+          addTearDown(() async {
+            await app.shutdown();
+            app.dispose();
+          });
+          return app;
+        }
+
+        var app = create();
+        await app.initialize();
+        final path = app.localPath('t');
+        expect(app.downloadProgress(app.tracks.single).historyCleared, isFalse);
+        await app.clearDoneDownloads();
+        expect(app.downloadProgress(app.tracks.single).historyCleared, isTrue);
+        expect(app.downloadedTrackIds, {'t'});
+        expect(await File(path!).readAsBytes(), [1, 2, 3]);
+        await app.shutdown();
+        final persisted = CacheDatabase(
+          File(p.join(directory.path, 'cache.sqlite')),
+        );
+        try {
+          final progress = (await persisted.get('download', 't'))!;
+          expect(progress['status'], DownloadStatus.downloaded.name);
+          expect(progress['history_cleared'], isTrue);
+          expect((await persisted.get('file', 't'))!['path'], path);
+          if (interrupted != null) {
+            expect(await persisted.get('pin', 'track:t'), isNotNull);
+          }
+        } finally {
+          await persisted.close();
+        }
+
+        app = create();
+        await app.initialize();
+        expect(app.downloadProgress(app.tracks.single).historyCleared, isTrue);
+        expect(app.localPath('t'), path);
+        await app.play(app.tracks.single);
+        expect(app.playback.currentTrack?.id, 't');
+        expect(requests, 0);
+      },
+    );
+  }
+  for (final closingAction in ['logout', 'shutdown']) {
+    test('$closingAction drains concurrent download history clears', () async {
+      final directory = await seedAccount();
+      final databaseFile = File(p.join(directory.path, 'cache.sqlite'));
+      final seed = CacheDatabase(databaseFile);
+      final fileRecord = (await seed.get('file', 't'))!;
+      await seed.transaction(() async {
+        for (var i = 0; i < 100; i++) {
+          final track = Track(id: 'download-$i', title: 'Download $i');
+          await seed.put('track', track.id, track.toJson());
+          await seed.put('file', track.id, {...fileRecord, 'id': track.id});
+        }
+      });
+      await seed.close();
+      final app = AppController(
+        api: ApiClient(
+          dio: Dio()
+            ..httpClientAdapter = FakeAdapter((options, _) {
+              if (options.path.endsWith('/auth/logout')) {
+                return jsonResponse({});
+              }
+              throw StateError('Unexpected network request');
+            }),
+          credentials: credentials,
+        ),
+        storageDirectory: () async => root,
+        playbackEngine: FakeEngine(),
+        enableSystemControls: false,
+        automaticRefresh: false,
+      );
+      try {
+        await app.initialize();
+        expect(app.downloadedTrackIds, hasLength(101));
+        final cleared = <int>[];
+        final clearing = [
+          for (var i = 0; i < 2; i++)
+            app.clearDoneDownloads().then((_) => cleared.add(i)),
+        ];
+        final closing =
+            (closingAction == 'logout' ? app.logout() : app.shutdown()).then((
+              _,
+            ) {
+              expect(cleared, hasLength(2));
+            });
+        await Future.wait([...clearing, closing]);
+        expect(app.isAuthenticated, isFalse);
+        final reopened = CacheDatabase(databaseFile);
+        try {
+          final history = await reopened.list('download');
+          expect(history, hasLength(101));
+          expect(
+            history.every((row) => row['history_cleared'] == true),
+            isTrue,
+          );
+          expect(await reopened.list('file'), hasLength(101));
+          expect(await File(fileRecord['path'] as String).exists(), isTrue);
+        } finally {
+          await reopened.close();
+        }
+      } finally {
+        await app.shutdown();
+        app.dispose();
+      }
+    });
+  }
+
   for (final type in [
     DioExceptionType.connectionError,
     DioExceptionType.connectionTimeout,

@@ -81,6 +81,8 @@ class AppController extends ChangeNotifier {
   List<UploadJob> get uploads => _uploads;
   List<PinSelection> get pins => _pins;
   Set<String> get downloadedTrackIds => _downloadedTrackIds;
+  int get downloadSectionsRevision =>
+      !_locking ? _transfers?.downloadSectionsRevision ?? 0 : 0;
   final ChangeNotifier downloadChanges = ChangeNotifier();
   final ChangeNotifier artworkChanges = ChangeNotifier();
   int pendingEventCount = 0;
@@ -90,6 +92,7 @@ class AppController extends ChangeNotifier {
   bool _disposed = false, _locking = false, _notifierDisposed = false;
   final Set<Future<dynamic>> _onlineOperations = {};
   final Set<Future<void>> _uploadOperations = {};
+  final Set<Future<void>> _downloadHistoryOperations = {};
   Future<void>? _reloadRunning;
   bool _reloadRequested = false,
       _uploadsRequested = false,
@@ -416,6 +419,11 @@ class AppController extends ChangeNotifier {
         ..._uploadOperations,
       ].map((f) => f.then<void>((_) {}, onError: (Object _, StackTrace _) {})),
     );
+    // History transactions must finish before their database closes. The
+    // cleanup boundary still closes resources, then rethrows any failure.
+    await cleanup(() async {
+      await Future.wait(_downloadHistoryOperations);
+    });
     try {
       await _reloadRunning;
     } catch (_) {}
@@ -680,6 +688,9 @@ class AppController extends ChangeNotifier {
         totalBytes: track.sizeBytes,
         receivedBytes: track.sizeBytes,
         status: DownloadStatus.downloaded,
+        historyCleared:
+            !_locking &&
+            (_transfers?.progressFor(track.id)?.historyCleared ?? false),
       );
     }
     final selected = _wantedDownloads.contains(track.id);
@@ -699,6 +710,17 @@ class AppController extends ChangeNotifier {
   Future<void> retryDownloads() async {
     _requireDatabase();
     await _transfers!.reconcile(tracks, playlists, pins);
+  }
+
+  Future<void> clearDoneDownloads() async {
+    _requireDatabase();
+    final operation = _transfers!.clearDoneDownloads(
+      tracks.where((track) => _downloadedTrackIds.contains(track.id)).toList(),
+    );
+    _downloadHistoryOperations.add(operation);
+    await operation.whenComplete(
+      () => _downloadHistoryOperations.remove(operation),
+    );
   }
 
   Future<String> audioUrl(String trackId) async {

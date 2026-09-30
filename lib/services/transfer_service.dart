@@ -62,11 +62,15 @@ class DownloadProgress {
     this.receivedBytes = 0,
     this.status = DownloadStatus.queued,
     this.error,
+    this.historyCleared = false,
   });
   final String trackId;
   final int receivedBytes, totalBytes;
   final DownloadStatus status;
   final String? error;
+
+  /// Dismiss completed activity without removing its verified local audio.
+  final bool historyCleared;
   double get fraction =>
       totalBytes <= 0 ? 0 : (receivedBytes / totalBytes).clamp(0.0, 1.0);
   Map<String, dynamic> toJson() => {
@@ -75,6 +79,7 @@ class DownloadProgress {
     'total_bytes': totalBytes,
     'status': status.name,
     'error': error,
+    'history_cleared': historyCleared,
   };
   factory DownloadProgress.fromJson(Map<String, dynamic> j) => DownloadProgress(
     trackId: j['id'] as String,
@@ -82,6 +87,7 @@ class DownloadProgress {
     receivedBytes: (j['received_bytes'] as num).toInt(),
     status: DownloadStatus.values.byName(j['status'] as String),
     error: j['error'] as String?,
+    historyCleared: j['history_cleared'] as bool? ?? false,
   );
 }
 
@@ -261,19 +267,47 @@ class TransferService {
   final Map<String, DownloadProgress> _downloads = {};
   Map<String, DownloadProgress> get downloads => Map.unmodifiable(_downloads);
   DownloadProgress? progressFor(String trackId) => _downloads[trackId];
+  int _downloadSectionsRevision = 0;
 
+  /// Changes only when activity moves between sections, not on byte ticks.
+  int get downloadSectionsRevision => _downloadSectionsRevision;
+
+  /// Startup only, before accepting reconciliations or history clears.
   Future<void> restoreDownloads() async {
     for (final record in await database.list('download')) {
       final saved = DownloadProgress.fromJson(record);
+      final interrupted =
+          saved.status == DownloadStatus.downloading ||
+          saved.status == DownloadStatus.verifying;
+      if (interrupted) {
+        // A crash can leave progress behind the committed, verified file. Only
+        // recover completion if that file still matches the current library;
+        // an older revision must not dismiss an interrupted replacement.
+        final trackRecord = await database.get('track', saved.trackId);
+        final fileRecord = await database.get('file', saved.trackId);
+        if (trackRecord != null && fileRecord != null) {
+          final track = Track.fromJson(trackRecord);
+          final stat = await File(fileRecord['path'] as String).stat();
+          if (fileRecord['sha256'] == track.sha256 &&
+              stat.type == FileSystemEntityType.file &&
+              stat.size == track.sizeBytes) {
+            _downloads[saved.trackId] = DownloadProgress(
+              trackId: saved.trackId,
+              totalBytes: track.sizeBytes,
+              receivedBytes: track.sizeBytes,
+              status: DownloadStatus.downloaded,
+            );
+            await _saveDownload(saved.trackId);
+            continue;
+          }
+        }
+      }
       final partial = File(
         p.join(
           directory.path,
           '${Uri.encodeComponent(saved.trackId)}.audio.part',
         ),
       );
-      final interrupted =
-          saved.status == DownloadStatus.downloading ||
-          saved.status == DownloadStatus.verifying;
       _downloads[saved.trackId] = DownloadProgress(
         trackId: saved.trackId,
         totalBytes: saved.totalBytes,
@@ -284,6 +318,7 @@ class TransferService {
             : 0,
         status: interrupted ? DownloadStatus.queued : saved.status,
         error: saved.error,
+        historyCleared: saved.historyCleared && !interrupted,
       );
     }
   }
@@ -309,12 +344,63 @@ class TransferService {
       status: status,
       error: error,
     );
+    if (_downloadSection(previous?.status) != _downloadSection(status) ||
+        previous?.historyCleared == true) {
+      _downloadSectionsRevision++;
+    }
     (onDownloadChanged ?? onChanged)();
     return true;
   }
 
   Future<void> _saveDownload(String id) =>
       database.put('download', id, _downloads[id]!.toJson());
+
+  static int _downloadSection(DownloadStatus? status) => switch (status) {
+    DownloadStatus.downloaded => 1,
+    DownloadStatus.failed => 2,
+    _ => 0,
+  };
+
+  /// Retain completion records so a later sync does not recreate cleared Done
+  /// entries. A real download changes status and starts fresh activity.
+  Future<void> clearDoneDownloads(Iterable<Track> downloadedTracks) async {
+    final cleared = <String, DownloadProgress>{};
+    final previous = <String, DownloadProgress?>{};
+    await database.transaction(() async {
+      for (final track in downloadedTracks) {
+        final progress = _downloads[track.id];
+        if (progress?.historyCleared == true ||
+            (progress != null &&
+                progress.status != DownloadStatus.downloaded)) {
+          continue;
+        }
+        final record = await database.get('file', track.id);
+        if (record == null ||
+            record['sha256'] != track.sha256 ||
+            !await File(record['path'] as String).exists()) {
+          continue;
+        }
+        final dismissed = DownloadProgress(
+          trackId: track.id,
+          totalBytes: track.sizeBytes,
+          receivedBytes: track.sizeBytes,
+          status: DownloadStatus.downloaded,
+          historyCleared: true,
+        );
+        await database.put('download', track.id, dismissed.toJson());
+        previous[track.id] = progress;
+        cleared[track.id] = dismissed;
+      }
+    });
+    // A download that starts while the transaction is committing is new
+    // activity. Do not overwrite its fresh progress with an old dismissal.
+    cleared.removeWhere((id, _) => _downloads[id] != previous[id]);
+    if (cleared.isEmpty) return;
+    _downloads.addAll(cleared);
+    _downloadSectionsRevision++;
+    (onDownloadChanged ?? onChanged)();
+  }
+
   final Map<String, CancelToken> _uploadTokens = {};
   final Map<String, Completer<void>> _uploadDone = {};
   final CancelToken _downloadToken = CancelToken();
@@ -613,7 +699,10 @@ class TransferService {
     }
     final removedProgress = _downloads.keys.any((id) => !refs.containsKey(id));
     _downloads.removeWhere((id, _) => !refs.containsKey(id));
-    if (removedProgress) (onDownloadChanged ?? onChanged)();
+    if (removedProgress) {
+      _downloadSectionsRevision++;
+      (onDownloadChanged ?? onChanged)();
+    }
     for (final track in tracks.where((t) => refs.containsKey(t.id))) {
       if (!_downloads.containsKey(track.id)) {
         _progress(track, DownloadStatus.queued, 0);
