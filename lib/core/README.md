@@ -69,6 +69,25 @@ Storage errors appear in `playback.error` without reverting successful audio
 changes; another setting command retries (including the same value). Malformed
 stored fields fall back safely. Preferences contain no track/account information.
 
+## CollectionSettingsController
+
+Bootstrap loads device-local sorting preferences from `collections.sorting` and
+shares the controller with browsing screens. Library tracks, album details,
+artist details, playlist overview, playlist entries, and the Add tracks picker
+remember independent sort fields and directions. Defaults retain title order,
+album order, and playlist order as appropriate. Missing preferences use defaults;
+malformed JSON or a non-object stored value fails bootstrap without rewriting it.
+Within a valid object, unknown or corrupt fields fall back independently without
+affecting valid settings.
+
+Edits update the view immediately and queue complete snapshots in order. Storage
+failures are surfaced by the initiating UI action and retained for `flushSettings()`
+until a later complete snapshot saves successfully. Later edits retry the current
+snapshot. Lifecycle checkpoints and orderly shutdown drain accepted writes;
+unresolved save failures prevent orderly shutdown from reporting success.
+Preferences contain no collection IDs, search queries, selections, or playback
+state, and never change the persisted entry order of a playlist.
+
 ## DesktopController
 
 Bootstrap owns a separate desktop-only `DesktopController`, injected into YunApp.
@@ -80,9 +99,11 @@ missing/unknown values default to `quit`. Writes publish only after success.
 without stopping playback, closing databases, or changing credentials/queues.
 `showWindow()` restores/focuses. `quit()` and `requestApplicationExit()` always
 await account shutdown and pending settings, regardless of close preference.
-Failed shutdown leaves the window visible and prohibits further hiding; it does
-not pretend the core's memoized shutdown can be retried. OS force termination
-remains outside orderly-shutdown guarantees.
+A failed `prepareExit` settings preflight leaves the account running and can be
+retried after a successful save. Failed account shutdown leaves the window
+visible and prohibits further hiding; it does not pretend the core's memoized
+shutdown can be retried. OS force termination remains outside orderly-shutdown
+guarantees.
 
 `DesktopHost` isolates native APIs. The adapter uses pinned `window_manager`,
 `tray_manager` on Windows/macOS, and a direct Linux StatusNotifierItem/DBusMenu.

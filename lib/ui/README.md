@@ -33,11 +33,14 @@ the specified major. Core dependencies must also be installed before running
 - Library search, albums/artists, metadata and immediate artwork replacement.
   Track sorting and checkbox multiselection support filtered select-all, bulk
   playback, playlist addition, offline pinning and confirmed deletion.
+  Sort fields and directions persist separately for library tracks, album
+  details, and artist details across navigation and application restarts.
 - Playlists and their entries support sorting, multiselection and select-all.
   Sorting is view-only; drag handles and move-up/down menus edit saved order
   only in ascending playlist-order view. Bulk removal preserves library tracks.
   Add tracks offers sorting and filtered select-all, excludes existing members,
-  and adds each track at most once. Legacy repeated entries remain removable;
+  and remembers its sort independently of playlist overview and entry sorting.
+  It adds each track at most once. Legacy repeated entries remain removable;
   new repeats are not offered, including additions from Library.
 - Downloads show per-track byte progress, queued/verifying/failed states, pinned
   selections, storage totals, removal and retries. Artwork is cached privately

@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../core/app_controller.dart';
+import '../core/collection_settings_controller.dart';
 import '../core/desktop_controller.dart';
 import 'downloads_screen.dart';
 import 'library_screen.dart';
@@ -22,11 +23,13 @@ class YunApp extends StatefulWidget {
     this.desktop,
     this.initialThemeMode = ThemeMode.system,
     this.onThemeChanged,
+    this.collectionSettings,
   });
   final AppController controller;
   final DesktopController? desktop;
   final ThemeMode initialThemeMode;
   final ValueChanged<ThemeMode>? onThemeChanged;
+  final CollectionSettingsController? collectionSettings;
 
   @override
   State<YunApp> createState() => _YunAppState();
@@ -34,6 +37,7 @@ class YunApp extends StatefulWidget {
 
 class _YunAppState extends State<YunApp> {
   late ThemeMode _themeMode = widget.initialThemeMode;
+  final _localSettings = CollectionSettingsController();
 
   @override
   Widget build(BuildContext context) => MaterialApp(
@@ -44,6 +48,7 @@ class _YunAppState extends State<YunApp> {
     themeMode: _themeMode,
     home: _AppShell(
       app: widget.controller,
+      collectionSettings: widget.collectionSettings ?? _localSettings,
       desktop: widget.desktop,
       themeMode: _themeMode,
       onThemeChanged: (mode) {
@@ -60,11 +65,13 @@ class _AppShell extends StatefulWidget {
     required this.desktop,
     required this.themeMode,
     required this.onThemeChanged,
+    required this.collectionSettings,
   });
   final AppController app;
   final DesktopController? desktop;
   final ThemeMode themeMode;
   final ValueChanged<ThemeMode> onThemeChanged;
+  final CollectionSettingsController collectionSettings;
 
   @override
   State<_AppShell> createState() => _AppShellState();
@@ -263,13 +270,19 @@ class _AppShellState extends State<_AppShell> {
                                         child: switch (_destination) {
                                           0 => LibraryScreen(
                                             app: app,
+                                            collectionSettings:
+                                                widget.collectionSettings,
                                             searchFocus: _searchFocus,
                                             onUpload: _upload,
                                             onSignIn: () => setState(
                                               () => _destination = 4,
                                             ),
                                           ),
-                                          1 => PlaylistsScreen(app: app),
+                                          1 => PlaylistsScreen(
+                                            app: app,
+                                            collectionSettings:
+                                                widget.collectionSettings,
+                                          ),
                                           2 => DownloadsScreen(app: app),
                                           3 => StatsScreen(app: app),
                                           _ => SettingsScreen(

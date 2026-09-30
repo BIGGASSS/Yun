@@ -1,8 +1,9 @@
 import 'package:flutter/material.dart';
 
 import '../models/models.dart';
+import '../models/collection_settings.dart';
 
-enum TrackSort { original, title, artist, album, duration, added }
+export '../models/collection_settings.dart' show TrackSort;
 
 extension on TrackSort {
   String get label => switch (this) {

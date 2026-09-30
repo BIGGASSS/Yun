@@ -5,10 +5,15 @@ import 'package:flutter/material.dart' hide RepeatMode;
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+// Exercise the plugin's platform mock without adding a production dependency.
+// ignore: depend_on_referenced_packages
+import 'package:shared_preferences_platform_interface/shared_preferences_platform_interface.dart';
 import 'package:yun/core/app_controller.dart';
+import 'package:yun/core/collection_settings_controller.dart';
 import 'package:yun/core/desktop_controller.dart';
 import 'package:yun/main.dart';
 import 'package:yun/services/api_client.dart';
+import 'package:yun/services/collection_settings_store.dart';
 import 'package:yun/services/desktop_settings_store.dart';
 import 'package:yun/services/playback_settings_store.dart';
 import 'package:yun/ui/app.dart';
@@ -16,6 +21,22 @@ import 'package:yun/ui/app.dart';
 import 'core/fake_desktop_host.dart';
 import 'core/fakes.dart';
 import 'ui/player_test_app.dart' show mockDesktopDrop;
+
+class _CollectionPreferencesStore extends InMemorySharedPreferencesStore {
+  _CollectionPreferencesStore() : super.empty();
+
+  bool rejectCollectionWrites = true;
+  final failure = PlatformException(code: 'collection_write_failed');
+
+  @override
+  Future<bool> setValue(String valueType, String key, Object value) async {
+    if (rejectCollectionWrites &&
+        key == 'flutter.${SharedPreferencesCollectionSettingsStore.key}') {
+      throw failure;
+    }
+    return super.setValue(valueType, key, value);
+  }
+}
 
 /// Only startup storage is replaced. Playback and the entire orderly shutdown
 /// remain real; a gate lets tests inspect the native-exit ordering.
@@ -354,6 +375,128 @@ void main() {
         );
       },
     );
+  }
+
+  for (final exit in ['native', 'framework']) {
+    for (final recovery in ['none', 'before', 'after']) {
+      final recoverBeforeExit = recovery == 'before';
+      testWidgets(
+        'collection save failure with $recovery recovery on $exit application exit',
+        (tester) async {
+          await _withBootstrap(tester, TargetPlatform.linux, (fixture) async {
+            await _startFakePlayback(fixture);
+            final engineCalls = List<String>.of(fixture.engine.calls);
+            final desktop = fixture.desktop;
+            final settings = tester
+                .widget<YunApp>(find.byType(YunApp))
+                .collectionSettings!;
+            final original = SharedPreferencesStorePlatform.instance;
+            final store = _CollectionPreferencesStore();
+            SharedPreferencesStorePlatform.instance = store;
+            addTearDown(
+              () => SharedPreferencesStorePlatform.instance = original,
+            );
+
+            await expectLater(
+              settings.setTrackSort(
+                TrackSortSurface.library,
+                TrackSort.duration,
+                descending: true,
+              ),
+              throwsA(same(store.failure)),
+            );
+            // The failed write is already settled before shutdown starts.
+            expect(desktop.error, isNull);
+
+            Future<void> recover() async {
+              store.rejectCollectionWrites = false;
+              await settings.setPlaylistSort(
+                PlaylistSort.count,
+                descending: true,
+              );
+              await settings.flushSettings();
+              final preferences = await SharedPreferences.getInstance();
+              await preferences.reload();
+              final saved = await SharedPreferencesCollectionSettingsStore(
+                preferences,
+              ).read();
+              // A later successful snapshot includes the previously failed edit.
+              expect(
+                saved.trackSort(TrackSortSurface.library).sort,
+                TrackSort.duration,
+              );
+              expect(
+                saved.trackSort(TrackSortSurface.library).descending,
+                isTrue,
+              );
+              expect(saved.playlists.sort, PlaylistSort.count);
+            }
+
+            if (recoverBeforeExit) await recover();
+
+            if (exit == 'native') {
+              fixture.host.onClose!();
+              await desktop.requestWindowClose();
+            } else {
+              expect(await _requestFrameworkExit(), {
+                'response': recoverBeforeExit ? 'exit' : 'cancel',
+              });
+            }
+
+            if (recoverBeforeExit) {
+              _expectShutdownBeforeDetach(
+                fixture,
+                nativeExit: exit == 'native',
+              );
+              expect(desktop.error, isNull);
+            } else {
+              // Bootstrap must surface the failure at the desktop boundary,
+              // without starting controller shutdown or releasing the host.
+              expect(desktop.error, isNotNull);
+              expect(desktop.isQuitting, isFalse);
+              expect(fixture.host.visible, isTrue);
+              expect(fixture.app.shutdownStarted.isCompleted, isFalse);
+              expect(fixture.engine.controller.isClosed, isFalse);
+              expect(fixture.engine.calls, engineCalls);
+              expect(fixture.app.playback.isPlaying, isTrue);
+              await expectLater(
+                settings.flushSettings(),
+                throwsA(same(store.failure)),
+              );
+              expect(
+                fixture.events,
+                isNot(
+                  anyElement(
+                    isIn([
+                      'shutdown:start',
+                      'shutdown:done',
+                      'dispose',
+                      'exit',
+                    ]),
+                  ),
+                ),
+              );
+              if (recovery == 'after') {
+                await recover();
+                desktop.clearError();
+                expect(desktop.canMinimize, isTrue);
+                if (exit == 'native') {
+                  fixture.host.onClose!();
+                  await desktop.requestWindowClose();
+                } else {
+                  expect(await _requestFrameworkExit(), {'response': 'exit'});
+                }
+                _expectShutdownBeforeDetach(
+                  fixture,
+                  nativeExit: exit == 'native',
+                );
+                expect(desktop.error, isNull);
+              }
+            }
+          });
+        },
+      );
+    }
   }
 
   for (final platform in [TargetPlatform.android, TargetPlatform.iOS]) {

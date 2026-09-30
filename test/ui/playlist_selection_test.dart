@@ -3,6 +3,9 @@ import 'dart:math';
 
 import 'package:flutter/material.dart' hide RepeatMode;
 import 'package:flutter_test/flutter_test.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:yun/core/collection_settings_controller.dart';
+import 'package:yun/services/collection_settings_store.dart';
 import 'package:yun/core/app_controller.dart';
 import 'package:yun/core/playback_controller.dart' show AudioSource;
 import 'package:yun/ui/playlist_screen.dart';
@@ -235,6 +238,90 @@ Finder _dialogText(String text) =>
     find.descendant(of: find.byType(AlertDialog), matching: find.text(text));
 
 void main() {
+  _test(
+    'playlist overview, entries and picker restore independent sort choices',
+    (tester, app) async {
+      SharedPreferences.setMockInitialValues({});
+      final store = SharedPreferencesCollectionSettingsStore(
+        await SharedPreferences.getInstance(),
+      );
+      var settings = CollectionSettingsController(saveSettings: store.write);
+      app.collections = [
+        _playlist(name: 'Mix', updatedAt: 3),
+        _playlist(id: 'other', name: 'Other', updatedAt: 1),
+      ];
+      Future<void> mount() async {
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pumpWidget(
+          MaterialApp(
+            home: Scaffold(
+              body: PlaylistsScreen(app: app, collectionSettings: settings),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+      }
+
+      await mount();
+      await _sort(tester, 'Date updated');
+      await _tap(tester, find.byTooltip('Sort descending'));
+      expect(_entryTitles(tester), ['Mix', 'Other']);
+      await _open(tester);
+      await _sort(tester, 'Duration');
+      await _tap(tester, find.byTooltip('Sort descending'));
+      expect(_entryTitles(tester), [
+        '1. Zulu',
+        '2. Beta',
+        '3. Alpha',
+        '4. Unavailable track',
+      ]);
+      final savedEntries = app.playlists.first.entries;
+      // Make every track eligible in the picker, without changing its sort preference.
+      app.replace(_playlist(entries: const []));
+      await tester.pumpAndSettle();
+      await _tap(tester, find.text('Add tracks'));
+      await _sort(tester, 'Artist');
+      await _tap(tester, find.byTooltip('Sort descending').last);
+      List<String> pickerTitles() => tester
+          .widgetList<CheckboxListTile>(
+            find.descendant(
+              of: find.byType(AlertDialog),
+              matching: find.byType(CheckboxListTile),
+            ),
+          )
+          .map((tile) => (tile.title! as Text).data!)
+          .toList();
+      expect(pickerTitles(), ['Alpha', 'Beta', 'Zulu']);
+      await _tap(tester, _dialogText('Cancel'));
+      app.replace(_playlist(entries: savedEntries));
+      await settings.flushSettings();
+      settings = CollectionSettingsController(
+        initialSettings: await store.read(),
+      );
+      await mount();
+      expect(_entryTitles(tester), ['Mix', 'Other']);
+      expect(find.text('Sort by: Date updated'), findsOneWidget);
+      expect(find.byTooltip('Sort ascending'), findsOneWidget);
+      await _open(tester);
+      expect(_entryTitles(tester), [
+        '1. Zulu',
+        '2. Beta',
+        '3. Alpha',
+        '4. Unavailable track',
+      ]);
+      expect(app.playlists.first.entries, savedEntries);
+      expect(app.saves, isEmpty);
+      expect(app.playback.queue, isEmpty);
+      expect(app.engine.opens, 0);
+      app.replace(_playlist(entries: const []));
+      await tester.pumpAndSettle();
+      await _tap(tester, find.text('Add tracks'));
+      expect(pickerTitles(), ['Alpha', 'Beta', 'Zulu']);
+      expect(find.byTooltip('Sort ascending').last, findsOneWidget);
+      await _tap(tester, _dialogText('Cancel'));
+    },
+  );
+
   for (final selected in [false, true]) {
     _test(
       '${selected ? 'Play selected' : 'Play'} honors shuffle and settings; entry taps stay explicit',

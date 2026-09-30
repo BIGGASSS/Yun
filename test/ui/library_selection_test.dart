@@ -2,6 +2,9 @@ import 'dart:math';
 
 import 'package:flutter/material.dart' hide RepeatMode;
 import 'package:flutter_test/flutter_test.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:yun/core/collection_settings_controller.dart';
+import 'package:yun/services/collection_settings_store.dart';
 import 'package:yun/core/app_controller.dart';
 import 'package:yun/core/playback_controller.dart' show AudioSource;
 import 'package:yun/ui/collection_controls.dart';
@@ -254,6 +257,73 @@ Future<void> _selectAll(WidgetTester tester) async {
 }
 
 void main() {
+  _libraryTest('library and group sort choices survive restarting the screen', (
+    tester,
+    app,
+  ) async {
+    SharedPreferences.setMockInitialValues({});
+    final store = SharedPreferencesCollectionSettingsStore(
+      await SharedPreferences.getInstance(),
+    );
+    var settings = CollectionSettingsController(saveSettings: store.write);
+    final focus = FocusNode();
+    Future<void> mount() async {
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: LibraryScreen(
+              app: app,
+              collectionSettings: settings,
+              searchFocus: focus,
+              onUpload: () {},
+              onSignIn: () {},
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+    }
+
+    try {
+      await mount();
+      await _sort(tester, 'Duration');
+      await tester.tap(find.byTooltip('Sort descending'));
+      await tester.pumpAndSettle();
+      expect(_visibleIds(tester), ['coda', 'alpha', 'bravo', 'zulu']);
+      await _tap(tester, 'Albums');
+      await _tap(tester, 'Collection');
+      await _sort(tester, 'Title');
+      await tester.tap(find.byTooltip('Sort descending'));
+      await tester.pumpAndSettle();
+      expect(_visibleIds(tester), ['zulu', 'coda', 'alpha']);
+      await _tap(tester, 'Artists');
+      await _tap(tester, 'Zebra');
+      await _sort(tester, 'Date added');
+      expect(_visibleIds(tester), ['zulu', 'coda', 'alpha']);
+      await settings.flushSettings();
+      settings = CollectionSettingsController(
+        initialSettings: await store.read(),
+      );
+      await mount();
+      expect(_visibleIds(tester), ['coda', 'alpha', 'bravo', 'zulu']);
+      expect(find.byTooltip('Sort ascending'), findsOneWidget);
+      await _tap(tester, 'Albums');
+      await _tap(tester, 'Collection');
+      expect(_visibleIds(tester), ['zulu', 'coda', 'alpha']);
+      expect(find.byTooltip('Sort ascending'), findsOneWidget);
+      await _tap(tester, 'Artists');
+      await _tap(tester, 'Zebra');
+      expect(_visibleIds(tester), ['zulu', 'coda', 'alpha']);
+      expect(find.byTooltip('Sort descending'), findsOneWidget);
+      expect(app.playback.queue, isEmpty);
+      expect(app.engine.opens, 0);
+    } finally {
+      await tester.pumpWidget(const SizedBox.shrink());
+      focus.dispose();
+    }
+  });
+
   _libraryTest('Play queues the filtered tracks in the current sort order', (
     tester,
     app,
