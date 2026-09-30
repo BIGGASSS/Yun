@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
@@ -5,9 +6,12 @@ import 'package:flutter/material.dart' hide RepeatMode;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:yun/core/app_controller.dart';
+import 'package:yun/core/collection_settings_controller.dart';
 import 'package:yun/main.dart';
 import 'package:yun/services/api_client.dart';
 import 'package:yun/services/playback_settings_store.dart';
+import 'package:yun/services/collection_settings_store.dart';
+import 'package:yun/ui/app.dart';
 
 import 'core/fake_desktop_host.dart';
 import 'core/fakes.dart';
@@ -90,7 +94,18 @@ void main() {
             shuffle: true,
             repeatMode: RepeatMode.all,
           );
+          final seedCollections = CollectionSettings(
+            tracks: const {
+              TrackSortSurface.library: TrackSortSelection(
+                TrackSort.duration,
+                descending: true,
+              ),
+            },
+          );
           SharedPreferences.setMockInitialValues({
+            SharedPreferencesCollectionSettingsStore.key: jsonEncode(
+              seedCollections.toJson(),
+            ),
             SharedPreferencesPlaybackSettingsStore.key: jsonEncode(
               seed.toJson(),
             ),
@@ -102,6 +117,7 @@ void main() {
           final apps = <_BootstrapApp>[];
           final engines = <FakeEngine>[];
           final received = <PlaybackSettings>[];
+          var initialized = Completer<void>();
           var expected = PlaybackSettings(
             volume: desktop ? 36.5 : null,
             lastPositiveVolume: desktop ? 36.5 : 100,
@@ -125,6 +141,7 @@ void main() {
                       // applying settings after initialize would be too late.
                       expect(app.initialized, isFalse);
                       _expectRestored(app, engine, expected);
+                      initialized.complete();
                     },
                   );
                   expect(app.initializeCalls, 0);
@@ -136,12 +153,38 @@ void main() {
 
           try {
             await tester.pumpWidget(bootstrap());
+            await initialized.future;
             await tester.pumpAndSettle();
             expect(apps, hasLength(1));
             expect(apps.first.initializeCalls, 1);
             expect(apps.first.initialized, isTrue);
             expect(tester.takeException(), isNull);
             _expectRestored(apps.first, engines.first, expected);
+            final collectionSettings = tester
+                .widget<YunApp>(find.byType(YunApp))
+                .collectionSettings!;
+            expect(
+              collectionSettings.settings
+                  .trackSort(TrackSortSurface.library)
+                  .sort,
+              TrackSort.duration,
+            );
+            expect(
+              collectionSettings.settings
+                  .trackSort(TrackSortSurface.library)
+                  .descending,
+              isTrue,
+            );
+            await collectionSettings.setTrackSort(
+              TrackSortSurface.library,
+              TrackSort.artist,
+              descending: false,
+            );
+            await collectionSettings.setPlaylistSort(
+              PlaylistSort.count,
+              descending: true,
+            );
+            await collectionSettings.flushSettings();
             await _initializeAudio(apps.first);
             expect(engines.first.initializations, 1);
             expect(engines.first.volumeCalls, desktop ? [36.5] : isEmpty);
@@ -176,13 +219,35 @@ void main() {
               lastPositiveVolume: desktop ? 24.75 : 100,
               repeatMode: RepeatMode.one,
             );
+            initialized = Completer<void>();
             await tester.pumpWidget(bootstrap());
+            await initialized.future;
             await tester.pumpAndSettle();
             expect(apps, hasLength(2));
             expect(identical(apps.first, apps.last), isFalse);
             expect(received.last.toJson(), expected.toJson());
             expect(apps.last.initializeCalls, 1);
             _expectRestored(apps.last, engines.last, expected);
+            final restoredCollections = tester
+                .widget<YunApp>(find.byType(YunApp))
+                .collectionSettings!;
+            expect(
+              restoredCollections.settings
+                  .trackSort(TrackSortSurface.library)
+                  .sort,
+              TrackSort.artist,
+            );
+            expect(
+              restoredCollections.settings
+                  .trackSort(TrackSortSurface.library)
+                  .descending,
+              isFalse,
+            );
+            expect(
+              restoredCollections.settings.playlists.sort,
+              PlaylistSort.count,
+            );
+            expect(restoredCollections.settings.playlists.descending, isTrue);
             await _initializeAudio(apps.last);
             expect(engines.last.volumeCalls, desktop ? [0] : isEmpty);
             expect(engines.last.volume, desktop ? 0 : 63);

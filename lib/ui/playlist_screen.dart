@@ -1,10 +1,9 @@
 import 'package:flutter/material.dart';
 
 import '../core/app_controller.dart';
+import '../core/collection_settings_controller.dart';
 import 'collection_controls.dart';
 import 'widgets.dart';
-
-enum _PlaylistSort { name, updated, count }
 
 /// Capture identity, not just collection IDs (which can coincide across users).
 class _PlaylistScope {
@@ -22,8 +21,13 @@ class _PlaylistScope {
 }
 
 class PlaylistsScreen extends StatefulWidget {
-  const PlaylistsScreen({super.key, required this.app});
+  const PlaylistsScreen({
+    super.key,
+    required this.app,
+    this.collectionSettings,
+  });
   final AppController app;
+  final CollectionSettingsController? collectionSettings;
 
   @override
   State<PlaylistsScreen> createState() => _PlaylistsScreenState();
@@ -34,10 +38,15 @@ class _PlaylistsScreenState extends State<PlaylistsScreen> {
   bool _saving = false;
   final _selectedPlaylists = <String>{};
   final _selectedEntries = <String>{};
-  _PlaylistSort _playlistSort = _PlaylistSort.name;
-  bool _playlistDescending = false;
-  TrackSort _trackSort = TrackSort.original;
-  bool _trackDescending = false;
+  final _localSettings = CollectionSettingsController();
+  CollectionSettingsController get _settings =>
+      widget.collectionSettings ?? _localSettings;
+  PlaylistSort get _playlistSort => _settings.settings.playlists.sort;
+  bool get _playlistDescending => _settings.settings.playlists.descending;
+  TrackSortSelection get _trackSelection =>
+      _settings.settings.trackSort(TrackSortSurface.playlist);
+  TrackSort get _trackSort => _trackSelection.sort;
+  bool get _trackDescending => _trackSelection.descending;
 
   late _PlaylistScope _scope;
 
@@ -71,8 +80,6 @@ class _PlaylistsScreenState extends State<PlaylistsScreen> {
     _selectedId = null;
     _selectedPlaylists.clear();
     _selectedEntries.clear();
-    _trackSort = TrackSort.original;
-    _trackDescending = false;
     _saving = false;
   }
 
@@ -105,9 +112,25 @@ class _PlaylistsScreenState extends State<PlaylistsScreen> {
     setState(() {
       _selectedId = id;
       _selectedEntries.clear();
-      _trackSort = TrackSort.original;
-      _trackDescending = false;
     });
+  });
+
+  void _setPlaylistSort(PlaylistSort sort, bool descending) => setState(() {
+    runUiAction(
+      context,
+      () => _settings.setPlaylistSort(sort, descending: descending),
+    );
+  });
+
+  void _setTrackSort(TrackSort sort, bool descending) => setState(() {
+    runUiAction(
+      context,
+      () => _settings.setTrackSort(
+        TrackSortSurface.playlist,
+        sort,
+        descending: descending,
+      ),
+    );
   });
 
   Future<void> _create(_PlaylistScope scope) => _mutate(scope, () async {
@@ -125,6 +148,7 @@ class _PlaylistsScreenState extends State<PlaylistsScreen> {
             app: scope.app,
             playlistId: playlist.id,
             isCurrent: () => _isCurrent(scope),
+            collectionSettings: _settings,
           ),
         );
         if (result == null || result.isEmpty || !_isCurrent(scope)) return;
@@ -290,11 +314,11 @@ class _PlaylistsScreenState extends State<PlaylistsScreen> {
     final playlists = [...app.playlists]
       ..sort((a, b) {
         final comparison = switch (_playlistSort) {
-          _PlaylistSort.name => a.name.toLowerCase().compareTo(
+          PlaylistSort.name => a.name.toLowerCase().compareTo(
             b.name.toLowerCase(),
           ),
-          _PlaylistSort.updated => a.updatedAt.compareTo(b.updatedAt),
-          _PlaylistSort.count => a.entries.length.compareTo(b.entries.length),
+          PlaylistSort.updated => a.updatedAt.compareTo(b.updatedAt),
+          PlaylistSort.count => a.entries.length.compareTo(b.entries.length),
         };
         final result = comparison == 0 ? a.id.compareTo(b.id) : comparison;
         return _playlistDescending ? -result : result;
@@ -319,20 +343,22 @@ class _PlaylistsScreenState extends State<PlaylistsScreen> {
           child: Wrap(
             crossAxisAlignment: WrapCrossAlignment.center,
             children: [
-              PopupMenuButton<_PlaylistSort>(
+              PopupMenuButton<PlaylistSort>(
                 tooltip: 'Sort by',
                 enabled: !_saving,
                 initialValue: _playlistSort,
-                onSelected: (value) =>
-                    _guard(scope, () => setState(() => _playlistSort = value)),
+                onSelected: (value) => _guard(
+                  scope,
+                  () => _setPlaylistSort(value, _playlistDescending),
+                ),
                 itemBuilder: (_) => const [
-                  PopupMenuItem(value: _PlaylistSort.name, child: Text('Name')),
+                  PopupMenuItem(value: PlaylistSort.name, child: Text('Name')),
                   PopupMenuItem(
-                    value: _PlaylistSort.updated,
+                    value: PlaylistSort.updated,
                     child: Text('Date updated'),
                   ),
                   PopupMenuItem(
-                    value: _PlaylistSort.count,
+                    value: PlaylistSort.count,
                     child: Text('Track count'),
                   ),
                 ],
@@ -340,9 +366,9 @@ class _PlaylistsScreenState extends State<PlaylistsScreen> {
                   padding: const EdgeInsets.all(12),
                   child: Text(
                     'Sort by: ${switch (_playlistSort) {
-                      _PlaylistSort.name => 'Name',
-                      _PlaylistSort.updated => 'Date updated',
-                      _PlaylistSort.count => 'Track count',
+                      PlaylistSort.name => 'Name',
+                      PlaylistSort.updated => 'Date updated',
+                      PlaylistSort.count => 'Track count',
                     }}',
                   ),
                 ),
@@ -355,8 +381,9 @@ class _PlaylistsScreenState extends State<PlaylistsScreen> {
                     ? null
                     : () => _guard(
                         scope,
-                        () => setState(
-                          () => _playlistDescending = !_playlistDescending,
+                        () => _setPlaylistSort(
+                          _playlistSort,
+                          !_playlistDescending,
                         ),
                       ),
                 icon: Icon(
@@ -568,14 +595,14 @@ class _PlaylistsScreenState extends State<PlaylistsScreen> {
             enabled: !_saving,
             onChanged: (value) => _guard(
               scope,
-              () => setState(() {
-                _trackSort = value;
-                if (value == TrackSort.original) _trackDescending = false;
-              }),
+              () => _setTrackSort(
+                value,
+                value == TrackSort.original ? false : _trackDescending,
+              ),
             ),
             onToggleDirection: () => _guard(
               scope,
-              () => setState(() => _trackDescending = !_trackDescending),
+              () => _setTrackSort(_trackSort, !_trackDescending),
             ),
           ),
         ),
@@ -775,10 +802,12 @@ class _AddTracksDialog extends StatefulWidget {
     required this.app,
     required this.playlistId,
     required this.isCurrent,
+    required this.collectionSettings,
   });
   final AppController app;
   final String playlistId;
   final bool Function() isCurrent;
+  final CollectionSettingsController collectionSettings;
   @override
   State<_AddTracksDialog> createState() => _AddTracksDialogState();
 }
@@ -786,8 +815,24 @@ class _AddTracksDialog extends StatefulWidget {
 class _AddTracksDialogState extends State<_AddTracksDialog> {
   String _query = '';
   final _selected = <String>{};
-  TrackSort _sort = TrackSort.title;
-  bool _descending = false;
+  TrackSortSelection get _selection =>
+      widget.collectionSettings.settings.trackSort(TrackSortSurface.addTracks);
+  TrackSort get _sort => _selection.sort;
+  bool get _descending => _selection.descending;
+
+  void _setSort(TrackSort sort, bool descending) {
+    if (!widget.isCurrent()) return;
+    setState(() {
+      runUiAction(
+        context,
+        () => widget.collectionSettings.setTrackSort(
+          TrackSortSurface.addTracks,
+          sort,
+          descending: descending,
+        ),
+      );
+    });
+  }
 
   @override
   Widget build(BuildContext context) => AnimatedBuilder(
@@ -839,9 +884,9 @@ class _AddTracksDialogState extends State<_AddTracksDialog> {
               TrackSortControl(
                 value: _sort,
                 descending: _descending,
-                onChanged: (value) => setState(() => _sort = value),
-                onToggleDirection: () =>
-                    setState(() => _descending = !_descending),
+                enabled: current,
+                onChanged: (value) => _setSort(value, _descending),
+                onToggleDirection: () => _setSort(_sort, !_descending),
               ),
               SelectionControls(
                 selectedCount: _selected.length,

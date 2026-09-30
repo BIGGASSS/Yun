@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../core/app_controller.dart';
+import '../core/collection_settings_controller.dart';
 import 'collection_controls.dart';
 import 'track_widgets.dart';
 import 'widgets.dart';
@@ -12,11 +13,13 @@ class LibraryScreen extends StatefulWidget {
     required this.searchFocus,
     required this.onUpload,
     required this.onSignIn,
+    this.collectionSettings,
   });
   final AppController app;
   final FocusNode searchFocus;
   final VoidCallback onUpload;
   final VoidCallback onSignIn;
+  final CollectionSettingsController? collectionSettings;
 
   @override
   State<LibraryScreen> createState() => _LibraryScreenState();
@@ -26,8 +29,15 @@ class _LibraryScreenState extends State<LibraryScreen> {
   final _search = TextEditingController();
   String _view = 'Tracks';
   String? _group;
-  TrackSort? _sort;
-  bool _descending = false, _selecting = false, _acting = false;
+  bool _selecting = false, _acting = false;
+  final _localSettings = CollectionSettingsController();
+  CollectionSettingsController get _settings =>
+      widget.collectionSettings ?? _localSettings;
+  TrackSortSurface get _sortSurface => switch (_view) {
+    'Albums' => TrackSortSurface.album,
+    'Artists' => TrackSortSurface.artist,
+    _ => TrackSortSurface.library,
+  };
   final _selected = <String>{};
   Object? _accountScope;
   Object? _viewKey;
@@ -60,9 +70,17 @@ class _LibraryScreenState extends State<LibraryScreen> {
     _group = group;
     _selected.clear();
     _selecting = false;
-    _sort = null;
-    _descending = false;
   });
+
+  void _setSort(TrackSort sort, bool descending) {
+    setState(() {
+      runUiAction(
+        context,
+        () =>
+            _settings.setTrackSort(_sortSurface, sort, descending: descending),
+      );
+    });
+  }
 
   Future<void> _bulk(List<Track> tracks, String action) async {
     final app = widget.app;
@@ -136,8 +154,12 @@ class _LibraryScreenState extends State<LibraryScreen> {
     final query = _search.text.trim().toLowerCase();
     final albumDetail = _view == 'Albums' && _group != null;
     final trackView = _view == 'Tracks' || _group != null;
-    final sort = _sort ?? (albumDetail ? TrackSort.original : TrackSort.title);
-    final viewKey = (app.tracks, query, _view, _group, sort, _descending);
+    final selection = trackView
+        ? _settings.settings.trackSort(_sortSurface)
+        : const TrackSortSelection(TrackSort.title);
+    final sort = selection.sort;
+    final descending = selection.descending;
+    final viewKey = (app.tracks, query, _view, _group, sort, descending);
     if (_viewKey != viewKey) {
       _viewKey = viewKey;
       final filtered = app.tracks
@@ -164,7 +186,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
               : (a.trackNumber ?? 0).compareTo(b.trackNumber ?? 0);
         });
       }
-      _visible = sortTracks(visible, sort, descending: _descending);
+      _visible = sortTracks(visible, sort, descending: descending);
       _filtered = filtered;
       _grouped = groups;
     }
@@ -309,13 +331,12 @@ class _LibraryScreenState extends State<LibraryScreen> {
                           children: [
                             TrackSortControl(
                               value: sort,
-                              descending: _descending,
+                              descending: descending,
                               allowOriginal: albumDetail,
                               originalLabel: 'Album order',
-                              onChanged: (value) =>
-                                  setState(() => _sort = value),
+                              onChanged: (value) => _setSort(value, descending),
                               onToggleDirection: () =>
-                                  setState(() => _descending = !_descending),
+                                  _setSort(sort, !descending),
                             ),
                             TextButton.icon(
                               onPressed: _acting

@@ -54,6 +54,21 @@ Storage errors appear in `playback.error` without reverting successful audio
 changes; another setting command retries (including the same value). Malformed
 stored fields fall back safely. Preferences contain no track/account information.
 
+## CollectionSettingsController
+
+Bootstrap loads device-local sorting preferences from `collections.sorting` and
+shares the controller with browsing screens. Library tracks, album details,
+artist details, playlist overview, playlist entries, and the Add tracks picker
+remember independent sort fields and directions. Defaults retain title order,
+album order, and playlist order as appropriate. Unknown or corrupt fields fall
+back independently without affecting valid settings.
+
+Edits update the view immediately and queue complete snapshots in order. Storage
+failures are surfaced by the initiating UI action; later edits retry the current
+snapshot. Lifecycle checkpoints and orderly shutdown drain accepted writes.
+Preferences contain no collection IDs, search queries, selections, or playback
+state, and never change the persisted entry order of a playlist.
+
 ## DesktopController
 
 Bootstrap owns a separate desktop-only `DesktopController`, injected into YunApp.
