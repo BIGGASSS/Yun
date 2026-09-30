@@ -196,6 +196,78 @@ void main() {
     },
   );
 
+  test('shuffle previous crosses repeat-all boundaries without duplicate queue entries', () async {
+    player.setShuffle(true);
+    player.setRepeat(RepeatMode.all);
+    await player.playQueue(_tracks.take(3).toList(), index: 0);
+    final firstCycle = player.effectiveQueue.toList();
+    await player.next();
+    await player.next();
+    await player.next();
+    final nextCycleStart = player.currentTrack;
+
+    void expectUniqueQueue() {
+      expect(player.effectiveQueue, hasLength(3));
+      expect(player.effectiveQueue.toSet(), hasLength(3));
+      expect(
+        player.effectiveQueue[player.effectiveIndex].track,
+        player.currentTrack,
+      );
+    }
+
+    expectUniqueQueue();
+    expect(player.effectiveQueue.first, same(firstCycle.last));
+    await player.previous();
+    expect(player.currentTrack, firstCycle.last.track);
+    expectUniqueQueue();
+    await player.previous();
+    expect(player.currentTrack, firstCycle[1].track);
+    expectUniqueQueue();
+    await player.next();
+    expect(player.currentTrack, firstCycle.last.track);
+    await player.next();
+    expect(player.currentTrack, nextCycleStart);
+    expectUniqueQueue();
+  });
+
+  test(
+    'shuffle selection after repeat-all uses the displayed occurrence',
+    () async {
+      player.setShuffle(true);
+      player.setRepeat(RepeatMode.all);
+      await player.playQueue(_tracks.take(3).toList(), index: 0);
+      final firstCycle = player.effectiveQueue.toList();
+      await player.next();
+      await player.next();
+      await player.next();
+      final current = player.effectiveQueue[player.effectiveIndex];
+      final upcoming = player.effectiveQueue.last;
+      final displayed = player.effectiveQueue.toList();
+
+      // The current source index also occurs in the previous cycle's history.
+      await player.selectQueueEntry(current);
+      expect(player.effectiveQueue, orderedEquals(displayed));
+      expect(player.effectiveQueue[player.effectiveIndex], same(current));
+      await player.previous();
+      expect(player.currentTrack, firstCycle.last.track);
+      await player.previous();
+      expect(player.currentTrack, firstCycle[1].track);
+      await player.next();
+      await player.next();
+
+      // Select the upcoming copy, not its older appearance in history.
+      await player.selectQueueEntry(upcoming);
+      expect(player.effectiveQueue, orderedEquals(displayed));
+      expect(player.effectiveQueue[player.effectiveIndex], same(upcoming));
+      await player.previous();
+      expect(player.effectiveQueue[player.effectiveIndex], same(current));
+      await player.previous();
+      expect(player.currentTrack, firstCycle.last.track);
+      await player.previous();
+      expect(player.currentTrack, firstCycle[1].track);
+    },
+  );
+
   test(
     'effective snapshots stay immutable and stable across playback ticks',
     () async {

@@ -73,6 +73,8 @@ class PlaybackController extends ChangeNotifier {
 
   /// Immutable, cached snapshot in actual playback order, including manual
   /// occurrences. Unlike [queue], this reflects shuffle and queued-next tracks.
+  /// Repeat-cycle history is collapsed so each source occurrence appears once,
+  /// prioritizing the current entry, then its nearest upcoming appearance.
   List<PlaybackQueueEntry> get effectiveQueue => _effectiveQueue;
   int effectiveIndex = -1;
   int index = -1;
@@ -417,7 +419,15 @@ class PlaybackController extends ChangeNotifier {
           index,
           ..._shuffleRemaining.reversed,
         ];
-        final target = order.indexOf(entry.sourceIndex!);
+        final sourceIndex = entry.sourceIndex!;
+        final upcoming = _shuffleRemaining.lastIndexOf(sourceIndex);
+        // Match the occurrence shown by _refreshEffectiveQueue, not an older
+        // appearance of the same source index in repeat-all history.
+        final target = sourceIndex == index
+            ? _shuffleHistory.length
+            : upcoming >= 0
+            ? order.length - 1 - upcoming
+            : _shuffleHistory.lastIndexOf(sourceIndex);
         _shuffleHistory
           ..clear()
           ..addAll(order.take(target));
@@ -444,8 +454,21 @@ class PlaybackController extends ChangeNotifier {
     final after = <PlaybackQueueEntry>[];
     if (index >= 0 && index < _queue.length) {
       if (shuffle) {
-        before.addAll(_shuffleHistory.map((i) => _sourceEntries[i]));
-        after.addAll(_shuffleRemaining.reversed.map((i) => _sourceEntries[i]));
+        // Navigation retains the full repeat timeline, but source identities
+        // must be unique in the displayed queue (including after Previous).
+        final seen = {index};
+        after.addAll(
+          _shuffleRemaining.reversed
+              .where(seen.add)
+              .map((i) => _sourceEntries[i]),
+        );
+        before.addAll(
+          _shuffleHistory.reversed
+              .where(seen.add)
+              .toList()
+              .reversed
+              .map((i) => _sourceEntries[i]),
+        );
       } else {
         before.addAll(_sourceEntries.take(index));
         after.addAll(_sourceEntries.skip(index + 1));
@@ -676,7 +699,6 @@ class PlaybackController extends ChangeNotifier {
           List.generate(_queue.length, (i) => i).where((i) => i != index),
         );
         _shuffleRemaining.shuffle(_random);
-        _shuffleHistory.clear();
       }
       target = _shuffleRemaining.isEmpty
           ? index
