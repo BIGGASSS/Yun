@@ -5,8 +5,10 @@ import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'core/app_controller.dart';
+import 'core/collection_settings_controller.dart';
 import 'core/desktop_controller.dart';
 import 'services/desktop_host.dart';
+import 'services/collection_settings_store.dart';
 import 'services/desktop_settings_store.dart';
 import 'services/native_desktop_host.dart';
 import 'services/playback_settings_store.dart';
@@ -46,6 +48,7 @@ class _YunBootstrapState extends State<YunBootstrap> {
   DesktopController? _desktop;
   Future<void>? _opening;
   SharedPreferences? _preferences;
+  CollectionSettingsController? _collectionSettings;
   Object? _failure;
   bool _ready = false;
   late final AppLifecycleListener _lifecycle;
@@ -65,7 +68,7 @@ class _YunBootstrapState extends State<YunBootstrap> {
                 ? AppExitResponse.exit
                 : AppExitResponse.cancel;
           }
-          await _controller?.shutdown();
+          await _shutdownController();
           return AppExitResponse.exit;
         } catch (error) {
           if (mounted) setState(() => _failure = error);
@@ -94,9 +97,18 @@ class _YunBootstrapState extends State<YunBootstrap> {
       try {
         await _controller?.playback.flushSettings();
       } finally {
-        await _desktop?.flushSettings();
+        try {
+          await _collectionSettings?.flushSettings();
+        } finally {
+          await _desktop?.flushSettings();
+        }
       }
     }
+  }
+
+  Future<void> _shutdownController() async {
+    await _collectionSettings?.flushSettings();
+    await _controller?.shutdown();
   }
 
   Future<void> _initialize() =>
@@ -112,7 +124,7 @@ class _YunBootstrapState extends State<YunBootstrap> {
     try {
       // Keep references and close interception until pending durable work is
       // finished. A native close or OS quit during Retry must await it too.
-      if (old != null) await old.shutdown();
+      if (old != null) await _shutdownController();
       if (!mounted || (oldDesktop?.isQuitting ?? false)) return;
       if (oldDesktop != null) {
         // A close-to-tray event may have hidden the failed startup meanwhile.
@@ -125,6 +137,13 @@ class _YunBootstrapState extends State<YunBootstrap> {
       _controller = null;
       _desktop = null;
       _preferences = await SharedPreferences.getInstance();
+      final collectionStore = SharedPreferencesCollectionSettingsStore(
+        _preferences!,
+      );
+      _collectionSettings = CollectionSettingsController(
+        initialSettings: await collectionStore.read(),
+        saveSettings: collectionStore.write,
+      );
       final store = SharedPreferencesPlaybackSettingsStore(_preferences!);
       final saved = await store.read();
       if (!mounted) return;
@@ -147,12 +166,17 @@ class _YunBootstrapState extends State<YunBootstrap> {
         final integration = DesktopController(
           host: (widget.desktopHostFactory ?? NativeDesktopHost.new)(),
           settings: SharedPreferencesDesktopSettingsStore(_preferences!),
+          prepareExit: () async => await _collectionSettings?.flushSettings(),
           shutdown: controller.shutdown,
           checkpoint: () async {
             try {
               await controller.playback.checkpoint();
             } finally {
-              await controller.playback.flushSettings();
+              try {
+                await controller.playback.flushSettings();
+              } finally {
+                await _collectionSettings?.flushSettings();
+              }
             }
           },
         );
@@ -187,6 +211,7 @@ class _YunBootstrapState extends State<YunBootstrap> {
       );
       return YunApp(
         controller: _controller!,
+        collectionSettings: _collectionSettings,
         desktop: _desktop,
         initialThemeMode: theme,
         onThemeChanged: (mode) async {
