@@ -396,6 +396,17 @@ void main() {
         (i) => Track(id: '$i', title: 'Track $i', sizeBytes: 100),
       );
       app.downloaded = Set.unmodifiable(List.generate(2500, (i) => '$i'));
+      // Cleared history is still part of the full device inventory. Keeping
+      // those rows in the device submenu lets this test observe a pending row.
+      for (var i = 0; i < 2500; i++) {
+        app.progress['$i'] = DownloadProgress(
+          trackId: '$i',
+          totalBytes: 100,
+          receivedBytes: 100,
+          status: DownloadStatus.downloaded,
+          historyCleared: true,
+        );
+      }
       app.selections = const [PinSelection('track', '2500')];
       try {
         await tester.pumpWidget(

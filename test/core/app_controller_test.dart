@@ -94,6 +94,48 @@ void main() {
     await app.shutdown();
     app.dispose();
   });
+
+  test('cleared Done entries stay cleared after restart and audio remains playable', () async {
+    await seedAccount();
+    var requests = 0;
+    AppController create() => AppController(
+      api: ApiClient(
+        dio: Dio()
+          ..httpClientAdapter = FakeAdapter((options, _) {
+            requests++;
+            throw DioException(
+              requestOptions: options,
+              type: DioExceptionType.connectionError,
+            );
+          }),
+        credentials: credentials,
+      ),
+      storageDirectory: () async => root,
+      playbackEngine: FakeEngine(),
+      enableSystemControls: false,
+      automaticRefresh: false,
+    );
+    var app = create();
+    await app.initialize();
+    final path = app.localPath('t');
+    expect(app.downloadProgress(app.tracks.single).historyCleared, isFalse);
+    await app.clearDoneDownloads();
+    expect(app.downloadProgress(app.tracks.single).historyCleared, isTrue);
+    expect(app.downloadedTrackIds, {'t'});
+    expect(await File(path!).readAsBytes(), [1, 2, 3]);
+    await app.shutdown();
+    app.dispose();
+
+    app = create();
+    await app.initialize();
+    expect(app.downloadProgress(app.tracks.single).historyCleared, isTrue);
+    expect(app.localPath('t'), path);
+    await app.play(app.tracks.single);
+    expect(app.playback.currentTrack?.id, 't');
+    expect(requests, 0);
+    await app.shutdown();
+    app.dispose();
+  });
   for (final type in [
     DioExceptionType.connectionError,
     DioExceptionType.connectionTimeout,

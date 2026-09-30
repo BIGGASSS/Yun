@@ -182,4 +182,81 @@ void main() {
       expect(transfers.downloads['t']!.receivedBytes, 40);
     },
   );
+
+  test(
+    'clear Done persists across restart and sync, while a new download appears',
+    () async {
+      var requests = 0;
+      api.dio.httpClientAdapter = FakeAdapter((_, _) {
+        requests++;
+        return ResponseBody.fromBytes(bytes, 200);
+      });
+      await transfers.reconcile([track], [], pins);
+      final localRecord = await db.get('file', track.id);
+      await db.put('pin', 'track:t', pins.single.toJson());
+      const failed = DownloadProgress(
+        trackId: 'failed',
+        totalBytes: 100,
+        receivedBytes: 30,
+        status: DownloadStatus.failed,
+        error: 'connection lost',
+      );
+      const pending = DownloadProgress(trackId: 'pending', totalBytes: 100);
+      await db.put('download', failed.trackId, failed.toJson());
+      await db.put('download', pending.trackId, pending.toJson());
+      await transfers.restoreDownloads();
+      await transfers.clearDoneDownloads([track]);
+      expect(transfers.progressFor(track.id)!.historyCleared, isTrue);
+      expect((await db.get('download', track.id))!['history_cleared'], isTrue);
+      expect(await db.get('file', track.id), localRecord);
+      expect(await File('${root.path}/t.audio').readAsBytes(), bytes);
+      expect(await db.get('pin', 'track:t'), pins.single.toJson());
+      expect(await db.get('download', failed.trackId), failed.toJson());
+      expect(await db.get('download', pending.trackId), pending.toJson());
+
+      await transfers.close();
+      transfers = create();
+      await transfers.restoreDownloads();
+      expect(transfers.progressFor(track.id)!.historyCleared, isTrue);
+      await transfers.reconcile([track], [], pins);
+      expect(requests, 1);
+      expect(transfers.progressFor(track.id)!.historyCleared, isTrue);
+
+      await File('${root.path}/t.audio').delete();
+      await transfers.reconcile([track], [], pins);
+      expect(requests, 2);
+      expect(
+        transfers.progressFor(track.id)!.status,
+        DownloadStatus.downloaded,
+      );
+      expect(transfers.progressFor(track.id)!.historyCleared, isFalse);
+      expect((await db.get('download', track.id))!['history_cleared'], isFalse);
+    },
+  );
+
+  test(
+    'clear Done includes older files without a download activity record',
+    () async {
+      final file = await File('${root.path}/t.audio').writeAsBytes(bytes);
+      await db.put('file', track.id, {
+        'id': track.id,
+        'path': file.path,
+        'sha256': track.sha256,
+      });
+      expect(transfers.progressFor(track.id), isNull);
+      await transfers.clearDoneDownloads([track]);
+      expect(transfers.progressFor(track.id)!.historyCleared, isTrue);
+      expect(await file.exists(), isTrue);
+      expect(await db.get('file', track.id), isNotNull);
+    },
+  );
+
+  test('old download records default to visible completed activity', () {
+    final record = DownloadProgress(
+      trackId: track.id,
+      totalBytes: 100,
+      status: DownloadStatus.downloaded,
+    ).toJson()..remove('history_cleared');
+    expect(DownloadProgress.fromJson(record).historyCleared, isFalse);
+  });
 }
