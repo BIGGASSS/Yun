@@ -22,7 +22,7 @@ export '../models/models.dart';
 export '../services/transfer_service.dart'
     show DownloadProgress, DownloadStatus;
 export 'playback_controller.dart'
-    show PlaybackController, PlaybackSettings, RepeatMode;
+    show PlaybackController, PlaybackQueueEntry, PlaybackSettings, RepeatMode;
 
 /// UI-facing, account-scoped application state. All writes except listening
 /// segments, upload jobs and offline pins are online-only. See README.md.
@@ -744,6 +744,11 @@ class AppController extends ChangeNotifier {
       index < 0 ? [track] : list,
       index: index < 0 ? 0 : index,
     );
+  }
+
+  Future<void> queueNext(Track track) async {
+    _requireDatabase();
+    await playback.queueNext(track);
   }
 
   Future<T> _online<T>(Future<T> Function(CacheDatabase) action) {

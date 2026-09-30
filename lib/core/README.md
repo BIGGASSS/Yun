@@ -26,6 +26,21 @@ Import `package:yun/core/app_controller.dart` (re-exports models). `AppControlle
 
 Without an explicit `index`, `playQueue` starts at a random track when shuffle is enabled, otherwise the first track. An explicit index always selects that entry. Queue order, shuffle, repeat, and volume preferences are preserved.
 
+`queueNext(Track)` / `queueNextTracks(List<Track>)` append distinct occurrences
+to a FIFO next-up queue (including duplicates and tracks outside the collection).
+They start playback when idle. Queued tracks take precedence over shuffle and
+repeat-one; after they finish, the original collection resumes at its preserved
+next entry. Previous retraces queued tracks before returning to the collection.
+Replacing the collection or stopping clears queued occurrences. AppController's
+`queueNext(Track)` requires an unlocked account, like `play`.
+
+`effectiveQueue` is a cached immutable `List<PlaybackQueueEntry>` in actual
+playback order, with `effectiveIndex` locating the current occurrence. Each entry
+has `track`, nullable `sourceIndex`, and `isManuallyQueued`; identity distinguishes
+duplicates. `selectQueueEntry(entry)` selects that occurrence without rebuilding
+shuffle. The existing `queue` / `index` identify the original collection and its
+preserved cursor, even while `currentTrack` is manually queued.
+
 `double volume` (0–100, initially 100), `bool isMuted`, `Future<void> setVolume(double)`,
 `toggleMute()`: serialized app-local loudness; mute restores the last positive level.
 Percentages approximate perceived loudness: 50% is roughly half as loud as 100%,
