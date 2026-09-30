@@ -20,6 +20,16 @@ class AudioSource {
   final bool local;
 }
 
+/// One occurrence in the effective play queue. Identity distinguishes duplicate
+/// tracks, including a queued copy of a track already in the collection.
+class PlaybackQueueEntry {
+  PlaybackQueueEntry._(this.track, {this.sourceIndex});
+
+  final Track track;
+  final int? sourceIndex;
+  bool get isManuallyQueued => sourceIndex == null;
+}
+
 class PlaybackController extends ChangeNotifier {
   PlaybackController({
     required this.resolveSource,
@@ -54,9 +64,23 @@ class PlaybackController extends ChangeNotifier {
 
   /// Immutable snapshot, replaced only when queue membership/order changes.
   List<Track> get queue => _queue;
+  List<PlaybackQueueEntry> _sourceEntries = const [];
+  final _manualPending = ListQueue<PlaybackQueueEntry>();
+  final _manualHistory = <PlaybackQueueEntry>[];
+  PlaybackQueueEntry? _manualCurrent;
+  List<PlaybackQueueEntry> _effectiveQueue = const [];
+  List<Track> _effectiveTracks = const [];
+
+  /// Immutable, cached snapshot in actual playback order, including manual
+  /// occurrences. Unlike [queue], this reflects shuffle and queued-next tracks.
+  /// Repeat-cycle history is collapsed so each source occurrence appears once,
+  /// prioritizing the current entry, then its nearest upcoming appearance.
+  List<PlaybackQueueEntry> get effectiveQueue => _effectiveQueue;
+  int effectiveIndex = -1;
   int index = -1;
   Track? get currentTrack =>
-      index >= 0 && index < _queue.length ? _queue[index] : null;
+      _manualCurrent?.track ??
+      (index >= 0 && index < _queue.length ? _queue[index] : null);
   bool isPlaying = false, isBuffering = false, shuffle = false;
   RepeatMode repeatMode = RepeatMode.off;
   double _volume = 100, _lastPositiveVolume = 100;
@@ -206,8 +230,8 @@ class PlaybackController extends ChangeNotifier {
     if (_initialized) {
       final update = _controls?.update(
         track: currentTrack,
-        queue: queue,
-        index: index,
+        queue: _effectiveTracks,
+        index: effectiveIndex,
         playing: isPlaying,
         buffering: isBuffering,
         position: position,
@@ -335,11 +359,135 @@ class PlaybackController extends ChangeNotifier {
         }
         await _initialize();
         await _haltForTransition();
-        if (!listEquals(_queue, tracks)) _queue = List.unmodifiable(tracks);
+        if (!listEquals(_queue, tracks)) {
+          _queue = List.unmodifiable(tracks);
+          _sourceEntries = List.unmodifiable([
+            for (var i = 0; i < _queue.length; i++)
+              PlaybackQueueEntry._(_queue[i], sourceIndex: i),
+          ]);
+        }
+        _clearManualQueue();
         this.index = index ?? (shuffle ? _random.nextInt(tracks.length) : 0);
         _resetShuffle();
+        _refreshEffectiveQueue();
         await _openCurrent();
       });
+
+  /// Append an occurrence to the FIFO next-up queue without changing the
+  /// collection cursor or consuming/rebuilding its shuffled continuation.
+  /// When idle, begin playing the first requested track immediately.
+  Future<void> queueNext(Track track) => queueNextTracks([track]);
+
+  Future<void> queueNextTracks(List<Track> tracks) {
+    final entries = [for (final track in tracks) PlaybackQueueEntry._(track)];
+    return _enqueue(() async {
+      if (entries.isEmpty) return;
+      if (currentTrack == null) {
+        await _initialize();
+        await _haltForTransition();
+        _manualCurrent = entries.first;
+        _manualPending.addAll(entries.skip(1));
+        _refreshEffectiveQueue();
+        await _openCurrent();
+      } else {
+        _manualPending.addAll(entries);
+        _refreshEffectiveQueue();
+        _notify();
+      }
+    });
+  }
+
+  /// Select the exact displayed occurrence without rebuilding the shuffle bag.
+  /// Stale occurrences removed by a transition are ignored.
+  Future<void> selectQueueEntry(PlaybackQueueEntry entry) => _enqueue(() async {
+    if (!_effectiveQueue.contains(entry)) return;
+    await _haltForTransition();
+    if (entry.isManuallyQueued) {
+      final manual = [..._manualHistory, ?_manualCurrent, ..._manualPending];
+      final target = manual.indexOf(entry);
+      _manualHistory
+        ..clear()
+        ..addAll(manual.take(target));
+      _manualCurrent = entry;
+      _manualPending
+        ..clear()
+        ..addAll(manual.skip(target + 1));
+    } else {
+      if (shuffle) {
+        final order = [
+          ..._shuffleHistory,
+          index,
+          ..._shuffleRemaining.reversed,
+        ];
+        final sourceIndex = entry.sourceIndex!;
+        final upcoming = _shuffleRemaining.lastIndexOf(sourceIndex);
+        // Match the occurrence shown by _refreshEffectiveQueue, not an older
+        // appearance of the same source index in repeat-all history.
+        final target = sourceIndex == index
+            ? _shuffleHistory.length
+            : upcoming >= 0
+            ? order.length - 1 - upcoming
+            : _shuffleHistory.lastIndexOf(sourceIndex);
+        _shuffleHistory
+          ..clear()
+          ..addAll(order.take(target));
+        _shuffleRemaining
+          ..clear()
+          ..addAll(order.skip(target + 1).toList().reversed);
+      }
+      index = entry.sourceIndex!;
+      _manualCurrent = null;
+      _manualHistory.clear();
+    }
+    _refreshEffectiveQueue();
+    await _openCurrent();
+  });
+
+  void _clearManualQueue() {
+    _manualCurrent = null;
+    _manualHistory.clear();
+    _manualPending.clear();
+  }
+
+  void _refreshEffectiveQueue() {
+    final before = <PlaybackQueueEntry>[];
+    final after = <PlaybackQueueEntry>[];
+    if (index >= 0 && index < _queue.length) {
+      if (shuffle) {
+        // Navigation retains the full repeat timeline, but source identities
+        // must be unique in the displayed queue (including after Previous).
+        final seen = {index};
+        after.addAll(
+          _shuffleRemaining.reversed
+              .where(seen.add)
+              .map((i) => _sourceEntries[i]),
+        );
+        before.addAll(
+          _shuffleHistory.reversed
+              .where(seen.add)
+              .toList()
+              .reversed
+              .map((i) => _sourceEntries[i]),
+        );
+      } else {
+        before.addAll(_sourceEntries.take(index));
+        after.addAll(_sourceEntries.skip(index + 1));
+      }
+      before.add(_sourceEntries[index]);
+    }
+    before.addAll(_manualHistory);
+    if (_manualCurrent != null) before.add(_manualCurrent!);
+    effectiveIndex = currentTrack == null ? -1 : before.length - 1;
+    _effectiveQueue = List.unmodifiable([
+      ...before,
+      ..._manualPending,
+      ...after,
+    ]);
+    _effectiveTracks = List.unmodifiable(
+      _effectiveQueue.map((entry) => entry.track),
+    );
+  }
+
   Future<void> _haltForTransition() async {
     _generation++;
     _opening = true;
@@ -520,9 +668,23 @@ class PlaybackController extends ChangeNotifier {
   });
   Future<void> next() => _enqueue(() => _advance(completed: false));
   Future<void> _advance({required bool completed}) async {
-    if (_queue.isEmpty) return;
+    if (currentTrack == null) return;
     await _haltForTransition();
-    if (completed && repeatMode == RepeatMode.one) {
+    if (_manualPending.isNotEmpty) {
+      if (_manualCurrent != null) _manualHistory.add(_manualCurrent!);
+      _manualCurrent = _manualPending.removeFirst();
+      _refreshEffectiveQueue();
+      await _openCurrent();
+      return;
+    }
+    final wasManual = _manualCurrent != null;
+    _manualCurrent = null;
+    _manualHistory.clear();
+    if (_queue.isEmpty) {
+      await _stop();
+      return;
+    }
+    if (!wasManual && completed && repeatMode == RepeatMode.one) {
       await _openCurrent();
       return;
     }
@@ -538,10 +700,10 @@ class PlaybackController extends ChangeNotifier {
         );
         _shuffleRemaining.shuffle(_random);
       }
-      _shuffleHistory.add(index);
       target = _shuffleRemaining.isEmpty
           ? index
           : _shuffleRemaining.removeLast();
+      if (target != index) _shuffleHistory.add(index);
     } else {
       target = index + 1;
       if (target >= _queue.length) {
@@ -553,6 +715,7 @@ class PlaybackController extends ChangeNotifier {
       }
     }
     index = target;
+    _refreshEffectiveQueue();
     await _openCurrent();
   }
 
@@ -561,7 +724,14 @@ class PlaybackController extends ChangeNotifier {
     final restart = position > const Duration(seconds: 3);
     await _haltForTransition();
     if (!restart) {
-      if (shuffle && _shuffleHistory.isNotEmpty) {
+      if (_manualCurrent != null) {
+        if (_manualHistory.isNotEmpty || _queue.isNotEmpty) {
+          _manualPending.addFirst(_manualCurrent!);
+          _manualCurrent = _manualHistory.isEmpty
+              ? null
+              : _manualHistory.removeLast();
+        }
+      } else if (shuffle && _shuffleHistory.isNotEmpty) {
         _shuffleRemaining.add(index);
         index = _shuffleHistory.removeLast();
       } else if (!shuffle) {
@@ -572,6 +742,7 @@ class PlaybackController extends ChangeNotifier {
             : 0;
       }
     }
+    _refreshEffectiveQueue();
     await _openCurrent();
   });
   void _resetShuffle() {
@@ -590,6 +761,7 @@ class PlaybackController extends ChangeNotifier {
     }
     shuffle = value;
     _resetShuffle();
+    _refreshEffectiveQueue();
     unawaited(_persistSettings());
     _notify();
   }
@@ -625,7 +797,12 @@ class PlaybackController extends ChangeNotifier {
       isBuffering = false;
       position = duration = Duration.zero;
       _queue = const [];
+      _sourceEntries = const [];
+      _clearManualQueue();
+      _shuffleHistory.clear();
+      _shuffleRemaining.clear();
       index = -1;
+      _refreshEffectiveQueue();
       _notify();
     }
   }
