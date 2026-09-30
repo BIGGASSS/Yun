@@ -84,9 +84,11 @@ missing/unknown values default to `quit`. Writes publish only after success.
 without stopping playback, closing databases, or changing credentials/queues.
 `showWindow()` restores/focuses. `quit()` and `requestApplicationExit()` always
 await account shutdown and pending settings, regardless of close preference.
-Failed shutdown leaves the window visible and prohibits further hiding; it does
-not pretend the core's memoized shutdown can be retried. OS force termination
-remains outside orderly-shutdown guarantees.
+A failed `prepareExit` settings preflight leaves the account running and can be
+retried after a successful save. Failed account shutdown leaves the window
+visible and prohibits further hiding; it does not pretend the core's memoized
+shutdown can be retried. OS force termination remains outside orderly-shutdown
+guarantees.
 
 `DesktopHost` isolates native APIs. The adapter uses pinned `window_manager`,
 `tray_manager` on Windows/macOS, and a direct Linux StatusNotifierItem/DBusMenu.

@@ -236,6 +236,56 @@ void main() {
   );
 
   test(
+    'flush drains edits accepted while an earlier write is pending',
+    () async {
+      final gates = [Completer<void>(), Completer<void>()];
+      final adapter = await store();
+      var writes = 0;
+      final settings = CollectionSettingsController(
+        saveSettings: (snapshot) async {
+          await gates[writes++].future;
+          await adapter.write(snapshot);
+        },
+      );
+      final first = settings.setTrackSort(
+        TrackSortSurface.library,
+        TrackSort.artist,
+        descending: false,
+      );
+      var flushed = false;
+      final flushing = settings.flushSettings().then((_) => flushed = true);
+      await Future<void>.delayed(Duration.zero);
+      expect(writes, 1);
+      final second = settings.setPlaylistSort(
+        PlaylistSort.count,
+        descending: true,
+      );
+      try {
+        gates.first.complete();
+        await first;
+        await Future<void>.delayed(Duration.zero);
+        expect(writes, 2);
+        expect(flushed, isFalse);
+        gates.last.complete();
+        await Future.wait([second, flushing]);
+        final restored = await (await store()).read();
+        expect(
+          restored.trackSort(TrackSortSurface.library).sort,
+          TrackSort.artist,
+        );
+        expect(restored.playlists.sort, PlaylistSort.count);
+        expect(restored.playlists.descending, isTrue);
+      } finally {
+        // Release both writes even when an assertion fails on the old drain.
+        for (final gate in gates) {
+          if (!gate.isCompleted) gate.complete();
+        }
+        await Future.wait([first, second, flushing]);
+      }
+    },
+  );
+
+  test(
     'platform rejection is not restored from the preferences cache',
     () async {
       final adapter = await store();

@@ -57,7 +57,12 @@ class CollectionSettingsController {
   }
 
   Future<void> flushSettings() async {
-    await _writes;
+    // Include edits accepted while a prior snapshot was still being saved.
+    Future<void> tail;
+    do {
+      tail = _writes;
+      await tail;
+    } while (!identical(tail, _writes));
     final failure = _saveFailure;
     if (failure != null) {
       Error.throwWithStackTrace(failure.$1, failure.$2);

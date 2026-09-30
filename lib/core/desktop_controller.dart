@@ -23,12 +23,15 @@ class DesktopController extends ChangeNotifier {
   DesktopController({
     required this._host,
     required this._settings,
+    this._prepareExit,
     required this._shutdown,
     required this._checkpoint,
   });
 
   final DesktopHost _host;
   final DesktopSettingsStore _settings;
+  // Retryable preflight must finish before the account's memoized shutdown.
+  final Future<void> Function()? _prepareExit;
   final Future<void> Function() _shutdown;
   final Future<void> Function() _checkpoint;
   DesktopCloseBehavior _closeBehavior = DesktopCloseBehavior.quit;
@@ -186,22 +189,30 @@ class DesktopController extends ChangeNotifier {
 
   /// macOS Cmd-Q / Dock Quit and framework application exits bypass close-to-
   /// tray. The caller returns exit/cancel to Flutter after this future resolves.
+  /// Only failures before account shutdown starts allow a subsequent retry.
   Future<bool> requestApplicationExit() =>
       _shutdownRequest ??= _prepareToExit();
 
   Future<bool> _prepareToExit() async {
     _quitting = true;
     _notify();
+    var shutdownStarted = false;
     try {
       await _initializing;
       await _visibility;
       await _writes;
+      await _prepareExit?.call();
+      shutdownStarted = true;
       await _shutdown();
     } catch (error) {
       _quitting = false;
-      _shutdownError = 'Could not quit safely: $error';
-      _setError(_shutdownError!);
+      final message = 'Could not quit safely: $error';
+      if (shutdownStarted) _shutdownError = message;
+      _setError(message);
       await showWindow();
+      // Share the whole failed attempt, including window restoration, but do
+      // not permanently latch a preflight failure that left the account alive.
+      if (!shutdownStarted) _shutdownRequest = null;
       return false;
     }
     // Failure to remove an icon must not prevent exit after durable shutdown.

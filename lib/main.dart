@@ -166,7 +166,8 @@ class _YunBootstrapState extends State<YunBootstrap> {
         final integration = DesktopController(
           host: (widget.desktopHostFactory ?? NativeDesktopHost.new)(),
           settings: SharedPreferencesDesktopSettingsStore(_preferences!),
-          shutdown: _shutdownController,
+          prepareExit: () async => await _collectionSettings?.flushSettings(),
+          shutdown: controller.shutdown,
           checkpoint: () async {
             try {
               await controller.playback.checkpoint();

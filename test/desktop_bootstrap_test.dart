@@ -378,9 +378,10 @@ void main() {
   }
 
   for (final exit in ['native', 'framework']) {
-    for (final recoverBeforeExit in [false, true]) {
+    for (final recovery in ['none', 'before', 'after']) {
+      final recoverBeforeExit = recovery == 'before';
       testWidgets(
-        'collection save failure ${recoverBeforeExit ? 'recovered before' : 'blocks'} $exit exit',
+        'collection save failure with $recovery recovery on $exit application exit',
         (tester) async {
           await _withBootstrap(tester, TargetPlatform.linux, (fixture) async {
             await _startFakePlayback(fixture);
@@ -407,7 +408,7 @@ void main() {
             // The failed write is already settled before shutdown starts.
             expect(desktop.error, isNull);
 
-            if (recoverBeforeExit) {
+            Future<void> recover() async {
               store.rejectCollectionWrites = false;
               await settings.setPlaylistSort(
                 PlaylistSort.count,
@@ -430,6 +431,8 @@ void main() {
               );
               expect(saved.playlists.sort, PlaylistSort.count);
             }
+
+            if (recoverBeforeExit) await recover();
 
             if (exit == 'native') {
               fixture.host.onClose!();
@@ -473,6 +476,22 @@ void main() {
                   ),
                 ),
               );
+              if (recovery == 'after') {
+                await recover();
+                desktop.clearError();
+                expect(desktop.canMinimize, isTrue);
+                if (exit == 'native') {
+                  fixture.host.onClose!();
+                  await desktop.requestWindowClose();
+                } else {
+                  expect(await _requestFrameworkExit(), {'response': 'exit'});
+                }
+                _expectShutdownBeforeDetach(
+                  fixture,
+                  nativeExit: exit == 'native',
+                );
+                expect(desktop.error, isNull);
+              }
             }
           });
         },

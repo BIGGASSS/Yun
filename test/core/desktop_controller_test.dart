@@ -4,6 +4,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 // ignore: depend_on_referenced_packages
 import 'package:shared_preferences_platform_interface/shared_preferences_platform_interface.dart';
+import 'package:yun/core/app_controller.dart' show AppController;
 import 'package:yun/core/desktop_controller.dart';
 import 'package:yun/core/playback_controller.dart';
 import 'package:yun/models/models.dart';
@@ -39,6 +40,16 @@ class _RejectingPreferencesStore extends InMemorySharedPreferencesStore {
   @override
   Future<bool> setValue(String valueType, String key, Object value) async =>
       false;
+}
+
+class _FailingShutdownEngine extends FakeEngine {
+  Object? stopError;
+
+  @override
+  Future<void> stop() async {
+    await super.stop();
+    if (stopError case final error?) throw error;
+  }
 }
 
 class _Rig {
@@ -598,10 +609,16 @@ void main() {
       await rig.initialize();
       await rig.controller.minimizeToTray();
       rig.events.clear();
-      // AppController.shutdown and PlaybackController.shutdown memoize their
-      // futures too. Retrying a freshly successful fake would misrepresent the
-      // real core: after failure it cannot certify a new durable shutdown.
-      rig.shutdown = () async => throw StateError('durable write failed');
+      // Fail inside the real account shutdown, not its settings preflight.
+      final failure = StateError('account shutdown failed');
+      final engine = _FailingShutdownEngine()..stopError = failure;
+      final app = AppController(
+        playbackEngine: engine,
+        enableSystemControls: false,
+        automaticRefresh: false,
+      );
+      addTearDown(app.dispose);
+      rig.shutdown = app.shutdown;
       final first = rig.controller.requestApplicationExit();
       expect(await first, isFalse);
       expect(rig.events, ['shutdown', 'show']);
@@ -609,8 +626,12 @@ void main() {
       expect(rig.controller.isQuitting, isFalse);
       expect(rig.host.visible, isTrue);
       expect(rig.controller.canMinimize, isFalse);
-      expect(rig.controller.error, contains('durable write failed'));
-      rig.shutdown = () async {};
+      expect(rig.controller.error, contains('account shutdown failed'));
+      expect(engine.controller.isClosed, isTrue);
+      final accountShutdown = app.shutdown();
+      await expectLater(accountShutdown, throwsA(same(failure)));
+      engine.stopError = null;
+      expect(identical(accountShutdown, app.shutdown()), isTrue);
       expect(identical(first, rig.controller.requestApplicationExit()), isTrue);
       await rig.controller.quit();
 
@@ -620,7 +641,7 @@ void main() {
       await rig.controller.minimizeToTray();
       expect(rig.host.visible, isTrue);
       expect(rig.controller.isHidden, isFalse);
-      expect(rig.controller.error, contains('durable write failed'));
+      expect(rig.controller.error, contains('account shutdown failed'));
       await rig.controller.requestWindowClose();
       expect(rig.host.visible, isTrue);
       expect(rig.controller.isHidden, isFalse);
