@@ -5,6 +5,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:yun/core/app_controller.dart' show Track;
 import 'package:yun/services/playback_engine.dart';
 import 'package:yun/ui/player.dart';
+import 'package:yun/ui/theme.dart';
 
 import '../core/fakes.dart';
 import 'player_test_app.dart';
@@ -21,6 +22,7 @@ void main() {
   Future<void> showQueue(WidgetTester tester, PlayerTestApp app) async {
     await tester.pumpWidget(
       MaterialApp(
+        theme: YunTheme.light(),
         home: Scaffold(body: QueuePanel(app: app)),
       ),
     );
@@ -180,6 +182,39 @@ void main() {
       await closeQueue(tester, app);
     }
   });
+
+  for (final scale in [2.5, 3.0]) {
+    testWidgets('current queue indicator supports ${scale}x text', (
+      tester,
+    ) async {
+      final app = PlayerTestApp(FakeEngine());
+      tester.view.physicalSize = const Size(390, 844);
+      tester.view.devicePixelRatio = 1;
+      tester.platformDispatcher.textScaleFactorTestValue = scale;
+      try {
+        await app.playback.playQueue(tracks);
+        await app.playback.queueNext(tracks.last);
+        await showQueue(tester, app);
+        expect(find.text('1'), findsOneWidget);
+        expect(find.byIcon(Icons.graphic_eq_rounded), findsOneWidget);
+        expect(find.text('Now playing'), findsOneWidget);
+        expect(find.text('Queued next'), findsOneWidget);
+        expect(tester.takeException(), isNull);
+
+        await app.playback.next();
+        await tester.pumpAndSettle();
+        expect(find.text('Playing 2 of 6'), findsOneWidget);
+        expect(find.byIcon(Icons.graphic_eq_rounded), findsOneWidget);
+        expect(find.text('Now playing'), findsOneWidget);
+        expect(tester.takeException(), isNull);
+      } finally {
+        await closeQueue(tester, app);
+        tester.view.resetPhysicalSize();
+        tester.view.resetDevicePixelRatio();
+        tester.platformDispatcher.clearTextScaleFactorTestValue();
+      }
+    });
+  }
 
   testWidgets('queue supports narrow screens and large text', (tester) async {
     final app = PlayerTestApp(FakeEngine());

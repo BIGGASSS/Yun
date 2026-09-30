@@ -910,14 +910,13 @@ class _QueueListState extends State<_QueueList> {
             selected: current,
             leading: SizedBox(
               width: numberWidth,
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  Text('${index + 1}'),
-                  if (current) const Icon(Icons.graphic_eq_rounded, size: 18),
-                ],
-              ),
+              child: Center(child: Text('${index + 1}')),
             ),
+            // Keep the icon beside the text: leading has a fixed height cap,
+            // even when accessibility text scaling increases the row height.
+            trailing: current
+                ? const Icon(Icons.graphic_eq_rounded, size: 18)
+                : null,
             title: Text(
               entry.track.title,
               maxLines: 1,
