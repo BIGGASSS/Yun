@@ -94,3 +94,9 @@ The native adapters use media_kit, audio_session, audio_service on Android/macOS
 `test/core/` covers token rotation/replay, offline account isolation/restoration, cursor transactions and tombstones, acknowledged-only outbox removal, range downloads and checksum rejection, durable upload offsets, pin reference counts, queue/shuffle/repeat, and monotonic time accounting. Tests inject network/credentials/player and do not initialize native plugins.
 
 Offline availability does not imply a valid access token. Existing signed-in sessions can always play verified cached files. Metadata/playlist edits require the server and surface revision conflicts rather than silently overwriting. Logout retains cache/files/event segments but removes credentials and the active-account marker. Same-account login unlocks and retries them.
+
+The native adapter ignores media_kit's FFmpeg TCP diagnostics while opening or
+playing a local source. Its error stream includes network log messages that can
+arrive after an earlier stream has closed; treating those as a local file failure
+would stop downloaded audio and require the server for recovery. Actual local
+file/decoder failures and remote stream errors still use playback recovery.
