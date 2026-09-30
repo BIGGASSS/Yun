@@ -763,68 +763,72 @@ class QueuePanel extends StatelessWidget {
   @override
   Widget build(BuildContext context) => SelectedBuilder(
     listenable: app.playback,
-    select: () => (app.playback.queue, app.playback.index),
+    select: () => (app.playback.effectiveQueue, app.playback.effectiveIndex),
     builder: (context, snapshot, _) =>
         _build(context, snapshot.$1, snapshot.$2),
   );
 
-  Widget _build(BuildContext context, List<Track> queue, int currentIndex) =>
-      Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Padding(
-            padding: const EdgeInsets.fromLTRB(20, 16, 8, 12),
-            child: Row(
-              children: [
-                Expanded(
-                  child: Text(
-                    'Play queue',
-                    style: Theme.of(context).textTheme.titleLarge,
-                  ),
-                ),
-                if (onClose != null)
-                  IconButton(
-                    tooltip: 'Hide queue',
-                    onPressed: onClose,
-                    icon: const Icon(Icons.close_rounded),
-                  ),
-              ],
+  Widget _build(
+    BuildContext context,
+    List<PlaybackQueueEntry> queue,
+    int currentIndex,
+  ) => Column(
+    crossAxisAlignment: CrossAxisAlignment.stretch,
+    children: [
+      Padding(
+        padding: const EdgeInsets.fromLTRB(20, 16, 8, 12),
+        child: Row(
+          children: [
+            Expanded(
+              child: Text(
+                'Play queue',
+                style: Theme.of(context).textTheme.titleLarge,
+              ),
             ),
-          ),
-          Expanded(
-            child: queue.isEmpty
-                ? const EmptyState(
-                    icon: Icons.queue_music_rounded,
-                    title: 'A quiet queue',
-                    message: 'Play a track or playlist to get started.',
-                  )
-                : ListView.builder(
-                    itemCount: queue.length,
-                    itemBuilder: (context, index) {
-                      final track = queue[index];
-                      return ListTile(
-                        selected: index == currentIndex,
-                        leading: index == currentIndex
-                            ? const Icon(Icons.graphic_eq_rounded)
-                            : Text('${index + 1}'),
-                        title: Text(
-                          track.title,
-                          maxLines: 2,
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                        subtitle: Text(
-                          track.artist,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                        onTap: () => runUiAction(
-                          context,
-                          () => app.playback.playQueue(queue, index: index),
-                        ),
-                      );
-                    },
-                  ),
-          ),
-        ],
-      );
+            if (onClose != null)
+              IconButton(
+                tooltip: 'Hide queue',
+                onPressed: onClose,
+                icon: const Icon(Icons.close_rounded),
+              ),
+          ],
+        ),
+      ),
+      Expanded(
+        child: queue.isEmpty
+            ? const EmptyState(
+                icon: Icons.queue_music_rounded,
+                title: 'A quiet queue',
+                message: 'Play a track or playlist to get started.',
+              )
+            : ListView.builder(
+                itemCount: queue.length,
+                itemBuilder: (context, index) {
+                  final entry = queue[index];
+                  final track = entry.track;
+                  return ListTile(
+                    selected: index == currentIndex,
+                    leading: index == currentIndex
+                        ? const Icon(Icons.graphic_eq_rounded)
+                        : Text('${index + 1}'),
+                    title: Text(
+                      track.title,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                    subtitle: Text(
+                      track.artist,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                    onTap: () => runUiAction(
+                      context,
+                      () => app.playback.selectQueueEntry(entry),
+                    ),
+                  );
+                },
+              ),
+      ),
+    ],
+  );
 }
