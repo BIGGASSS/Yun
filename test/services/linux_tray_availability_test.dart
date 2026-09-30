@@ -29,9 +29,9 @@ class _Watcher extends DBusObject {
       emitSignal(LinuxTrayAvailability.watcherInterface, name);
 }
 
-Future<void> _eventually(bool Function() condition) async {
+Future<void> _eventually(FutureOr<bool> Function() condition) async {
   final deadline = DateTime.now().add(const Duration(seconds: 3));
-  while (!condition()) {
+  while (!await condition()) {
     if (DateTime.now().isAfter(deadline)) {
       fail('Timed out waiting for bus event');
     }
@@ -242,7 +242,11 @@ void main() {
       expect(await provider.getNameOwner(clientName), clientName);
       await availability.dispose();
       await availability.dispose();
-      expect(await provider.getNameOwner(clientName), isNull);
+      // Local close completes before the bus necessarily processes socket EOF;
+      // a query on the provider's separate connection can otherwise race it.
+      await _eventually(
+        () async => await provider.getNameOwner(clientName) == null,
+      );
       final snapshot = List<bool>.of(changes);
       final reads = watcher.reads;
       watcher.value = const DBusBoolean(false);
