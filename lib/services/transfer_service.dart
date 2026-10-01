@@ -279,6 +279,22 @@ class TransferService {
 
   /// Startup only, before accepting reconciliations or history clears.
   Future<void> restoreDownloads() async {
+    // Legacy caches can have file records without download activity. Verify
+    // every playable reference before the controller publishes its cache, and
+    // reuse the results below so history restoration never hashes a file twice.
+    final verified = <String, Track>{};
+    for (final record in await database.list('file')) {
+      final id = record['id'] as String;
+      final trackRecord = await database.get('track', id);
+      if (trackRecord != null) {
+        final track = Track.fromJson(trackRecord);
+        if (await _matchesFile(track, record)) {
+          verified[id] = track;
+          continue;
+        }
+      }
+      await _invalidateFile(id, record);
+    }
     for (final record in await database.list('download')) {
       final saved = DownloadProgress.fromJson(record);
       final interrupted =
@@ -287,26 +303,17 @@ class TransferService {
       final needsVerification =
           interrupted || saved.status == DownloadStatus.downloaded;
       if (needsVerification) {
-        // Neither persisted progress nor the recorded digest proves that the
-        // bytes still match: files can be truncated or corrupted after commit.
-        final trackRecord = await database.get('track', saved.trackId);
-        final fileRecord = await database.get('file', saved.trackId);
-        if (trackRecord != null && fileRecord != null) {
-          final track = Track.fromJson(trackRecord);
-          if (await _matchesFile(track, fileRecord)) {
-            _downloads[saved.trackId] = DownloadProgress(
-              trackId: saved.trackId,
-              totalBytes: track.sizeBytes,
-              receivedBytes: track.sizeBytes,
-              status: DownloadStatus.downloaded,
-              historyCleared: saved.historyCleared && !interrupted,
-            );
-            await _saveDownload(saved.trackId);
-            continue;
-          }
-        }
-        if (fileRecord != null) {
-          await _invalidateFile(saved.trackId, fileRecord);
+        final track = verified[saved.trackId];
+        if (track != null) {
+          _downloads[saved.trackId] = DownloadProgress(
+            trackId: saved.trackId,
+            totalBytes: track.sizeBytes,
+            receivedBytes: track.sizeBytes,
+            status: DownloadStatus.downloaded,
+            historyCleared: saved.historyCleared && !interrupted,
+          );
+          await _saveDownload(saved.trackId);
+          continue;
         }
       }
       final partial = File(

@@ -331,6 +331,34 @@ void main() {
     }
   }
 
+  for (final status in [DownloadStatus.queued, DownloadStatus.failed]) {
+    test(
+      'startup invalidates corrupt cached audio with $status activity',
+      () async {
+        final file = await File('${root.path}/t.audio')
+            .writeAsBytes(bytes.reversed.toList());
+        await db.put('track', track.id, track.toJson());
+        await db.put('file', track.id, {
+          'id': track.id,
+          'path': file.path,
+          'sha256': track.sha256,
+        });
+        final saved = DownloadProgress(
+          trackId: track.id,
+          totalBytes: track.sizeBytes,
+          status: status,
+          error: status == DownloadStatus.failed ? 'connection lost' : null,
+        );
+        await db.put('download', track.id, saved.toJson());
+        await transfers.restoreDownloads();
+        expect(await db.get('file', track.id), isNull);
+        expect(await file.exists(), isFalse);
+        expect(transfers.progressFor(track.id)!.toJson(), saved.toJson());
+        expect(await db.get('download', track.id), saved.toJson());
+      },
+    );
+  }
+
   test(
     'clear Done does not dismiss a live replacement at file commit',
     () async {

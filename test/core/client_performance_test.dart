@@ -149,11 +149,22 @@ void main() {
     () async {
       final file = await File('${root.path}/cached.audio')
           .writeAsBytes([1, 2, 3]);
-      await db.put('file', 't', {'id': 't', 'sha256': '', 'path': file.path});
+      final cachedTrack = Track(
+        id: track.id,
+        title: track.title,
+        sizeBytes: track.sizeBytes,
+        sha256: sha256.convert([1, 2, 3]).toString(),
+      );
+      await db.put('track', cachedTrack.id, cachedTrack.toJson());
+      await db.put('file', 't', {
+        'id': 't',
+        'sha256': cachedTrack.sha256,
+        'path': file.path,
+      });
       final value = await open();
       await file.delete();
       expect(value.localPath('t'), file.path);
-      await value.play(track);
+      await value.play(cachedTrack);
       expect(engine.opened, endsWith('/tracks/t/audio'));
       expect(value.localPath('t'), isNull);
       expect(value.downloadedTrackIds, isEmpty);
