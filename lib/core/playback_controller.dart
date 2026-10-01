@@ -107,7 +107,7 @@ class PlaybackController extends ChangeNotifier {
       _closing = false,
       _notifierDisposed = false;
   EngineState _lastState = const EngineState();
-  bool _sourceLocal = false, _failedOver = false;
+  bool _sourceLocal = false, _failedOver = false, _wantsPlayback = false;
   int _generation = 0;
   Future<void> _operations = Future.value();
   final List<int> _shuffleHistory = [];
@@ -261,6 +261,11 @@ class PlaybackController extends ChangeNotifier {
     if (_disposed) return;
     _lastState = state;
     if (state.error != null) _playbackError = error = state.error;
+    // Error/end states may already report playing=false. Preserve the last
+    // intent through recovery, while honoring native interruptions and pauses.
+    if (!_opening && _playbackError == null && !state.completed) {
+      _wantsPlayback = state.playing;
+    }
     final wasActive = isPlaying && !isBuffering;
     isPlaying = state.playing;
     isBuffering = state.buffering;
@@ -507,6 +512,7 @@ class PlaybackController extends ChangeNotifier {
     _opening = true;
     _completedSeen = false;
     _failedOver = false;
+    _wantsPlayback = true;
     _tracker?.start(track.id);
     position = Duration.zero;
     duration = track.duration;
@@ -546,6 +552,7 @@ class PlaybackController extends ChangeNotifier {
     final track = currentTrack;
     if (track == null) return;
     final resumeAt = position;
+    final resumePlaying = _wantsPlayback;
     _generation++;
     _opening = true;
     _tracker?.setActive(false);
@@ -557,9 +564,13 @@ class PlaybackController extends ChangeNotifier {
       final source = await resolveSource(track, !_sourceLocal);
       _sourceLocal = source.local;
       _playbackError = error = null;
-      await _engine.open(source.uri, headers: source.headers);
+      await _engine.open(
+        source.uri,
+        headers: source.headers,
+        play: resumePlaying,
+        start: resumeAt,
+      );
       if (_playbackError != null) throw StateError(_playbackError!);
-      await _engine.seek(resumeAt);
     } catch (e) {
       _playbackError = error = e.toString();
       rethrow;
@@ -578,9 +589,18 @@ class PlaybackController extends ChangeNotifier {
   Future<void> play() => _enqueue(() async {
     if (currentTrack == null) return;
     await _initialize();
-    await _engine.play();
+    if (_playbackError != null) {
+      // A selected track can have no loaded media after resolution/open fails.
+      // Retry resolution (including local fallback), not play on an empty mpv.
+      await _haltForTransition();
+      await _openCurrent();
+    } else {
+      _wantsPlayback = true;
+      await _engine.play();
+    }
   });
   Future<void> pause() => _enqueue(() async {
+    _wantsPlayback = false;
     _tracker?.setActive(false);
     await _engine.pause();
     await checkpoint();
@@ -778,6 +798,7 @@ class PlaybackController extends ChangeNotifier {
   }
 
   Future<void> _stop() async {
+    _wantsPlayback = false;
     _generation++;
     _opening = true;
     _tracker?.setActive(false);

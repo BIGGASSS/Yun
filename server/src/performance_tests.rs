@@ -101,6 +101,54 @@ async fn canceled_append_keeps_upload_exclusion_but_does_not_hold_global_lock_du
 }
 
 #[tokio::test]
+async fn canceled_upload_lock_waiters_release_admission_before_the_holder_finishes() {
+    let (dir, state, id) = seeded(&[], 4).await;
+    let app = crate::router(state.clone());
+    let path = format!("/api/v1/uploads/{id}");
+    let guard = state.upload_lock(&id).await.lock_owned().await;
+    for (method, route, body) in [
+        ("POST", format!("{path}/complete"), Bytes::new()),
+        ("PATCH", path.clone(), Bytes::from_static(b"1234")),
+        ("DELETE", path.clone(), Bytes::new()),
+    ] {
+        let waiter = tokio::spawn(app.clone().oneshot(request(method, &route, body)));
+        // Only the holder and the handler's pending lock acquisition own this
+        // mutex. Admission alone would not prove the handler passed auth yet.
+        wait_until(async || state.0.upload_locks.lock().await[&id].strong_count() == 2).await;
+        assert_eq!(state.0.requests.available_permits(), 31);
+        waiter.abort();
+        assert!(waiter.await.unwrap_err().is_cancelled());
+        // The holder is deliberately still blocked: canceled waiters must not
+        // retain request/body capacity until it completes, or mutate afterward.
+        assert_eq!(state.0.requests.available_permits(), 32, "{method}");
+        assert_eq!(state.0.body_bytes.available_permits(), 1024, "{method}");
+        assert_eq!(state.0.parsers.available_permits(), 2);
+        assert_eq!(state.0.upload_locks.lock().await[&id].strong_count(), 1);
+    }
+    assert_eq!(
+        app.oneshot(request("GET", "/health", Bytes::new()))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    drop(guard);
+    let _guard = state.upload_lock(&id).await.lock_owned().await;
+    let offset: i64 = sqlx::query_scalar("SELECT offset FROM uploads WHERE id=?")
+        .bind(&id)
+        .fetch_one(&state.0.pool)
+        .await
+        .unwrap();
+    assert_eq!(offset, 0);
+    assert!(
+        tokio::fs::read(dir.path().join("uploads").join(id))
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
 async fn completion_parser_admission_precedes_global_lock_and_cancel_waits_for_commit() {
     let bytes = include_bytes!("../tests/fixtures/tone.mp3");
     let (_dir, state, id) = seeded(bytes, bytes.len()).await;

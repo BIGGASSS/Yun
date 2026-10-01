@@ -22,7 +22,14 @@ class EngineState {
 abstract interface class PlaybackEngine {
   Stream<EngineState> get states;
   Future<void> initialize();
-  Future<void> open(String uri, {Map<String, String>? headers});
+
+  /// [start] is applied during loading, not by seeking before media is ready.
+  Future<void> open(
+    String uri, {
+    Map<String, String>? headers,
+    bool play = true,
+    Duration start = Duration.zero,
+  });
   Future<void> play();
   Future<void> pause();
   Future<void> seek(Duration position);
@@ -102,6 +109,17 @@ class MediaKitEngine implements PlaybackEngine {
     }
 
     try {
+      // mpv defaults to disabling certificate verification. Configure before
+      // any authenticated request, and read back: setProperty ignores mpv's
+      // return code. Failure must abort initialization, never weaken TLS.
+      // Readback is not proof of root availability or peer-name verification:
+      // the pinned Android/macOS backends still have the release blockers
+      // documented in docs/PLAYBACK_TLS.md. A CA-only patch is not sufficient.
+      final native = player.platform as NativePlayer;
+      await native.setProperty('tls-verify', 'yes');
+      if (await native.getProperty('tls-verify') != 'yes') {
+        throw StateError('Native TLS certificate verification unavailable');
+      }
       AudioSession? session;
       try {
         session = await _loadSession();
@@ -158,8 +176,8 @@ class MediaKitEngine implements PlaybackEngine {
           }),
         );
       }
-      // Publish only a fully configured player. A failed AudioSession setup
-      // must dispose the partial player and allow a later initialize to retry.
+      // Publish only a fully configured player. TLS/session failures below
+      // dispose the partial player and propagate, allowing a later retry.
       _session = session;
       _player = player;
     } catch (_) {
@@ -185,9 +203,14 @@ class MediaKitEngine implements PlaybackEngine {
   }
 
   @override
-  Future<void> open(String uri, {Map<String, String>? headers}) async {
+  Future<void> open(
+    String uri, {
+    Map<String, String>? headers,
+    bool play = true,
+    Duration start = Duration.zero,
+  }) async {
     final intent = ++_intent;
-    _wantsPlayback = true;
+    _wantsPlayback = play;
     _resumeAfterInterruption = false;
     final scheme = Uri.tryParse(uri)?.scheme.toLowerCase();
     _localSource =
@@ -199,8 +222,18 @@ class MediaKitEngine implements PlaybackEngine {
         File(uri).isAbsolute;
     await initialize();
     if (intent != _intent || _disposed) return;
-    if (!await _activate(intent) || intent != _intent || _disposed) return;
-    await _player!.open(Media(uri, httpHeaders: headers));
+    if (play) {
+      if (!await _activate(intent) || intent != _intent || _disposed) return;
+    } else {
+      await _session?.setActive(false);
+      if (intent != _intent || _disposed) return;
+    }
+    // Media.start is applied by mpv's load hook. An immediate seek after
+    // open can run before the file is ready; zero also resets a previous start.
+    await _player!.open(
+      Media(uri, httpHeaders: headers, start: start),
+      play: play,
+    );
   }
 
   @override

@@ -33,14 +33,12 @@ void main() {
     final directory = Directory(p.join(root.path, 'accounts', key));
     await directory.create(recursive: true);
     final db = CacheDatabase(File(p.join(directory.path, 'cache.sqlite')));
-    final track = interrupted == null
-        ? const Track(id: 't', title: 'Offline track')
-        : Track(
-            id: 't',
-            title: 'Offline track',
-            sizeBytes: 3,
-            sha256: sha256.convert([1, 2, 3]).toString(),
-          );
+    final track = Track(
+      id: 't',
+      title: 'Offline track',
+      sizeBytes: 3,
+      sha256: sha256.convert([1, 2, 3]).toString(),
+    );
     await db.applyLibrary({
       'cursor': 5,
       'reset': true,
@@ -197,7 +195,12 @@ void main() {
       final fileRecord = (await seed.get('file', 't'))!;
       await seed.transaction(() async {
         for (var i = 0; i < 100; i++) {
-          final track = Track(id: 'download-$i', title: 'Download $i');
+          final track = Track(
+            id: 'download-$i',
+            title: 'Download $i',
+            sizeBytes: 3,
+            sha256: fileRecord['sha256'] as String,
+          );
           await seed.put('track', track.id, track.toJson());
           await seed.put('file', track.id, {...fileRecord, 'id': track.id});
         }

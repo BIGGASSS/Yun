@@ -161,7 +161,8 @@ pub(crate) async fn login(
     rate_limit(&state, "login:global".into(), 120).await?;
     rate_limit(
         &state,
-        format!("login:{}", input.username.to_lowercase()),
+        // User-controlled names must never share the global counter's key.
+        format!("login:user:{}", input.username.to_lowercase()),
         10,
     )
     .await?;

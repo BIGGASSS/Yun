@@ -24,6 +24,9 @@ export '../services/transfer_service.dart'
 export 'playback_controller.dart'
     show PlaybackController, PlaybackQueueEntry, PlaybackSettings, RepeatMode;
 
+/// Internal control flow, distinct from HTTP, parsing and storage failures.
+class _AccountRefreshCancelled implements Exception {}
+
 /// UI-facing, account-scoped application state. All writes except listening
 /// segments, upload jobs and offline pins are online-only. See README.md.
 class AppController extends ChangeNotifier {
@@ -90,6 +93,8 @@ class AppController extends ChangeNotifier {
   Timer? _retryTimer, _integrityTimer;
   Future<void>? _initializing, _refreshing, _outboxRunning, _shutdownFuture;
   bool _disposed = false, _locking = false, _notifierDisposed = false;
+  bool _shuttingDown = false;
+  Future<void>? _accountTransition;
   final Set<Future<dynamic>> _onlineOperations = {};
   final Set<Future<void>> _uploadOperations = {};
   final Set<Future<void>> _downloadHistoryOperations = {};
@@ -100,7 +105,7 @@ class AppController extends ChangeNotifier {
   int _generation = 0;
   String newId() => const Uuid().v4();
   void _notify() {
-    if (!_disposed && !_notifierDisposed) notifyListeners();
+    if (!_shuttingDown && !_notifierDisposed) notifyListeners();
   }
 
   void _notifyDownloads() {
@@ -138,24 +143,40 @@ class AppController extends ChangeNotifier {
     try {
       await future;
     } catch (e) {
+      // UI/background boundary: surface failures through application state.
+      // Explicit operations use _online and rethrow to their callers instead.
       _backgroundError(e);
     }
   }
 
-  Future<void> initialize() => _initializing ??= _initialize();
+  void _ensureActive() {
+    if (_shuttingDown) throw StateError('Application has shut down');
+  }
+
+  Future<void> initialize() {
+    _ensureActive();
+    return _initializing ??= _initialize();
+  }
+
   Future<void> _initialize() async {
     busy = true;
     _notify();
     try {
       _root = await _storageDirectory();
+      if (_shuttingDown) return;
       await _root!.create(recursive: true);
+      if (_shuttingDown) return;
       _deviceId = await _api.credentials.read('yun.device_id');
+      if (_shuttingDown) return;
       if (_deviceId == null) {
         _deviceId = newId();
         await _api.credentials.write('yun.device_id', _deviceId!);
       }
+      if (_shuttingDown) return;
       final restored = await _api.restore();
+      if (_shuttingDown) return;
       if (restored != null) await _openAccount(restored.account);
+      if (_shuttingDown) return;
       initialized = true;
       if (automaticRefresh) {
         _retryTimer = Timer.periodic(const Duration(seconds: 30), (_) {
@@ -178,6 +199,7 @@ class AppController extends ChangeNotifier {
   }
 
   Future<void> _openAccount(Account value) async {
+    if (_shuttingDown) return;
     final key = sha256
         .convert(
           utf8.encode(
@@ -187,15 +209,17 @@ class AppController extends ChangeNotifier {
         .toString();
     final directory = Directory(p.join(_root!.path, 'accounts', key));
     await directory.create(recursive: true);
+    if (_shuttingDown) return;
     final db = _databaseFactory(File(p.join(directory.path, 'cache.sqlite')));
     _database = db;
     account = value;
     _generation++;
     final generation = _generation;
+    final libraryEpoch = await db.libraryEpoch;
     playback.configureRecording(_deviceId!, (event) async {
       await db.enqueueEvent(event);
       final pending = await db.eventCount();
-      if (generation == _generation) {
+      if (generation == _generation && !_shuttingDown) {
         pendingEventCount = pending;
         _notify();
       }
@@ -222,8 +246,15 @@ class AppController extends ChangeNotifier {
         }
       },
       onTrack: (track) async {
-        await db.put('track', track.id, track.toJson());
-        if (generation == _generation) await _reloadCache();
+        // Transfer callbacks do not carry a request-time timeline token. After
+        // a rollback, discover uploads via authoritative sync instead of ever
+        // trusting a response that might belong to the previous timeline.
+        if (await _publishRecord(db, libraryEpoch, 'track', track.toJson())) {
+          await _reloadCache();
+        } else if (_canPublish(db) && await db.libraryEpoch != libraryEpoch) {
+          await _refreshing;
+          await refresh();
+        }
       },
       onError: _backgroundError,
       onDownloadChanged: () {
@@ -248,7 +279,9 @@ class AppController extends ChangeNotifier {
       },
     );
     await _transfers!.restoreUploads();
+    if (_shuttingDown) return;
     await _transfers!.restoreDownloads();
+    if (_shuttingDown) return;
     // Only this account's quarantined, non-durable segments can reenter its
     // durable outbox. A disk failure must not turn successful auth into logout.
     try {
@@ -291,7 +324,7 @@ class AppController extends ChangeNotifier {
           if (db == null) continue;
           final jobs = uploads ? await db.list('upload') : null;
           final records = files ? await db.list('file') : null;
-          if (generation != _generation || _disposed) continue;
+          if (generation != _generation || _shuttingDown) continue;
           if (jobs != null) {
             _uploads = List.unmodifiable(jobs.map(UploadJob.fromJson));
           }
@@ -337,7 +370,7 @@ class AppController extends ChangeNotifier {
       }
     }
     final pending = await db.eventCount();
-    if (generation != _generation || _disposed) return;
+    if (generation != _generation || _shuttingDown) return;
     _tracks = List.unmodifiable(tracks);
     _tracksById = {for (final track in tracks) track.id: track};
     _artwork?.updateTracks(tracks);
@@ -350,9 +383,24 @@ class AppController extends ChangeNotifier {
     _notify();
   }
 
-  Future<void> login(String server, String username, String password) async {
+  Future<void> _changeAccount(Future<void> Function() action) {
+    _ensureActive();
+    if (_accountTransition != null || _locking) {
+      throw StateError('An account change is already in progress');
+    }
+    _locking = true;
+    return _accountTransition = action().whenComplete(() {
+      _locking = _shuttingDown;
+      _accountTransition = null;
+    });
+  }
+
+  Future<void> login(String server, String username, String password) =>
+      _changeAccount(() => _login(server, username, password));
+
+  Future<void> _login(String server, String username, String password) async {
     await initialize();
-    if (_locking) throw StateError('An account change is already in progress');
+    if (_shuttingDown) return;
     _locking = true;
     busy = true;
     error = null;
@@ -365,14 +413,17 @@ class AppController extends ChangeNotifier {
           await _api.logout();
         }
       }
+      if (_shuttingDown) return;
       final value = await _api.login(server, username, password, _deviceId!);
+      if (_shuttingDown) return;
       await _openAccount(value);
+      if (_shuttingDown) return;
       isOffline = false;
     } catch (e) {
       error = e.toString();
       rethrow;
     } finally {
-      _locking = false;
+      _locking = _shuttingDown;
       busy = false;
       _notify();
     }
@@ -392,6 +443,23 @@ class AppController extends ChangeNotifier {
       }
     }
 
+    // Observe owners before any cleanup await: their completion callbacks
+    // remove them from these fields/sets, including when they fail. Cleanup
+    // still drains every owner and rethrows the first failure after closure.
+    final drainingOperations = cleanup(() async {
+      await Future.wait<dynamic>([
+        ?_refreshing,
+        ?_outboxRunning,
+        ..._onlineOperations,
+        // Closing transfers deliberately cancels an unfinished picker copy.
+        // The initiating caller still receives cancellation; account cleanup
+        // treats only this typed cancellation as successful drainage.
+        ..._uploadOperations.map(
+          (operation) => operation.onError<TransferCancelled>((_, _) {}),
+        ),
+      ]);
+    });
+
     // Lock local access immediately. A failed listening checkpoint must not
     // prevent cancellation, database closure or native-resource disposal.
     final artwork = _artwork;
@@ -407,26 +475,15 @@ class AppController extends ChangeNotifier {
     await cleanup(() async {
       await _transfers?.close();
     });
-    try {
-      await _refreshing;
-    } catch (_) {}
-    try {
-      await _outboxRunning;
-    } catch (_) {}
-    await Future.wait(
-      [
-        ..._onlineOperations,
-        ..._uploadOperations,
-      ].map((f) => f.then<void>((_) {}, onError: (Object _, StackTrace _) {})),
-    );
+    await drainingOperations;
     // History transactions must finish before their database closes. The
     // cleanup boundary still closes resources, then rethrows any failure.
     await cleanup(() async {
       await Future.wait(_downloadHistoryOperations);
     });
-    try {
+    await cleanup(() async {
       await _reloadRunning;
-    } catch (_) {}
+    });
     _generation++;
     await cleanup(() async {
       await _database?.close();
@@ -446,30 +503,46 @@ class AppController extends ChangeNotifier {
     if (failure != null) Error.throwWithStackTrace(failure!, failureStack!);
   }
 
-  Future<void> logout() async {
-    if (_locking) throw StateError('An account change is already in progress');
+  Future<void> logout() => _changeAccount(_logout);
+
+  Future<void> _logout() async {
+    // Initialization may itself be opening a restored account. A logout
+    // already requested must still erase credentials if shutdown follows it.
     _locking = true;
     busy = true;
     _notify();
-    try {
+    Object? failure;
+    StackTrace? failureStack;
+    Future<void> cleanup(Future<void> Function() action) async {
       try {
-        await _closeAccount();
-      } finally {
-        // Cleanup may report a failed checkpoint after clearing the account.
-        // Never leave restorable credentials behind a signed-out UI.
-        await _api.logout();
+        await action();
+      } catch (e, stack) {
+        failure ??= e;
+        failureStack ??= stack;
       }
+    }
+
+    try {
+      // Initialization can fail after opening the database or configuring
+      // recording. Drain it, but never let that failure bypass local cleanup.
+      await cleanup(() async => await _initializing);
+      await cleanup(_closeAccount);
+      await cleanup(_api.logout);
       isOffline = false;
+      if (failure != null) {
+        error = failure.toString();
+        Error.throwWithStackTrace(failure!, failureStack!);
+      }
       error = null;
     } finally {
-      _locking = false;
+      _locking = _shuttingDown;
       busy = false;
       _notify();
     }
   }
 
   CacheDatabase _requireDatabase() {
-    if (_database == null || account == null || _locking) {
+    if (_database == null || account == null || _locking || _shuttingDown) {
       throw StateError('Sign in required');
     }
     return _database!;
@@ -485,6 +558,9 @@ class AppController extends ChangeNotifier {
     final generation = _generation;
     try {
       final cursor = await db.cursor;
+      // Only deletions acknowledged before this request can be confirmed by
+      // its snapshot. A staged reset may omit a not-yet-published creation.
+      final deletionSequence = await db.deletionSequence;
       final result = await _libraryPages(cursor);
       if (generation != _generation || _locking) return;
       final changed =
@@ -495,8 +571,19 @@ class AppController extends ChangeNotifier {
             'deleted_track_ids',
             'deleted_playlist_ids',
           ].any((key) => (result[key] as List).isNotEmpty);
-      if (changed || result['cursor'] != cursor) await db.applyLibrary(result);
+      if (changed || result['cursor'] != cursor) {
+        await db.transaction(() async {
+          if (_canPublish(db)) {
+            await db.applyLibrary(
+              result,
+              confirmedDeletionSequence: deletionSequence,
+            );
+          }
+        });
+      }
+      if (!_canPublish(db)) return;
       if (changed) await _reloadCache();
+      if (!_canPublish(db)) return;
       isOffline = false;
       await flushOutbox();
       if (!_locking) {
@@ -509,6 +596,10 @@ class AppController extends ChangeNotifier {
           );
         }
       }
+    } on _AccountRefreshCancelled {
+      // Account transitions drain refreshes; expected cancellation must not
+      // turn a successful login/logout into a cleanup failure.
+      return;
     } catch (e) {
       _backgroundError(e);
       rethrow;
@@ -539,12 +630,13 @@ class AppController extends ChangeNotifier {
             deletedPlaylists.length +
             entriesRead;
         while (true) {
+          if (_locking || _disposed) throw _AccountRefreshCancelled();
           final beforeRecords = recordCount();
           final result = await _api.json(
             '/library',
             query: {'paged': true, 'cursor': ?cursor, 'page_token': ?token},
           );
-          if (_locking || _disposed) throw StateError('Account locked');
+          if (_locking || _disposed) throw _AccountRefreshCancelled();
           if (result['cursor'] is! int || result['reset'] is! bool) {
             throw const FormatException('Invalid library snapshot');
           }
@@ -644,8 +736,11 @@ class AppController extends ChangeNotifier {
           .where(submitted.contains)
           .toSet();
       await db.acknowledgeEvents(ack);
-      pendingEventCount = await db.eventCount();
-      _notify();
+      final pending = await db.eventCount();
+      if (_canPublish(db)) {
+        pendingEventCount = pending;
+        _notify();
+      }
       if (ack.length < batch.length) break;
     }
   }
@@ -773,14 +868,40 @@ class AppController extends ChangeNotifier {
     await playback.queueNext(track);
   }
 
-  Future<T> _online<T>(Future<T> Function(CacheDatabase) action) {
+  bool _canPublish(CacheDatabase db) =>
+      !_shuttingDown && !_locking && identical(db, _database);
+
+  Future<bool> _publishRecord(
+    CacheDatabase db,
+    int epoch,
+    String kind,
+    Map<String, dynamic> record,
+  ) => db.transaction(() async {
+    if (!_canPublish(db)) return false;
+    return db.publishLibraryRecord(kind, record, expectedEpoch: epoch);
+  });
+
+  Future<bool> _publishDeletion(
+    CacheDatabase db,
+    int epoch,
+    String kind,
+    String id,
+  ) => db.transaction(() async {
+    if (!_canPublish(db)) return false;
+    return db.deleteLibraryRecord(kind, id, expectedEpoch: epoch);
+  });
+
+  Future<T> _online<T>(Future<T> Function(CacheDatabase, int) action) {
     final db = _requireDatabase();
     final operation = () async {
       try {
-        final result = await action(db);
-        isOffline = false;
-        error = null;
-        _notify();
+        final epoch = await db.libraryEpoch;
+        final result = await action(db, epoch);
+        if (_canPublish(db)) {
+          isOffline = false;
+          error = null;
+          _notify();
+        }
         return result;
       } catch (e) {
         _backgroundError(e);
@@ -792,7 +913,7 @@ class AppController extends ChangeNotifier {
   }
 
   Future<Track> updateTrack(Track track, Map<String, dynamic> changes) =>
-      _online((db) async {
+      _online((db, epoch) async {
         const fields = {
           'title',
           'artist',
@@ -811,24 +932,35 @@ class AppController extends ChangeNotifier {
             data: {...changes, 'revision': track.revision},
           ),
         );
-        await db.put('track', result.id, result.toJson());
-        await _reloadCache();
-        if (localPath(result.id) != null) {
+        final published = await _publishRecord(
+          db,
+          epoch,
+          'track',
+          result.toJson(),
+        );
+        if (published) await _reloadCache();
+        if (published &&
+            _canPublish(db) &&
+            trackById(result.id)?.revision == result.revision &&
+            localPath(result.id) != null) {
           await _artwork?.get(result, background: true);
         }
         return result;
       });
-  Future<void> deleteTrack(String id) => _online((db) async {
+  Future<void> deleteTrack(String id) => _online((db, epoch) async {
     await _api.request('/tracks/$id', method: 'DELETE');
-    if (playback.currentTrack?.id == id) await playback.stop();
-    await db.remove('track', id);
+    if (!await _publishDeletion(db, epoch, 'track', id)) return;
+    if (_canPublish(db) && playback.currentTrack?.id == id) {
+      await playback.stop();
+    }
+    await _reloadCache();
     await refresh();
   });
   Future<Track> setArtwork(
     Track track,
     Uint8List bytes, {
     String mimeType = 'image/jpeg',
-  }) => _online((db) async {
+  }) => _online((db, epoch) async {
     if (bytes.length > 10 * 1024 * 1024 ||
         !['image/jpeg', 'image/png'].contains(mimeType)) {
       throw ArgumentError('Artwork must be JPEG or PNG, at most 10 MiB');
@@ -841,24 +973,29 @@ class AppController extends ChangeNotifier {
         headers: {'Content-Type': mimeType, 'If-Match': '"${track.revision}"'},
       ),
     );
-    await db.put('track', result.id, result.toJson());
-    await _reloadCache();
-    await _artwork?.put(result, bytes);
+    if (await _publishRecord(db, epoch, 'track', result.toJson())) {
+      await _reloadCache();
+      if (_canPublish(db) &&
+          trackById(result.id)?.revision == result.revision) {
+        await _artwork?.put(result, bytes);
+      }
+    }
     return result;
   });
-  Future<Playlist> createPlaylist(String name) => _online((db) async {
+  Future<Playlist> createPlaylist(String name) => _online((db, epoch) async {
     final result = Playlist.fromJson(
       await _api.json('/playlists', method: 'POST', data: {'name': name}),
     );
-    await db.put('playlist', result.id, result.toJson());
-    await _reloadCache();
+    if (await _publishRecord(db, epoch, 'playlist', result.toJson())) {
+      await _reloadCache();
+    }
     return result;
   });
   Future<Playlist> savePlaylist(
     Playlist playlist, {
     String? name,
     List<PlaylistEntry>? entries,
-  }) => _online((db) async {
+  }) => _online((db, epoch) async {
     final result = Playlist.fromJson(
       await _api.json(
         '/playlists/${playlist.id}',
@@ -872,20 +1009,25 @@ class AppController extends ChangeNotifier {
         },
       ),
     );
-    await db.put('playlist', result.id, result.toJson());
-    await _reloadCache();
-    unawaited(_background(_transfers!.reconcile(tracks, playlists, pins)));
+    if (await _publishRecord(db, epoch, 'playlist', result.toJson())) {
+      await _reloadCache();
+      if (_canPublish(db)) {
+        unawaited(_background(_transfers!.reconcile(tracks, playlists, pins)));
+      }
+    }
     return result;
   });
-  Future<void> deletePlaylist(Playlist playlist) => _online((db) async {
+  Future<void> deletePlaylist(Playlist playlist) => _online((db, epoch) async {
     await _api.request(
       '/playlists/${playlist.id}',
       method: 'DELETE',
       query: {'revision': playlist.revision},
     );
-    await db.remove('playlist', playlist.id);
+    if (!await _publishDeletion(db, epoch, 'playlist', playlist.id)) return;
     await _reloadCache();
-    unawaited(_background(_transfers!.reconcile(tracks, playlists, pins)));
+    if (_canPublish(db)) {
+      unawaited(_background(_transfers!.reconcile(tracks, playlists, pins)));
+    }
   });
   bool isPinned(String type, String id) =>
       _pins.any((pin) => pin.type == type && pin.id == id);
@@ -939,7 +1081,7 @@ class AppController extends ChangeNotifier {
       _uploadOperation((transfers) => transfers.clearDoneUploads());
 
   Future<ServerStats> loadStats({DateTime? from, DateTime? to}) =>
-      _online((db) async {
+      _online((db, epoch) async {
         final result = ServerStats.fromJson(
           await _api.json(
             '/stats',
@@ -949,29 +1091,42 @@ class AppController extends ChangeNotifier {
             },
           ),
         );
-        stats = result;
-        _notify();
+        if (_canPublish(db)) {
+          stats = result;
+          _notify();
+        }
         return result;
       });
 
   /// Call and await at orderly shutdown; credentials remain for offline restore.
-  Future<void> shutdown() => _shutdownFuture ??= _shutdown();
+  Future<void> shutdown() {
+    // Terminal synchronously, before any in-flight transition can resume.
+    _shuttingDown = true;
+    _locking = true;
+    return _shutdownFuture ??= _shutdown();
+  }
+
   Future<void> _shutdown() async {
     if (_disposed) return;
     _locking = true;
-    try {
-      await _initializing;
-    } catch (_) {}
-    _retryTimer?.cancel();
-    _integrityTimer?.cancel();
     Object? failure;
     StackTrace? failureStack;
-    try {
-      await _closeAccount();
-    } catch (e, stack) {
-      failure = e;
-      failureStack = stack;
+    Future<void> drain(Future<void>? operation) async {
+      try {
+        await operation;
+      } catch (e, stack) {
+        // Shutdown is a cleanup boundary: drain every owner before closing
+        // resources, then report the first failure rather than swallowing it.
+        failure ??= e;
+        failureStack ??= stack;
+      }
     }
+
+    await drain(_initializing);
+    await drain(_accountTransition);
+    _retryTimer?.cancel();
+    _integrityTimer?.cancel();
+    await drain(_closeAccount());
     try {
       await playback.shutdown();
     } catch (e, stack) {
@@ -980,7 +1135,7 @@ class AppController extends ChangeNotifier {
     } finally {
       _disposed = true;
     }
-    if (failure != null) Error.throwWithStackTrace(failure, failureStack!);
+    if (failure != null) Error.throwWithStackTrace(failure!, failureStack!);
   }
 
   @override
@@ -991,6 +1146,8 @@ class AppController extends ChangeNotifier {
     artworkChanges.dispose();
     unawaited(
       shutdown().catchError((Object e) {
+        // ChangeNotifier.dispose cannot return a Future. Retain failures for
+        // inspection; orderly owners must await shutdown to receive the error.
         error = e.toString();
       }),
     );

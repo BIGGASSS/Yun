@@ -2039,6 +2039,49 @@ async fn concurrent_chunks_and_playlist_writes_have_one_winner_and_completion_re
 }
 
 #[tokio::test]
+async fn username_global_has_an_independent_case_insensitive_login_limit() {
+    let h = Harness::new().await;
+    yun_server::create_user(&h.state, "global", "global-password-long")
+        .await
+        .unwrap();
+    // Alice and Bob have already consumed global attempts. This username must
+    // still get all ten attempts, counted together across case variants.
+    for attempt in 0..=10 {
+        let (code, result) = json_request(
+            &h.app,
+            "POST",
+            "/api/v1/auth/login",
+            None,
+            json!({
+                "username": if attempt % 2 == 0 { "global" } else { "GLOBAL" },
+                "password": "global-password-long",
+                "device_id": h.device_a,
+            }),
+        )
+        .await;
+        assert_eq!(
+            code,
+            if attempt < 10 {
+                StatusCode::OK
+            } else {
+                StatusCode::TOO_MANY_REQUESTS
+            },
+            "attempt {attempt}: {result}"
+        );
+    }
+    // Exhausting this name's quota must not exhaust other users' quotas.
+    let (code, result) = json_request(
+        &h.app,
+        "POST",
+        "/api/v1/auth/login",
+        None,
+        json!({"username":"alice","password":"alice-password-long","device_id":h.device_a}),
+    )
+    .await;
+    assert_eq!(code, StatusCode::OK, "{result}");
+}
+
+#[tokio::test]
 async fn expiry_and_authentication_rate_limits() {
     let dir = tempfile::tempdir().unwrap();
     let state = AppState::open(Config::new(dir.path())).await.unwrap();

@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:crypto/crypto.dart';
 import 'package:dio/dio.dart';
@@ -114,6 +115,144 @@ void main() {
     expect(await db.get('file', 't'), isNull);
     expect(await File(p.join(root.path, 't.audio.part')).exists(), isFalse);
   });
+  for (final scenario in [(0, 200), (2, 206), (2, 200)]) {
+    final (resumeOffset, status) = scenario;
+    test(
+      'oversized $status stream at offset $resumeOffset cancels before writing overflow',
+      () async {
+        final bytes = [1, 2, 3, 4];
+        final hash = sha256.convert(bytes).toString();
+        final track = Track(id: 't', title: 'T', sizeBytes: 4, sha256: hash);
+        final other = Track(
+          id: 'other',
+          title: 'Other',
+          sizeBytes: 4,
+          sha256: hash,
+        );
+        const pins = [
+          PinSelection('track', 't'),
+          PinSelection('track', 'other'),
+        ];
+        final partial = File(p.join(root.path, 't.audio.part'));
+        if (resumeOffset > 0) {
+          await partial.writeAsBytes(bytes.take(resumeOffset).toList());
+        }
+        var streamCancelled = false;
+        final body = StreamController<Uint8List>(
+          onCancel: () => streamCancelled = true,
+        );
+        addTearDown(body.close);
+        CancelToken? requestToken;
+        dio.httpClientAdapter = FakeAdapter((options, _) {
+          if (options.path.endsWith('/other/audio')) {
+            expect(options.cancelToken!.isCancelled, isFalse);
+            return ResponseBody.fromBytes(bytes, 200);
+          }
+          expect(
+            options.headers['Range'],
+            resumeOffset > 0 ? 'bytes=2-' : isNull,
+          );
+          requestToken = options.cancelToken;
+          final start = status == 206 ? resumeOffset : 0;
+          body.add(Uint8List.fromList(bytes.sublist(start, 3)));
+          body.add(Uint8List.fromList([4, 5]));
+          // No EOF: the worker must cancel rather than wait for the producer.
+          return ResponseBody(
+            body.stream,
+            status,
+            headers: {
+              if (status == 206) 'content-range': ['bytes 2-3/4'],
+            },
+          );
+        });
+        await transfers
+            .reconcile([track, other], [], pins)
+            .timeout(const Duration(seconds: 5));
+        expect(requestToken!.isCancelled, isTrue);
+        expect(streamCancelled, isTrue);
+        expect(errors, hasLength(1));
+        expect(errors.single.toString(), contains('exceeds expected size'));
+        expect(await partial.readAsBytes(), [1, 2, 3]);
+        expect(await db.get('file', track.id), isNull);
+        expect(await File(p.join(root.path, 't.audio')).exists(), isFalse);
+        expect(transfers.progressFor(track.id)!.status, DownloadStatus.failed);
+        expect(transfers.progressFor(track.id)!.receivedBytes, 3);
+        expect(
+          transfers.progressFor(other.id)!.status,
+          DownloadStatus.downloaded,
+        );
+
+        dio.httpClientAdapter = FakeAdapter((options, _) {
+          expect(options.cancelToken!.isCancelled, isFalse);
+          expect(options.headers['Range'], 'bytes=3-');
+          return ResponseBody.fromBytes(
+            [4],
+            206,
+            headers: {
+              'content-range': ['bytes 3-3/4'],
+            },
+          );
+        });
+        await transfers.reconcile([track, other], [], pins);
+        expect(errors, hasLength(1));
+        expect(await File(p.join(root.path, 't.audio')).readAsBytes(), bytes);
+        expect(
+          transfers.progressFor(track.id)!.status,
+          DownloadStatus.downloaded,
+        );
+      },
+    );
+  }
+
+  for (final corrupt in [
+    [1, 2],
+    [4, 3, 2, 1],
+    [1, 2, 3, 4, 5],
+  ]) {
+    test(
+      'reconciliation invalidates corrupt completed bytes $corrupt before retry',
+      () async {
+        final bytes = [1, 2, 3, 4];
+        final track = Track(
+          id: 't',
+          title: 'T',
+          sizeBytes: bytes.length,
+          sha256: sha256.convert(bytes).toString(),
+        );
+        const pins = [PinSelection('track', 't')];
+        dio.httpClientAdapter = FakeAdapter(
+          (_, _) => ResponseBody.fromBytes(bytes, 200),
+        );
+        await transfers.reconcile([track], [], pins);
+        await transfers.clearDoneDownloads([track]);
+        final file = File(p.join(root.path, 't.audio'));
+        await file.writeAsBytes(corrupt);
+        dio.httpClientAdapter = FakeAdapter((options, _) async {
+          expect(await db.get('file', track.id), isNull);
+          expect(await file.exists(), isFalse);
+          throw DioException(requestOptions: options, error: 'offline');
+        });
+        await transfers.reconcile([track], [], pins);
+        expect(errors, hasLength(1));
+        expect(await db.get('file', track.id), isNull);
+        expect(await file.exists(), isFalse);
+        expect(transfers.progressFor(track.id)!.status, DownloadStatus.failed);
+        expect(transfers.progressFor(track.id)!.historyCleared, isFalse);
+        dio.httpClientAdapter = FakeAdapter(
+          (_, _) => ResponseBody.fromBytes(bytes, 200),
+        );
+        await transfers.reconcile([track], [], pins);
+        expect(errors, hasLength(1));
+        expect(await file.readAsBytes(), bytes);
+        expect(await db.get('file', track.id), isNotNull);
+        expect(
+          transfers.progressFor(track.id)!.status,
+          DownloadStatus.downloaded,
+        );
+      },
+    );
+  }
+
   test('upload reconciles durable server offset after a lost chunk acknowledgement', () async {
     final source = File(p.join(root.path, 'song.mp3'));
     await source.writeAsBytes([1, 2, 3, 4, 5, 6]);

@@ -26,6 +26,56 @@ void main() {
     await session.noisy.close();
   });
 
+  test('TLS verification is enabled before authenticated open', () async {
+    player.onOpen = () {
+      expect(player.platform.properties['tls-verify'], 'yes');
+    };
+    await engine.open(
+      'https://yun.test/audio',
+      headers: {'Authorization': 'Bearer secret'},
+    );
+    expect(player.media!.httpHeaders, {'Authorization': 'Bearer secret'});
+  });
+
+  test(
+    'TLS configuration failure blocks open, disposes and permits retry',
+    () async {
+      player.platform.rejectTls = true;
+      await expectLater(
+        engine.open(
+          'https://yun.test/audio',
+          headers: {'Authorization': 'Bearer secret'},
+        ),
+        throwsStateError,
+      );
+      expect(player.opens, 0);
+      expect(player.disposed, isTrue);
+      expect(session.configurations, 0);
+      player = TestPlayer();
+      await engine.open('https://yun.test/audio');
+      expect(player.opens, 1);
+      expect(player.platform.properties['tls-verify'], 'yes');
+    },
+  );
+
+  test(
+    'paused open supplies load-time position without focus or seek',
+    () async {
+      await engine.open(
+        'https://yun.test/audio',
+        play: false,
+        start: const Duration(seconds: 42),
+      );
+      expect(player.media!.start, const Duration(seconds: 42));
+      expect(player.state.playing, isFalse);
+      expect(player.seeks, 0);
+      expect(session.activations, [false]);
+      await engine.open('/cache/next.audio');
+      expect(player.media!.start, Duration.zero);
+      expect(player.state.playing, isTrue);
+    },
+  );
+
   for (final uri in ['/cache/download.audio', 'file:///cache/download.audio']) {
     test(
       'local $uri survives TCP diagnostics before the first audio tick',
@@ -124,6 +174,34 @@ void main() {
       expect(playback.error, isNull);
     },
   );
+
+  test('Play resolves and reopens after native open fails', () async {
+    var resolutions = 0;
+    final playback = PlaybackController(
+      engine: engine,
+      enableSystemControls: false,
+      resolveSource: (_, _) async {
+        resolutions++;
+        return const AudioSource('https://yun.test/audio');
+      },
+    );
+    addTearDown(() async {
+      await playback.shutdown();
+      playback.dispose();
+    });
+    player.onOpen = () => throw StateError('Open failed');
+    await expectLater(
+      playback.playQueue([const yun.Track(id: 'a', title: 'A')]),
+      throwsStateError,
+    );
+    expect(playback.error, contains('Open failed'));
+    player.onOpen = null;
+    await playback.play();
+    expect(resolutions, 2);
+    expect(player.opens, 2);
+    expect(playback.isPlaying, isTrue);
+    expect(playback.error, isNull);
+  });
 
   test('local file and decoder errors still reach playback recovery', () async {
     final playback = PlaybackController(
@@ -367,6 +445,10 @@ void main() {
 
 class TestPlayer implements Player {
   @override
+  final TestNativePlayer platform = TestNativePlayer();
+  Media? media;
+  int seeks = 0;
+  @override
   PlayerState state = const PlayerState();
   @override
   final TestPlayerStream stream = TestPlayerStream();
@@ -377,7 +459,8 @@ class TestPlayer implements Player {
   final volumeCalls = <double>[];
   @override
   Future<void> open(Playable playable, {bool play = true}) async {
-    opened = (playable as Media).uri;
+    media = playable as Media;
+    opened = media!.uri;
     opens++;
     onOpen?.call();
     state = state.copyWith(
@@ -415,6 +498,7 @@ class TestPlayer implements Player {
 
   @override
   Future<void> seek(Duration position) async {
+    seeks++;
     state = state.copyWith(position: position);
   }
 
@@ -423,6 +507,29 @@ class TestPlayer implements Player {
     disposed = true;
     await stream.close();
   }
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
+
+class TestNativePlayer implements NativePlayer {
+  final properties = <String, String>{};
+  bool rejectTls = false;
+
+  @override
+  Future<void> setProperty(
+    String property,
+    String value, {
+    bool waitForInitialization = true,
+  }) async {
+    if (!rejectTls) properties[property] = value;
+  }
+
+  @override
+  Future<String> getProperty(
+    String property, {
+    bool waitForInitialization = true,
+  }) async => properties[property] ?? '';
 
   @override
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);

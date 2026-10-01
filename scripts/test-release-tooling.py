@@ -14,12 +14,12 @@ ROOT = Path(__file__).resolve().parent.parent
 
 
 class ReleaseToolingTests(unittest.TestCase):
-    def test_linux_install_and_upgrade_with_spaces(self):
+    def test_linux_install_and_upgrade_with_spaces_and_percent(self):
         with tempfile.TemporaryDirectory(prefix="yun installer test ") as directory:
             root = Path(directory)
             bundle = root / "bundle"
             bundle.mkdir()
-            home = root / "home with spaces"
+            home = root / "home with spaces %f %U %%"
             home.mkdir()
             for name in ("install-linux.sh", "yun.desktop"):
                 shutil.copy2(ROOT / "scripts/release" / name, bundle / name)
@@ -34,7 +34,10 @@ class ReleaseToolingTests(unittest.TestCase):
             self.assertEqual((home / ".local/opt/yun/data/asset").read_text(), "preserved")
             self.assertEqual((home / ".local/opt/yun.previous/data/asset").read_text(), "preserved")
             entry = home / "data/applications/yun.desktop"
-            self.assertIn(f'Exec="{home}/.local/opt/yun/yun"', entry.read_text())
+            escaped_home = str(home).replace('%', '%%')
+            self.assertIn(f'Exec="{escaped_home}/.local/opt/yun/yun"', entry.read_text())
+            # Icon is not an Exec command: percent signs there stay literal.
+            self.assertIn(f'Icon={home}/.local/opt/yun/yun.png', entry.read_text())
             if shutil.which("desktop-file-validate"):
                 subprocess.run(["desktop-file-validate", str(entry)], check=True)
 

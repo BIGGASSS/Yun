@@ -447,6 +447,70 @@ void main() {
     expect(engine.opens, 2);
   });
 
+  for (final paused in [false, true]) {
+    test(
+      'recovery preserves position and paused=$paused at load time',
+      () async {
+        await player.playQueue(tracks);
+        if (paused) await player.pause();
+        engine.emit(
+          EngineState(
+            playing: !paused,
+            position: const Duration(seconds: 42),
+            duration: const Duration(seconds: 120),
+          ),
+        );
+        engine.emit(
+          const EngineState(
+            error: 'decoder failed',
+            position: Duration(seconds: 42),
+          ),
+        );
+        await player.flushSettings();
+        expect(engine.opens, 2);
+        expect(player.isPlaying, !paused);
+        expect(player.position, const Duration(seconds: 42));
+        expect(engine.calls, isNot(contains('seek')));
+        expect(player.error, isNull);
+      },
+    );
+  }
+
+  test(
+    'Play retries failed source resolution and restarts accounting',
+    () async {
+      await player.shutdown();
+      player.dispose();
+      engine = FakeEngine();
+      var attempts = 0;
+      final events = <ListeningEvent>[];
+      player = PlaybackController(
+        engine: engine,
+        monotonicMs: () => monotonicMs,
+        enableSystemControls: false,
+        resolveSource: (track, localFirst) async {
+          expect(localFirst, isTrue);
+          if (++attempts <= 2) throw StateError('Offline');
+          return AudioSource('/cache/${track.id}', local: true);
+        },
+      )..configureRecording('device', (event) async => events.add(event));
+      await expectLater(player.playQueue(tracks), throwsStateError);
+      expect(player.currentTrack, tracks.first);
+      expect(engine.opens, 0);
+      await expectLater(player.play(), throwsStateError);
+      expect(player.error, contains('Offline'));
+      monotonicMs += 5000;
+      await player.play();
+      expect(attempts, 3);
+      expect(engine.opens, 1);
+      expect(player.error, isNull);
+      expect(player.isPlaying, isTrue);
+      monotonicMs += 1000;
+      await player.pause();
+      expect(events.single.listenedMs, 1000);
+    },
+  );
+
   test(
     'decoder error plus completion recovers without advancing queue',
     () async {

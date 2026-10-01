@@ -91,6 +91,11 @@ class DownloadProgress {
   );
 }
 
+/// Expected cancellation when an account closes during local transfer work.
+class TransferCancelled extends StateError {
+  TransferCancelled() : super('Account locked');
+}
+
 class TransferService {
   TransferService({
     required this.api,
@@ -138,7 +143,7 @@ class TransferService {
     String path, {
     int maxBytes = defaultMaxUploadBytes,
   }) {
-    if (_closed) return Future.error(StateError('Account locked'));
+    if (_closed) return Future.error(TransferCancelled());
     final operation = _importUpload(id, path, maxBytes);
     _importsRunning.add(operation);
     return operation.whenComplete(() => _importsRunning.remove(operation));
@@ -168,7 +173,7 @@ class TransferService {
       try {
         var copied = 0;
         await for (final chunk in source.openRead()) {
-          if (_closed) throw StateError('Account locked');
+          if (_closed) throw TransferCancelled();
           copied += chunk.length;
           if (copied > maxBytes || copied > before.size) {
             throw StateError('Upload source has changed during import');
@@ -187,7 +192,7 @@ class TransferService {
       } finally {
         await output.close();
       }
-      if (_closed) throw StateError('Account locked');
+      if (_closed) throw TransferCancelled();
       await partial.rename(destination.path);
       final stat = await destination.stat();
       final job = UploadJob(
@@ -198,7 +203,7 @@ class TransferService {
         modifiedAtMs: stat.modified.millisecondsSinceEpoch,
         ownedSource: true,
       );
-      if (_closed) throw StateError('Account locked');
+      if (_closed) throw TransferCancelled();
       await database.put('upload', id, job.toJson());
       committed = true;
       onChanged();
@@ -279,27 +284,29 @@ class TransferService {
       final interrupted =
           saved.status == DownloadStatus.downloading ||
           saved.status == DownloadStatus.verifying;
-      if (interrupted) {
-        // A crash can leave progress behind the committed, verified file. Only
-        // recover completion if that file still matches the current library;
-        // an older revision must not dismiss an interrupted replacement.
+      final needsVerification =
+          interrupted || saved.status == DownloadStatus.downloaded;
+      if (needsVerification) {
+        // Neither persisted progress nor the recorded digest proves that the
+        // bytes still match: files can be truncated or corrupted after commit.
         final trackRecord = await database.get('track', saved.trackId);
         final fileRecord = await database.get('file', saved.trackId);
         if (trackRecord != null && fileRecord != null) {
           final track = Track.fromJson(trackRecord);
-          final stat = await File(fileRecord['path'] as String).stat();
-          if (fileRecord['sha256'] == track.sha256 &&
-              stat.type == FileSystemEntityType.file &&
-              stat.size == track.sizeBytes) {
+          if (await _matchesFile(track, fileRecord)) {
             _downloads[saved.trackId] = DownloadProgress(
               trackId: saved.trackId,
               totalBytes: track.sizeBytes,
               receivedBytes: track.sizeBytes,
               status: DownloadStatus.downloaded,
+              historyCleared: saved.historyCleared && !interrupted,
             );
             await _saveDownload(saved.trackId);
             continue;
           }
+        }
+        if (fileRecord != null) {
+          await _invalidateFile(saved.trackId, fileRecord);
         }
       }
       final partial = File(
@@ -311,16 +318,33 @@ class TransferService {
       _downloads[saved.trackId] = DownloadProgress(
         trackId: saved.trackId,
         totalBytes: saved.totalBytes,
-        receivedBytes: await partial.exists()
-            ? await partial.length()
-            : saved.status == DownloadStatus.downloaded
-            ? saved.totalBytes
-            : 0,
-        status: interrupted ? DownloadStatus.queued : saved.status,
-        error: saved.error,
-        historyCleared: saved.historyCleared && !interrupted,
+        receivedBytes: await partial.exists() ? await partial.length() : 0,
+        status: needsVerification ? DownloadStatus.queued : saved.status,
+        error: needsVerification ? null : saved.error,
+        historyCleared: saved.historyCleared && !needsVerification,
       );
+      if (needsVerification) await _saveDownload(saved.trackId);
     }
+  }
+
+  Future<bool> _matchesFile(Track track, Map<String, dynamic> record) async {
+    if (record['sha256'] != track.sha256) return false;
+    final file = File(record['path'] as String);
+    final stat = await file.stat();
+    if (stat.type != FileSystemEntityType.file ||
+        stat.size != track.sizeBytes) {
+      return false;
+    }
+    return (await sha256.bind(file.openRead()).first).toString() ==
+        track.sha256;
+  }
+
+  Future<void> _invalidateFile(String id, Map<String, dynamic> record) async {
+    // Remove the playable reference before attempting cleanup or replacement.
+    await database.remove('file', id);
+    (onFilesChanged ?? onChanged)();
+    final file = File(record['path'] as String);
+    if (await file.exists()) await file.delete();
   }
 
   bool _progress(
@@ -375,9 +399,7 @@ class TransferService {
           continue;
         }
         final record = await database.get('file', track.id);
-        if (record == null ||
-            record['sha256'] != track.sha256 ||
-            !await File(record['path'] as String).exists()) {
+        if (record == null || !await _matchesFile(track, record)) {
           continue;
         }
         final dismissed = DownloadProgress(
@@ -403,7 +425,7 @@ class TransferService {
 
   final Map<String, CancelToken> _uploadTokens = {};
   final Map<String, Completer<void>> _uploadDone = {};
-  final CancelToken _downloadToken = CancelToken();
+  CancelToken? _downloadToken;
   final Set<String> _cancelled = {};
   bool _closed = false;
   (List<Track>, List<Playlist>, List<PinSelection>)? _nextReconciliation;
@@ -739,20 +761,15 @@ class TransferService {
       if (_closed) break;
       try {
         final record = files[track.id];
-        if (record != null &&
-            record['sha256'] == track.sha256 &&
-            await File(record['path'] as String).exists()) {
+        if (record != null && await _matchesFile(track, record)) {
           if (_progress(track, DownloadStatus.downloaded, track.sizeBytes)) {
             await _saveDownload(track.id);
             await onDownloaded?.call(track);
           }
           continue;
         }
-        // A stale verified record must not expose old audio after a failure.
-        if (record != null) {
-          await database.remove('file', track.id);
-          (onFilesChanged ?? onChanged)();
-        }
+        // A stale or corrupted file must not remain playable after a failure.
+        if (record != null) await _invalidateFile(track.id, record);
         final file = await _download(track);
         await database.put('file', track.id, {
           'id': track.id,
@@ -765,6 +782,8 @@ class TransferService {
         (onFilesChanged ?? onChanged)();
         await onDownloaded?.call(track);
       } catch (e) {
+        // Per-track worker boundary: persist failure for retry and report it,
+        // without preventing independent pinned tracks from downloading.
         final partial = File(
           p.join(directory.path, '${Uri.encodeComponent(track.id)}.audio.part'),
         );
@@ -792,51 +811,58 @@ class TransferService {
     }
     _progress(track, DownloadStatus.downloading, offset);
     await _saveDownload(track.id);
+    if (_closed) throw TransferCancelled();
     if (offset < track.sizeBytes) {
-      final response = await api.request(
-        '/tracks/${track.id}/audio',
-        responseType: ResponseType.stream,
-        headers: offset > 0
-            ? {'Range': 'bytes=$offset-', 'If-Range': '"${track.sha256}"'}
-            : null,
-        cancelToken: _downloadToken,
-      );
-      final etag = response.headers.value('etag');
-      if (etag != null && etag != '"${track.sha256}"') {
-        throw StateError('Audio checksum identity changed; refresh library');
-      }
-      if (response.statusCode == 206) {
-        final range = response.headers.value('content-range');
-        if (range == null || !range.startsWith('bytes $offset-')) {
-          throw StateError('Invalid resume response');
-        }
-      } else if (response.statusCode == 200) {
-        offset = 0;
-      } else {
-        throw StateError('Unexpected download status ${response.statusCode}');
-      }
-      _progress(track, DownloadStatus.downloading, offset);
-      final sink = partial.openWrite(
-        mode: offset > 0 ? FileMode.append : FileMode.write,
-      );
+      final token = CancelToken();
+      _downloadToken = token;
       try {
-        await sink.addStream(
-          (response.data as ResponseBody).stream.map((chunk) {
+        final response = await api.request(
+          '/tracks/${track.id}/audio',
+          responseType: ResponseType.stream,
+          headers: offset > 0
+              ? {'Range': 'bytes=$offset-', 'If-Range': '"${track.sha256}"'}
+              : null,
+          cancelToken: token,
+        );
+        final etag = response.headers.value('etag');
+        if (etag != null && etag != '"${track.sha256}"') {
+          throw StateError('Audio checksum identity changed; refresh library');
+        }
+        if (response.statusCode == 206) {
+          final range = response.headers.value('content-range');
+          if (range == null || !range.startsWith('bytes $offset-')) {
+            throw StateError('Invalid resume response');
+          }
+        } else if (response.statusCode == 200) {
+          offset = 0;
+        } else {
+          throw StateError('Unexpected download status ${response.statusCode}');
+        }
+        _progress(track, DownloadStatus.downloading, offset);
+        final output = await partial.open(
+          mode: offset > 0 ? FileMode.append : FileMode.write,
+        );
+        try {
+          await for (final chunk in (response.data as ResponseBody).stream) {
+            if (chunk.length > track.sizeBytes - offset) {
+              // Cancel before awaiting stream/file cleanup, and never write an
+              // offending chunk. Do not poison subsequent requests or retries.
+              token.cancel('Audio exceeds expected size');
+              throw StateError('Downloaded audio exceeds expected size');
+            }
+            await output.writeFrom(chunk);
             offset += chunk.length;
             _progress(track, DownloadStatus.downloading, offset);
-            return chunk;
-          }),
-        );
-        await sink.flush();
-      } catch (_) {
-        // addStream may already close the sink on a transport error. Preserve
-        // the original failure instead of replacing it with "File closed".
-        try {
-          await sink.close();
-        } catch (_) {}
-        rethrow;
+          }
+          await output.flush();
+        } finally {
+          await output.close();
+        }
+      } finally {
+        // Also release an unread body when headers or local I/O are rejected.
+        token.cancel('Download response closed');
+        _downloadToken = null;
       }
-      await sink.close();
     }
     if (await partial.length() != track.sizeBytes) {
       throw StateError('Incomplete download; retry will resume');
@@ -853,7 +879,7 @@ class TransferService {
 
   Future<void> close() async {
     _closed = true;
-    _downloadToken.cancel('Account locked');
+    _downloadToken?.cancel('Account locked');
     for (final token in _uploadTokens.values) {
       token.cancel('Account locked');
     }

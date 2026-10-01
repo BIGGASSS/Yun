@@ -4,6 +4,15 @@ This document separates implemented automation from executed evidence. A green
 compiler/unit-test run does not certify audio playback, background behavior,
 secure storage, recovery, signing, or third-party redistribution rights.
 
+## Open playback TLS release blocker
+
+The current `tls-verify=yes` change is necessary but insufficient on the pinned
+Android/macOS mbedTLS builds: production roots are missing and numeric-host
+identity checks are skipped. A CA-only patch would not be safe. See the
+[pinned-build investigation and required acceptance gates](PLAYBACK_TLS.md).
+The expanded Linux native TLS fixtures pass locally, but do not certify these
+other backends or production trust-root availability.
+
 ## Tray branding and primary-click follow-up — local only
 
 For integrated code `f5c990e`, local formatting/analysis, **401 Flutter tests**
