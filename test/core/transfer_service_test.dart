@@ -206,11 +206,10 @@ void main() {
 
   for (final corrupt in [
     [1, 2],
-    [4, 3, 2, 1],
     [1, 2, 3, 4, 5],
   ]) {
     test(
-      'reconciliation invalidates corrupt completed bytes $corrupt before retry',
+      'reconciliation rejects wrong-size completed bytes $corrupt before retry',
       () async {
         final bytes = [1, 2, 3, 4];
         final track = Track(

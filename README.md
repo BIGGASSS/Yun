@@ -189,3 +189,25 @@ and [Flutter SDK action's MIT license](.github/actions/flutter-sdk/LICENSE)
 This source-license choice does not complete the binary redistribution review.
 The actual bundled dependencies (including mpv/FFmpeg), notices, and any source
 obligations still require the [release license gates](docs/RELEASE.md#dependencylicense-redistribution-gate).
+
+### Verify downloaded audio
+
+In **Downloads**, choose **Verify downloads** to check existing cached audio
+against its SHA-256 checksum, including older downloads without Activity entries.
+The local-only scan works offline, runs hashing in a background isolate, and shows
+byte progress, checked-file counts and an estimated time remaining once measured
+throughput is available. Cancel stops the scan; checks already completed remain
+applied, and leaving Downloads does not interrupt it.
+
+Startup, ordinary sync and retry passes check recorded identity, file existence
+and size without rehashing the whole library. New and resumed downloads still
+pass full checksum verification before becoming playable. Same-size damage to
+existing files is therefore detected when you explicitly run verification.
+
+Results distinguish valid, invalid and skipped files. Invalid audio is removed
+from playable storage; offline selections are retained. Choose **Redownload
+corrupted files** when connected to repair those files through the normal download
+queue. Verification itself does not redownload anything, and unrepaired failures
+remain held across restarts. Repair preserves existing selections and adds a track
+selection only for a damaged file that had no remaining selection. Unreadable or
+concurrently changed files are skipped so they can be checked again safely.

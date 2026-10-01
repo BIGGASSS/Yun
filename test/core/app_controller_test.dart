@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -10,6 +11,33 @@ import 'package:yun/services/api_client.dart';
 import 'package:yun/services/cache_database.dart';
 
 import 'fakes.dart';
+
+class _GatedPinDatabase extends CacheDatabase {
+  _GatedPinDatabase(super.file);
+
+  Completer<void>? pinWriteStarted, allowPinWrite;
+  bool closed = false;
+
+  @override
+  Future<void> put(String kind, String id, Map<String, dynamic> value) async {
+    if (kind == 'pin' && pinWriteStarted != null) {
+      if (!pinWriteStarted!.isCompleted) pinWriteStarted!.complete();
+      await allowPinWrite!.future;
+    }
+    expect(
+      closed,
+      isFalse,
+      reason: 'Writes must drain before database closure',
+    );
+    await super.put(kind, id, value);
+  }
+
+  @override
+  Future<void> close() async {
+    closed = true;
+    await super.close();
+  }
+}
 
 void main() {
   late Directory root;
@@ -120,7 +148,7 @@ void main() {
 
   for (final contents in ['valid', 'truncated', 'same-length corruption']) {
     test(
-      'startup validates $contents legacy audio without download history',
+      'startup checks only metadata and size for $contents legacy audio',
       () async {
         final directory = await seedAccount();
         final databaseFile = File(p.join(directory.path, 'cache.sqlite'));
@@ -166,7 +194,9 @@ void main() {
           expect(app.isAuthenticated, isTrue);
           expect(app.tracks.single.id, 't');
           expect(app.pins.single.id, 't');
-          final valid = contents == 'valid';
+          // Same-length corruption is intentionally deferred to manual verification.
+          final valid = contents != 'truncated';
+          expect(app.verificationProgress, isNull);
           expect(app.localPath('t'), valid ? file.path : isNull);
           expect(app.downloadedTrackIds, valid ? {'t'} : isEmpty);
           expect(
@@ -176,7 +206,10 @@ void main() {
           if (valid) {
             await app.play(app.tracks.single);
             expect(engine.opened, file.path);
-            expect(await file.readAsBytes(), [1, 2, 3]);
+            expect(
+              await file.readAsBytes(),
+              contents == 'valid' ? [1, 2, 3] : [3, 2, 1],
+            );
           } else {
             expect(publishedPaths, isEmpty);
             expect(await file.exists(), isFalse);
@@ -190,12 +223,243 @@ void main() {
         try {
           expect(
             await persisted.get('file', 't'),
-            contents == 'valid' ? record : isNull,
+            contents != 'truncated' ? record : isNull,
           );
           expect(await persisted.get('pin', 'track:t'), isNotNull);
           expect(await persisted.get('download', 't'), isNull);
         } finally {
           await persisted.close();
+        }
+      },
+    );
+  }
+
+  test(
+    'manual verification detects corruption offline without downloading',
+    () async {
+      final directory = await seedAccount();
+      final file = File(p.join(directory.path, 'offline.audio'));
+      await file.writeAsBytes([3, 2, 1]);
+      var requests = 0;
+      final app = AppController(
+        api: ApiClient(
+          dio: Dio()
+            ..httpClientAdapter = FakeAdapter((options, _) {
+              requests++;
+              throw StateError('Verification must not access the network');
+            }),
+          credentials: credentials,
+        ),
+        storageDirectory: () async => root,
+        playbackEngine: FakeEngine(),
+        enableSystemControls: false,
+        automaticRefresh: false,
+      );
+      try {
+        await app.initialize();
+        app.isOffline = true;
+        expect(app.downloadedTrackIds, {'t'});
+        final states = <VerificationStatus>[];
+        var appNotifications = 0;
+        app.addListener(() => appNotifications++);
+        app.verificationChanges.addListener(() {
+          final progress = app.verificationProgress;
+          if (progress != null) states.add(progress.status);
+        });
+        await app.verifyDownloads();
+        expect(states.first, VerificationStatus.preparing);
+        expect(states.last, VerificationStatus.completed);
+        expect(app.verificationProgress!.checkedFiles, 1);
+        expect(app.verificationProgress!.invalidFiles, 1);
+        expect(app.verificationProgress!.invalidTrackIds, ['t']);
+        expect(app.downloadedTrackIds, isEmpty);
+        expect(app.localPath('t'), isNull);
+        expect(appNotifications, 0);
+        expect(requests, 0);
+        expect(app.isOffline, isTrue);
+        expect(app.redownloadCorruptedFiles, throwsStateError);
+        expect(app.pins, isEmpty);
+      } finally {
+        await app.shutdown();
+        app.dispose();
+      }
+    },
+  );
+
+  test(
+    'explicit repair preserves selections and pins unselected corrupt tracks',
+    () async {
+      final directory = await seedAccount();
+      final db = CacheDatabase(File(p.join(directory.path, 'cache.sqlite')));
+      final original = (await db.get('track', 't'))!;
+      final originalFile = (await db.get('file', 't'))!;
+      final otherFile = await File(p.join(directory.path, 'unselected.audio'))
+          .writeAsBytes([3, 2, 1]);
+      await File(originalFile['path'] as String).writeAsBytes([3, 2, 1]);
+      await db.put('track', 'unselected', {...original, 'id': 'unselected'});
+      await db.put('file', 'unselected', {
+        ...originalFile,
+        'id': 'unselected',
+        'path': otherFile.path,
+      });
+      const playlist = Playlist(
+        id: 'saved',
+        name: 'Offline playlist',
+        entries: [PlaylistEntry(id: 'entry', trackId: 't')],
+      );
+      await db.put('playlist', playlist.id, playlist.toJson());
+      await db.put(
+        'pin',
+        jsonEncode(['playlist', 'saved']),
+        const PinSelection('playlist', 'saved').toJson(),
+      );
+      await db.close();
+      final downloads = <String>[];
+      final app = AppController(
+        api: ApiClient(
+          dio: Dio()
+            ..httpClientAdapter = FakeAdapter((options, _) {
+              if (options.path.endsWith('/auth/refresh')) {
+                return jsonResponse({
+                  'access_token': 'fresh',
+                  'refresh_token': 'fresh-refresh',
+                  'expires_at': DateTime.now().millisecondsSinceEpoch + 3600000,
+                });
+              }
+              if (options.path.endsWith('/audio')) {
+                downloads.add(options.path);
+                return ResponseBody.fromBytes([1, 2, 3], 200);
+              }
+              throw StateError('Unexpected request: ${options.path}');
+            }),
+          credentials: credentials,
+        ),
+        storageDirectory: () async => root,
+        playbackEngine: FakeEngine(),
+        enableSystemControls: false,
+        automaticRefresh: false,
+      );
+      try {
+        await app.initialize();
+        await app.verifyDownloads();
+        expect(app.verificationProgress!.invalidFiles, 2);
+        expect(downloads, isEmpty);
+        expect(app.pins, hasLength(1));
+        final repairing = app.redownloadCorruptedFiles();
+        expect(app.redownloadingCorruptedFiles, isTrue);
+        await repairing;
+        expect(app.redownloadingCorruptedFiles, isFalse);
+        expect(downloads, hasLength(2));
+        expect(app.isPinned('playlist', 'saved'), isTrue);
+        expect(app.isPinned('track', 'unselected'), isTrue);
+        expect(app.isPinned('track', 't'), isFalse);
+        expect(app.pins, hasLength(2));
+      } finally {
+        await app.shutdown();
+        app.dispose();
+      }
+    },
+  );
+
+  for (final closingAction in ['logout', 'shutdown']) {
+    test(
+      '$closingAction cancels verification and hides account progress',
+      () async {
+        await seedAccount();
+        final app = AppController(
+          api: ApiClient(
+            dio: Dio()
+              ..httpClientAdapter = FakeAdapter((options, _) {
+                if (options.path.endsWith('/auth/logout')) {
+                  return jsonResponse({});
+                }
+                throw StateError('Unexpected request');
+              }),
+            credentials: credentials,
+          ),
+          storageDirectory: () async => root,
+          playbackEngine: FakeEngine(),
+          enableSystemControls: false,
+          automaticRefresh: false,
+        );
+        try {
+          await app.initialize();
+          final verification = app.verifyDownloads();
+          expect(app.verificationProgress?.isRunning, isTrue);
+          final closing = closingAction == 'logout'
+              ? app.logout()
+              : app.shutdown();
+          expect(app.verificationProgress, isNull);
+          await Future.wait([verification, closing]);
+          expect(app.isAuthenticated, isFalse);
+          expect(app.verificationProgress, isNull);
+        } finally {
+          await app.shutdown();
+          app.dispose();
+        }
+      },
+    );
+  }
+
+  for (final closingAction in ['logout', 'shutdown']) {
+    test(
+      '$closingAction drains explicit repair pin writes before database closure',
+      () async {
+        final directory = await seedAccount();
+        await File(p.join(directory.path, 'offline.audio'))
+            .writeAsBytes([3, 2, 1]);
+        late _GatedPinDatabase db;
+        var requests = 0;
+        final app = AppController(
+          api: ApiClient(
+            dio: Dio()
+              ..httpClientAdapter = FakeAdapter((options, _) {
+                if (options.path.endsWith('/auth/logout')) {
+                  return jsonResponse({});
+                }
+                if (options.path.endsWith('/auth/refresh')) {
+                  return jsonResponse({
+                    'access_token': 'fresh',
+                    'refresh_token': 'fresh-refresh',
+                    'expires_at':
+                        DateTime.now().millisecondsSinceEpoch + 3600000,
+                  });
+                }
+                requests++;
+                throw StateError('Closing must stop repair before download');
+              }),
+            credentials: credentials,
+          ),
+          storageDirectory: () async => root,
+          databaseFactory: (file) => db = _GatedPinDatabase(file),
+          playbackEngine: FakeEngine(),
+          enableSystemControls: false,
+          automaticRefresh: false,
+        );
+        try {
+          await app.initialize();
+          await app.verifyDownloads();
+          db.pinWriteStarted = Completer<void>();
+          db.allowPinWrite = Completer<void>();
+          final repair = app.redownloadCorruptedFiles();
+          await db.pinWriteStarted!.future;
+          final closing = closingAction == 'logout'
+              ? app.logout()
+              : app.shutdown();
+          expect(app.redownloadingCorruptedFiles, isFalse);
+          expect(db.closed, isFalse);
+          db.allowPinWrite!.complete();
+          await Future.wait([repair, closing]);
+          expect(db.closed, isTrue);
+          expect(app.isAuthenticated, isFalse);
+          expect(app.verificationProgress, isNull);
+          expect(requests, 0);
+        } finally {
+          if (db.allowPinWrite?.isCompleted == false) {
+            db.allowPinWrite!.complete();
+          }
+          await app.shutdown();
+          app.dispose();
         }
       },
     );

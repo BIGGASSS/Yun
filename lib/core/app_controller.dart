@@ -19,6 +19,8 @@ import '../services/transfer_service.dart';
 import 'playback_controller.dart';
 
 export '../models/models.dart';
+export '../services/download_verification.dart'
+    show DownloadVerificationProgress, VerificationStatus;
 export '../services/transfer_service.dart'
     show DownloadProgress, DownloadStatus;
 export 'playback_controller.dart'
@@ -87,10 +89,12 @@ class AppController extends ChangeNotifier {
   int get downloadSectionsRevision =>
       !_locking ? _transfers?.downloadSectionsRevision ?? 0 : 0;
   final ChangeNotifier downloadChanges = ChangeNotifier();
+  // Verification ticks must not rebuild the full download inventory.
+  final ChangeNotifier verificationChanges = ChangeNotifier();
   final ChangeNotifier artworkChanges = ChangeNotifier();
   int pendingEventCount = 0;
   ServerStats? stats;
-  Timer? _retryTimer, _integrityTimer;
+  Timer? _retryTimer, _downloadRetryTimer;
   Future<void>? _initializing, _refreshing, _outboxRunning, _shutdownFuture;
   bool _disposed = false, _locking = false, _notifierDisposed = false;
   bool _shuttingDown = false;
@@ -98,6 +102,8 @@ class AppController extends ChangeNotifier {
   final Set<Future<dynamic>> _onlineOperations = {};
   final Set<Future<void>> _uploadOperations = {};
   final Set<Future<void>> _downloadHistoryOperations = {};
+  final Set<Future<void>> _downloadMaintenanceOperations = {};
+  Future<void>? _redownloadingCorruptedFiles;
   Future<void>? _reloadRunning;
   bool _reloadRequested = false,
       _uploadsRequested = false,
@@ -111,6 +117,12 @@ class AppController extends ChangeNotifier {
   void _notifyDownloads() {
     if (!_disposed && !_notifierDisposed && !_locking) {
       downloadChanges.notifyListeners();
+    }
+  }
+
+  void _notifyVerification() {
+    if (!_disposed && !_notifierDisposed && !_locking && !_shuttingDown) {
+      verificationChanges.notifyListeners();
     }
   }
 
@@ -182,7 +194,7 @@ class AppController extends ChangeNotifier {
         _retryTimer = Timer.periodic(const Duration(seconds: 30), (_) {
           if (isAuthenticated && !_locking) unawaited(_background(refresh()));
         });
-        _integrityTimer = Timer.periodic(const Duration(minutes: 5), (_) {
+        _downloadRetryTimer = Timer.periodic(const Duration(minutes: 5), (_) {
           if (isAuthenticated && !_locking) {
             unawaited(_background(retryDownloads()));
           }
@@ -259,6 +271,9 @@ class AppController extends ChangeNotifier {
       onError: _backgroundError,
       onDownloadChanged: () {
         if (generation == _generation) _notifyDownloads();
+      },
+      onVerificationChanged: () {
+        if (generation == _generation) _notifyVerification();
       },
       onFilesChanged: () {
         if (generation == _generation && !_locking) {
@@ -476,10 +491,13 @@ class AppController extends ChangeNotifier {
       await _transfers?.close();
     });
     await drainingOperations;
-    // History transactions must finish before their database closes. The
+    // History and verification/repair operations must finish before DB closure.
     // cleanup boundary still closes resources, then rethrows any failure.
     await cleanup(() async {
-      await Future.wait(_downloadHistoryOperations);
+      await Future.wait([
+        ..._downloadHistoryOperations,
+        ..._downloadMaintenanceOperations,
+      ]);
     });
     await cleanup(() async {
       await _reloadRunning;
@@ -800,6 +818,96 @@ class AppController extends ChangeNotifier {
       totalBytes: track.sizeBytes,
       status: selected ? DownloadStatus.queued : DownloadStatus.availableOnline,
     );
+  }
+
+  DownloadVerificationProgress? get verificationProgress =>
+      !_locking && !_shuttingDown ? _transfers?.verificationProgress : null;
+
+  bool get redownloadingCorruptedFiles =>
+      !_locking && _redownloadingCorruptedFiles != null;
+
+  /// Explicit local-only integrity check, available without a connection.
+  Future<void> verifyDownloads() {
+    _requireDatabase();
+    final transfers = _transfers!;
+    final generation = _generation;
+    final operation = () async {
+      await transfers.verifyDownloads();
+      if (generation == _generation && !_locking && !_shuttingDown) {
+        await _reloadFiles();
+      }
+    }();
+    _downloadMaintenanceOperations.add(operation);
+    return operation.whenComplete(
+      () => _downloadMaintenanceOperations.remove(operation),
+    );
+  }
+
+  void cancelVerification() {
+    if (!_locking && !_shuttingDown) _transfers?.cancelVerification();
+  }
+
+  /// Repair is a separate, deliberate network action after local verification.
+  Future<void> redownloadCorruptedFiles() {
+    final db = _requireDatabase();
+    if (isOffline) throw StateError('Connect to redownload corrupted files');
+    final running = _redownloadingCorruptedFiles;
+    if (running != null) return running;
+    final progress = verificationProgress;
+    if (progress == null || progress.invalidTrackIds.isEmpty) {
+      return Future.value();
+    }
+    if (progress.isRunning) {
+      throw StateError('Wait for download verification to finish');
+    }
+    final transfers = _transfers!;
+    final generation = _generation;
+    final invalidIds = List<String>.of(progress.invalidTrackIds);
+    final operation = () async {
+      // Preserve existing album/playlist selections. Previously unselected
+      // downloads need a durable track pin so repair can resume after restart.
+      await db.transaction(() async {
+        if (!_canPublish(db) || generation != _generation) return;
+        final currentTracks = (await db.list('track'))
+            .map(Track.fromJson)
+            .toList();
+        final currentPlaylists = (await db.list('playlist'))
+            .map(Playlist.fromJson)
+            .toList();
+        final currentPins = (await db.list('pin'))
+            .map(PinSelection.fromJson)
+            .toList();
+        final knownIds = currentTracks.map((track) => track.id).toSet();
+        final references = pinReferences(
+          currentPins,
+          currentTracks,
+          currentPlaylists,
+        );
+        for (final id in invalidIds) {
+          if (knownIds.contains(id) && !references.containsKey(id)) {
+            await db.put(
+              'pin',
+              jsonEncode(['track', id]),
+              PinSelection('track', id).toJson(),
+            );
+          }
+        }
+      });
+      if (!_canPublish(db) || generation != _generation) return;
+      await _reloadCache();
+      if (!_canPublish(db) || generation != _generation) return;
+      await transfers.redownloadCorruptedFiles(tracks, playlists, pins);
+    }();
+    _redownloadingCorruptedFiles = operation;
+    _downloadMaintenanceOperations.add(operation);
+    _notifyVerification();
+    return operation.whenComplete(() {
+      _downloadMaintenanceOperations.remove(operation);
+      if (identical(_redownloadingCorruptedFiles, operation)) {
+        _redownloadingCorruptedFiles = null;
+      }
+      if (generation == _generation) _notifyVerification();
+    });
   }
 
   Future<void> retryDownloads() async {
@@ -1125,7 +1233,7 @@ class AppController extends ChangeNotifier {
     await drain(_initializing);
     await drain(_accountTransition);
     _retryTimer?.cancel();
-    _integrityTimer?.cancel();
+    _downloadRetryTimer?.cancel();
     await drain(_closeAccount());
     try {
       await playback.shutdown();
@@ -1143,6 +1251,7 @@ class AppController extends ChangeNotifier {
     if (_notifierDisposed) return;
     _notifierDisposed = true;
     downloadChanges.dispose();
+    verificationChanges.dispose();
     artworkChanges.dispose();
     unawaited(
       shutdown().catchError((Object e) {

@@ -17,7 +17,42 @@ class _DownloadsApp extends PlayerTestApp {
   int revision = 0, clearCalls = 0, retryCalls = 0, trackReads = 0;
 
   @override
-  bool get isAuthenticated => true;
+  bool get isAuthenticated => authenticated;
+  bool authenticated = true, offline = false, repairing = false;
+  int verifyCalls = 0, cancelVerificationCalls = 0, repairCalls = 0;
+  DownloadVerificationProgress? verification;
+
+  @override
+  bool get isOffline => offline;
+  @override
+  DownloadVerificationProgress? get verificationProgress => verification;
+  @override
+  bool get redownloadingCorruptedFiles => repairing;
+
+  void setVerification(DownloadVerificationProgress value) {
+    verification = value;
+    verificationChanges.notifyListeners();
+  }
+
+  @override
+  Future<void> verifyDownloads() async {
+    verifyCalls++;
+    setVerification(_verification(VerificationStatus.preparing));
+  }
+
+  @override
+  void cancelVerification() {
+    cancelVerificationCalls++;
+    setVerification(_verification(VerificationStatus.cancelled));
+  }
+
+  @override
+  Future<void> redownloadCorruptedFiles() async {
+    repairCalls++;
+    repairing = true;
+    verificationChanges.notifyListeners();
+  }
+
   @override
   List<Track> get tracks => library;
   @override
@@ -99,6 +134,29 @@ class _DownloadsApp extends PlayerTestApp {
     }
   }
 }
+
+DownloadVerificationProgress _verification(
+  VerificationStatus status, {
+  int total = 4,
+  int checked = 2,
+  int valid = 1,
+  int invalid = 1,
+  int skipped = 0,
+  String? error,
+}) => DownloadVerificationProgress(
+  status: status,
+  totalFiles: total,
+  checkedFiles: checked,
+  validFiles: valid,
+  invalidFiles: invalid,
+  skippedFiles: skipped,
+  processedBytes: checked * 100,
+  totalBytes: total * 100,
+  hashedBytes: checked * 100,
+  elapsed: const Duration(seconds: 2),
+  invalidTrackIds: invalid > 0 ? const ['done'] : const [],
+  error: error,
+);
 
 void main() {
   _DownloadsApp? openApp;
@@ -352,4 +410,201 @@ void main() {
     await tester.pumpAndSettle();
     expect(tester.takeException(), isNull);
   });
+
+  Finder verifyButton() =>
+      find.widgetWithText(OutlinedButton, 'Verify downloads');
+  Finder repairButton() =>
+      find.widgetWithText(OutlinedButton, 'Redownload corrupted files');
+
+  downloadsTest('verification works offline and cannot be started twice', (
+    tester,
+  ) async {
+    final app = await open(tester);
+    app.offline = true;
+    app.notifyListeners();
+    await tester.pump();
+    expect(tester.widget<OutlinedButton>(verifyButton()).onPressed, isNotNull);
+    await tester.tap(verifyButton());
+    await tester.pump();
+    expect(app.verifyCalls, 1);
+    expect(find.text('Preparing download verification…'), findsOneWidget);
+    expect(
+      find.text('Finding downloaded files on this device'),
+      findsOneWidget,
+    );
+    expect(tester.widget<OutlinedButton>(verifyButton()).onPressed, isNull);
+    await tester.tap(verifyButton());
+    await tester.pump();
+    expect(app.verifyCalls, 1);
+    await tester.tap(find.text('Cancel verification'));
+    await tester.pumpAndSettle();
+    expect(app.cancelVerificationCalls, 1);
+    expect(find.text('Verification cancelled'), findsOneWidget);
+    expect(find.text('Cancel verification'), findsNothing);
+    expect(tester.widget<OutlinedButton>(verifyButton()).onPressed, isNotNull);
+    await tester.tap(verifyButton());
+    await tester.pump();
+    expect(app.verifyCalls, 2);
+    expect(tester.takeException(), isNull);
+  });
+
+  downloadsTest(
+    'verification ticks show progress and ETA without rebuilding rows',
+    (tester) async {
+      final app = await open(tester);
+      final scroll = tester.widget<CustomScrollView>(
+        find.byKey(const PageStorageKey('download-activity')),
+      );
+      app.setVerification(_verification(VerificationStatus.running));
+      await tester.pump();
+      expect(find.text('Verifying downloads'), findsOneWidget);
+      expect(
+        find.text('2 of 4 files checked · 1 valid · 1 invalid'),
+        findsOneWidget,
+      );
+      expect(
+        find.text('200 B of 400 B · About 0:02 remaining'),
+        findsOneWidget,
+      );
+      final indicator = tester.widget<LinearProgressIndicator>(
+        find.byWidgetPredicate(
+          (widget) =>
+              widget is LinearProgressIndicator &&
+              widget.semanticsLabel?.startsWith('Download verification') ==
+                  true,
+        ),
+      );
+      expect(indicator.value, 0.5);
+      expect(
+        identical(
+          tester.widget(find.byKey(const PageStorageKey('download-activity'))),
+          scroll,
+        ),
+        isTrue,
+      );
+      app.setVerification(
+        _verification(VerificationStatus.running, checked: 3),
+      );
+      await tester.pump();
+      expect(
+        identical(
+          tester.widget(find.byKey(const PageStorageKey('download-activity'))),
+          scroll,
+        ),
+        isTrue,
+      );
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  downloadsTest(
+    'result survives navigation and repairs require an explicit online action',
+    (tester) async {
+      final app = await open(tester);
+      app.offline = true;
+      app.setVerification(
+        _verification(VerificationStatus.completed, checked: 4, valid: 3),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('Verification complete'), findsOneWidget);
+      expect(app.repairCalls, 0);
+      expect(tester.widget<OutlinedButton>(repairButton()).onPressed, isNull);
+      expect(
+        find.text('Connect to redownload corrupted files'),
+        findsOneWidget,
+      );
+      await tester.pumpWidget(const MaterialApp(home: Text('Other screen')));
+      await tester.pumpAndSettle();
+      await open(tester, initialApp: app);
+      expect(find.text('Verification complete'), findsOneWidget);
+      expect(
+        find.text('4 of 4 files checked · 3 valid · 1 invalid'),
+        findsOneWidget,
+      );
+      app.offline = false;
+      app.notifyListeners();
+      await tester.pumpAndSettle();
+      await tester.tap(repairButton());
+      await tester.pumpAndSettle();
+      expect(app.repairCalls, 1);
+      expect(find.text('Redownloading…'), findsOneWidget);
+      expect(tester.widget<OutlinedButton>(verifyButton()).onPressed, isNull);
+      expect(
+        tester
+            .widget<OutlinedButton>(
+              find.widgetWithText(OutlinedButton, 'Redownloading…'),
+            )
+            .onPressed,
+        isNull,
+      );
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  downloadsTest(
+    'empty and failed verification remain readable and signed-out action is disabled',
+    (tester) async {
+      final app = await open(tester);
+      app.setVerification(
+        _verification(
+          VerificationStatus.completed,
+          total: 0,
+          checked: 0,
+          valid: 0,
+          invalid: 0,
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('No downloaded files to verify'), findsOneWidget);
+      expect(repairButton(), findsNothing);
+      app.setVerification(
+        _verification(
+          VerificationStatus.failed,
+          skipped: 1,
+          error: 'Storage unavailable',
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('Verification failed'), findsOneWidget);
+      expect(find.text('Storage unavailable'), findsOneWidget);
+      expect(find.textContaining('1 skipped'), findsOneWidget);
+      expect(
+        find.text(
+          'Skipped files could not be read or changed during the check',
+        ),
+        findsOneWidget,
+      );
+      app.authenticated = false;
+      app.notifyListeners();
+      await tester.pumpAndSettle();
+      expect(tester.widget<OutlinedButton>(verifyButton()).onPressed, isNull);
+      expect(find.text('Verification failed'), findsNothing);
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  for (final settings in [
+    (const Size(320, 568), 1.0),
+    (const Size(320, 1000), 2.0),
+  ]) {
+    downloadsTest(
+      'verification fits ${settings.$1} at text scale ${settings.$2}',
+      (tester) async {
+        final app = await open(
+          tester,
+          size: settings.$1,
+          textScale: settings.$2,
+        );
+        app.setVerification(_verification(VerificationStatus.running));
+        await tester.pump();
+        expect(tester.takeException(), isNull);
+        app.setVerification(
+          _verification(VerificationStatus.completed, checked: 4, valid: 3),
+        );
+        await tester.pumpAndSettle();
+        expect(find.text('Redownload corrupted files'), findsOneWidget);
+        expect(tester.takeException(), isNull);
+      },
+    );
+  }
 }
