@@ -1,4 +1,6 @@
 import 'dart:async';
+import 'dart:convert';
+import 'dart:io';
 import 'dart:math' as math;
 
 import 'package:audio_session/audio_session.dart';
@@ -25,6 +27,329 @@ void main() {
     await session.interruptions.close();
     await session.noisy.close();
   });
+
+  for (final scheme in ['http', 'https']) {
+    test(
+      '$scheme credentials and upstream URI never reach native open',
+      () async {
+        player.onOpen = () {
+          expect(player.platform.properties['tls-verify'], 'yes');
+          final uri = Uri.parse(player.opened!);
+          expect(uri.scheme, 'http');
+          expect(uri.host, InternetAddress.loopbackIPv4.address);
+          expect(uri.userInfo, isEmpty);
+          expect(uri.query, isEmpty);
+          expect(player.media!.httpHeaders, isNull);
+          expect(player.opened, isNot(contains('secret')));
+          expect(player.opened, isNot(contains('yun.test')));
+        };
+        await engine.open(
+          '$scheme://user:secret@yun.test/audio?token=secret',
+          headers: {
+            'Authorization': 'Bearer secret',
+            'Cookie': 'session=secret',
+          },
+        );
+        expect(player.opens, 1);
+      },
+    );
+  }
+
+  test(
+    'fake native open reads authenticated range through real HTTP',
+    () async {
+      final requests = <HttpRequest>[];
+      final upstream = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      addTearDown(() => upstream.close(force: true));
+      upstream.listen((request) {
+        requests.add(request);
+        expect(request.uri.path, '/audio');
+        expect(request.uri.queryParameters['token'], 'secret');
+        expect(request.headers.value('authorization'), 'Bearer secret');
+        expect(request.headers.value('cookie'), 'session=secret');
+        expect(request.headers.value('range'), 'bytes=2-5');
+        expect(request.headers.value('if-range'), '"version"');
+        request.response.statusCode = HttpStatus.partialContent;
+        request.response.headers.set('content-range', 'bytes 2-5/8');
+        request.response.write('2345');
+        unawaited(request.response.close());
+      });
+      var clients = 0;
+      await engine.dispose();
+      player = TestPlayer();
+      engine = MediaKitEngine(
+        createPlayer: () async => player,
+        loadSession: () async => session,
+        createHttpClient: () {
+          clients++;
+          return HttpClient(context: SecurityContext());
+        },
+      );
+      player.onOpen = () async {
+        expect(player.media!.httpHeaders, isNull);
+        final response = await readNative(
+          player.opened!,
+          headers: {'Range': 'bytes=2-5', 'If-Range': '"version"'},
+        );
+        expect(response.status, HttpStatus.partialContent);
+        expect(response.body, '2345');
+        expect(response.range, 'bytes 2-5/8');
+      };
+      await engine.open(
+        'http://127.0.0.1:${upstream.port}/audio?token=secret',
+        headers: {'Authorization': 'Bearer secret', 'Cookie': 'session=secret'},
+        start: const Duration(seconds: 12),
+        play: false,
+      );
+      expect(requests, hasLength(1));
+      expect(clients, 1);
+      expect(player.media!.start, const Duration(seconds: 12));
+      expect(player.state.playing, isFalse);
+      expect(player.seeks, 0);
+    },
+  );
+
+  test('pause, resume and seek preserve an established relay', () async {
+    final upstream = await serveAudio();
+    addTearDown(() => upstream.close(force: true));
+    await engine.open('http://127.0.0.1:${upstream.port}/audio');
+    final uri = player.opened!;
+    await engine.pause();
+    expect((await readNative(uri)).body, 'audio');
+    await engine.play();
+    await engine.seek(const Duration(seconds: 30));
+    expect(player.opened, uri);
+    expect((await readNative(uri)).body, 'audio');
+    expect(player.seeks, 1);
+    await engine.stop();
+    await expectLater(readNative(uri), throwsA(isA<SocketException>()));
+  });
+
+  for (final action in ['stop', 'dispose', 'replace', 'failed open']) {
+    test('$action closes the relay capability', () async {
+      final upstream = await serveAudio();
+      addTearDown(() => upstream.close(force: true));
+      final source = 'http://127.0.0.1:${upstream.port}/audio';
+      if (action == 'failed open') {
+        player.onOpen = () => throw StateError('Open failed');
+        await expectLater(engine.open(source), throwsStateError);
+      } else {
+        await engine.open(source);
+      }
+      final uri = player.opened!;
+      switch (action) {
+        case 'stop':
+          await engine.stop();
+        case 'dispose':
+          await engine.dispose();
+        case 'replace':
+          await engine.open(source);
+          expect(player.opened, isNot(uri));
+          expect((await readNative(player.opened!)).body, 'audio');
+        case 'failed open':
+          break;
+      }
+      await expectLater(readNative(uri), throwsA(isA<SocketException>()));
+    });
+  }
+
+  for (final action in ['pause', 'stop', 'dispose', 'replace']) {
+    test('$action closes relay while native open is pending', () async {
+      final upstream = await serveAudio();
+      addTearDown(() => upstream.close(force: true));
+      final entered = Completer<void>();
+      final finish = Completer<void>();
+      player.onOpen = () {
+        entered.complete();
+        return finish.future;
+      };
+      final opening = engine.open('http://127.0.0.1:${upstream.port}/audio');
+      await entered.future;
+      final uri = player.opened!;
+      player.onOpen = null;
+      switch (action) {
+        case 'pause':
+          await engine.pause();
+        case 'stop':
+          await engine.stop();
+        case 'dispose':
+          await engine.dispose();
+        case 'replace':
+          await engine.open('/cache/new.audio');
+      }
+      await expectLater(readNative(uri), throwsA(isA<SocketException>()));
+      finish.complete();
+      await opening;
+    });
+
+    test(
+      '$action cancels open awaiting focus without stale relay errors',
+      () async {
+        final states = <EngineState>[];
+        final subscription = engine.states.listen(states.add);
+        addTearDown(subscription.cancel);
+        final focused = Completer<void>();
+        session.activation = Completer<bool>();
+        session.onActivate = () => focused.complete();
+        final opening = engine.open(
+          'https://user:secret@yun.test/audio?secret',
+        );
+        await focused.future;
+        session.onActivate = null;
+        switch (action) {
+          case 'pause':
+            await engine.pause();
+          case 'stop':
+            await engine.stop();
+          case 'dispose':
+            await engine.dispose();
+          case 'replace':
+            await engine.open('/cache/new.audio', play: false);
+        }
+        session.activation!.complete(true);
+        await opening;
+        expect(player.opens, action == 'replace' ? 1 : 0);
+        expect(states.where((state) => state.error != null), isEmpty);
+      },
+    );
+  }
+
+  test('focus denial closes pending relay and allows another open', () async {
+    session.activation = Completer<bool>()..complete(false);
+    await expectLater(engine.open('https://yun.test/audio'), throwsStateError);
+    expect(player.opens, 0);
+    session.activation = null;
+    await engine.open('/cache/new.audio');
+    expect(player.opens, 1);
+  });
+
+  test('relay errors are sanitized and scoped to the current source', () async {
+    await engine.dispose();
+    player = TestPlayer();
+    engine = MediaKitEngine(
+      createPlayer: () async => player,
+      loadSession: () async => session,
+      createHttpClient: () =>
+          throw const HttpException('secret upstream credentials'),
+    );
+    final errors = <String>[];
+    final subscription = engine.states.listen((state) {
+      if (state.error != null) errors.add(state.error!);
+    });
+    addTearDown(subscription.cancel);
+    await engine.open('https://user:secret@yun.test/audio?token=secret');
+    await readNative(player.opened!);
+    expect(errors, ['Unable to load audio from the server.']);
+    expect(errors.single, isNot(contains('secret')));
+    await engine.open('/cache/local.audio');
+    await Future<void>.delayed(Duration.zero);
+    expect(errors, hasLength(1));
+  });
+
+  test('switching cancels in-flight HTTP without stale errors', () async {
+    final upstream = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    addTearDown(() => upstream.close(force: true));
+    final received = Completer<HttpRequest>();
+    upstream.listen(received.complete);
+    final errors = <String>[];
+    final subscription = engine.states.listen((state) {
+      if (state.error != null) errors.add(state.error!);
+    });
+    addTearDown(subscription.cancel);
+    await engine.open('http://127.0.0.1:${upstream.port}/secret');
+    final reading = readNative(player.opened!);
+    // Cancellation can close HTTP before its response headers arrive.
+    final cancelled = expectLater(reading, throwsA(isA<HttpException>()));
+    await received.future;
+    await engine.open('/cache/local.audio');
+    await cancelled;
+    await Future<void>.delayed(Duration.zero);
+    expect(errors, isEmpty);
+  });
+
+  test('pause/stop/dispose safely cancel binds before native open', () async {
+    for (final cancel in ['pause', 'stop', 'dispose']) {
+      for (var ticks = 0; ticks < 5; ticks++) {
+        final candidatePlayer = TestPlayer();
+        final candidateSession = TestSession()..activation = Completer<bool>();
+        final candidate = MediaKitEngine(
+          createPlayer: () async => candidatePlayer,
+          loadSession: () async => candidateSession,
+        );
+        await candidate.initialize();
+        final opening = candidate.open('https://yun.test/audio');
+        for (var i = 0; i < ticks; i++) {
+          await Future<void>.value();
+        }
+        switch (cancel) {
+          case 'pause':
+            await candidate.pause();
+          case 'stop':
+            await candidate.stop();
+          case 'dispose':
+            await candidate.dispose();
+        }
+        candidateSession.activation!.complete(true);
+        await opening;
+        expect(candidatePlayer.opens, 0);
+        await candidate.dispose();
+        await candidateSession.interruptions.close();
+        await candidateSession.noisy.close();
+      }
+    }
+  });
+
+  for (final path in [
+    '/cache/audio',
+    'file:///cache/audio',
+    'content://audio/1',
+  ]) {
+    test('local source $path is passed through unchanged', () async {
+      await engine.open(path, start: const Duration(seconds: 7), play: false);
+      expect(player.opened, Media(path).uri);
+      expect(player.media!.start, const Duration(seconds: 7));
+      expect(player.state.playing, isFalse);
+    });
+  }
+
+  test(
+    'TLS configuration failure blocks open, disposes and permits retry',
+    () async {
+      player.platform.rejectTls = true;
+      await expectLater(
+        engine.open(
+          'https://yun.test/audio',
+          headers: {'Authorization': 'Bearer secret'},
+        ),
+        throwsStateError,
+      );
+      expect(player.opens, 0);
+      expect(player.disposed, isTrue);
+      expect(session.configurations, 0);
+      player = TestPlayer();
+      await engine.open('https://yun.test/audio');
+      expect(player.opens, 1);
+      expect(player.platform.properties['tls-verify'], 'yes');
+    },
+  );
+
+  test(
+    'paused open supplies load-time position without focus or seek',
+    () async {
+      await engine.open(
+        'https://yun.test/audio',
+        play: false,
+        start: const Duration(seconds: 42),
+      );
+      expect(player.media!.start, const Duration(seconds: 42));
+      expect(player.state.playing, isFalse);
+      expect(player.seeks, 0);
+      expect(session.activations, [false]);
+      await engine.open('/cache/next.audio');
+      expect(player.media!.start, Duration.zero);
+      expect(player.state.playing, isTrue);
+    },
+  );
 
   for (final uri in ['/cache/download.audio', 'file:///cache/download.audio']) {
     test(
@@ -125,6 +450,34 @@ void main() {
     },
   );
 
+  test('Play resolves and reopens after native open fails', () async {
+    var resolutions = 0;
+    final playback = PlaybackController(
+      engine: engine,
+      enableSystemControls: false,
+      resolveSource: (_, _) async {
+        resolutions++;
+        return const AudioSource('https://yun.test/audio');
+      },
+    );
+    addTearDown(() async {
+      await playback.shutdown();
+      playback.dispose();
+    });
+    player.onOpen = () => throw StateError('Open failed');
+    await expectLater(
+      playback.playQueue([const yun.Track(id: 'a', title: 'A')]),
+      throwsStateError,
+    );
+    expect(playback.error, contains('Open failed'));
+    player.onOpen = null;
+    await playback.play();
+    expect(resolutions, 2);
+    expect(player.opens, 2);
+    expect(playback.isPlaying, isTrue);
+    expect(playback.error, isNull);
+  });
+
   test('local file and decoder errors still reach playback recovery', () async {
     final playback = PlaybackController(
       engine: engine,
@@ -141,7 +494,8 @@ void main() {
     player.stream.errors.add('Failed to decode audio');
     await playback.flushSettings();
     expect(player.opens, 2);
-    expect(player.opened, 'https://yun.test/audio');
+    expect(Uri.parse(player.opened!).host, '127.0.0.1');
+    expect(player.media!.httpHeaders, isNull);
     expect(playback.isPlaying, isTrue);
   });
 
@@ -365,21 +719,56 @@ void main() {
   });
 }
 
+Future<HttpServer> serveAudio() async {
+  final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+  server.listen((request) {
+    request.response.write('audio');
+    unawaited(request.response.close());
+  });
+  return server;
+}
+
+Future<({int status, String body, String? range})> readNative(
+  String uri, {
+  Map<String, String> headers = const {},
+}) async {
+  final client = HttpClient()..connectionTimeout = const Duration(seconds: 2);
+  try {
+    final request = await client.getUrl(Uri.parse(uri));
+    headers.forEach(request.headers.set);
+    final response = await request.close().timeout(const Duration(seconds: 2));
+    final body = await response.transform(utf8.decoder).join();
+    return (
+      status: response.statusCode,
+      body: body,
+      range: response.headers.value('content-range'),
+    );
+  } finally {
+    client.close(force: true);
+  }
+}
+
 class TestPlayer implements Player {
+  @override
+  final TestNativePlayer platform = TestNativePlayer();
+  Media? media;
+  int seeks = 0;
   @override
   PlayerState state = const PlayerState();
   @override
   final TestPlayerStream stream = TestPlayerStream();
   int plays = 0, opens = 0, stops = 0;
   String? opened;
-  void Function()? onOpen;
+  FutureOr<void> Function()? onOpen;
   bool disposed = false, failVolume = false;
   final volumeCalls = <double>[];
   @override
   Future<void> open(Playable playable, {bool play = true}) async {
-    opened = (playable as Media).uri;
+    media = playable as Media;
+    opened = media!.uri;
     opens++;
-    onOpen?.call();
+    await onOpen?.call();
+    if (disposed) return;
     state = state.copyWith(
       playing: play,
       duration: const Duration(seconds: 120),
@@ -415,6 +804,7 @@ class TestPlayer implements Player {
 
   @override
   Future<void> seek(Duration position) async {
+    seeks++;
     state = state.copyWith(position: position);
   }
 
@@ -423,6 +813,29 @@ class TestPlayer implements Player {
     disposed = true;
     await stream.close();
   }
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
+
+class TestNativePlayer implements NativePlayer {
+  final properties = <String, String>{};
+  bool rejectTls = false;
+
+  @override
+  Future<void> setProperty(
+    String property,
+    String value, {
+    bool waitForInitialization = true,
+  }) async {
+    if (!rejectTls) properties[property] = value;
+  }
+
+  @override
+  Future<String> getProperty(
+    String property, {
+    bool waitForInitialization = true,
+  }) async => properties[property] ?? '';
 
   @override
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
@@ -460,6 +873,7 @@ class TestSession implements AudioSession {
   bool failConfiguration = false;
   int configurations = 0;
   Completer<bool>? activation;
+  void Function()? onActivate;
   final activations = <bool>[];
   @override
   Stream<AudioInterruptionEvent> get interruptionEventStream =>
@@ -483,6 +897,7 @@ class TestSession implements AudioSession {
         const AudioSessionConfiguration.music(),
   }) async {
     activations.add(active);
+    if (active) onActivate?.call();
     return active && activation != null ? activation!.future : true;
   }
 

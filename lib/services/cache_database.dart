@@ -90,25 +90,115 @@ class CacheDatabase extends GeneratedDatabase {
 
   Future<int?> get cursor async =>
       (await get('meta', 'cursor'))?['value'] as int?;
-  Future<void> applyLibrary(Map<String, dynamic> response) =>
-      transaction(() async {
-        if (response['reset'] == true) {
-          await customStatement(
-            "DELETE FROM documents WHERE kind IN ('track','playlist')",
-          );
+
+  Future<int> get deletionSequence async =>
+      (await get('meta', 'deletion_sequence'))?['value'] as int? ?? 0;
+
+  /// A lower-cursor authoritative reset starts a new, incomparable timeline.
+  /// Capture this before sending a mutation, not when its response arrives.
+  Future<int> get libraryEpoch async =>
+      (await get('meta', 'library_epoch'))?['value'] as int? ?? 0;
+
+  /// Mutation revisions share the library's global revision sequence. Compare
+  /// inside the same transaction as the write: a sync may have committed while
+  /// the HTTP response was in flight, including a tombstone for this ID.
+  Future<bool> publishLibraryRecord(
+    String kind,
+    Map<String, dynamic> record, {
+    required int expectedEpoch,
+  }) => transaction(() async {
+    if (expectedEpoch != await libraryEpoch) return false;
+    final id = record['id'] as String;
+    final revision = record['revision'] as int;
+    final current = await get(kind, id);
+    if (revision <= (await cursor ?? -1) ||
+        revision <= (current?['revision'] as num? ?? -1) ||
+        await get('deleted_$kind', id) != null) {
+      return false;
+    }
+    await put(kind, id, record);
+    return true;
+  });
+
+  /// DELETE responses have no revision. Keep a durable local barrier until a
+  /// snapshot confirms absence; an older staged snapshot must not resurrect it.
+  Future<bool> deleteLibraryRecord(
+    String kind,
+    String id, {
+    required int expectedEpoch,
+  }) => transaction(() async {
+    if (expectedEpoch != await libraryEpoch) return false;
+    final sequence = await deletionSequence + 1;
+    await put('meta', 'deletion_sequence', {'value': sequence});
+    await put('deleted_$kind', id, {'id': id, 'sequence': sequence});
+    await remove(kind, id);
+    return true;
+  });
+
+  /// [confirmedDeletionSequence] is captured before requesting this snapshot,
+  /// so it cannot clear barriers created while the request was in flight.
+  Future<void> applyLibrary(
+    Map<String, dynamic> response, {
+    int confirmedDeletionSequence = 0,
+  }) => transaction(() async {
+    final cursor = response['cursor'] as int;
+    if (cursor < (await this.cursor ?? -1)) {
+      if (response['reset'] != true) {
+        throw const FormatException('Library cursor moved backwards');
+      }
+      // Revisions and deletion barriers from the old timeline are no longer
+      // comparable. Replace them atomically, retaining local-only documents.
+      await put('meta', 'library_epoch', {'value': await libraryEpoch + 1});
+      await customStatement(
+        "DELETE FROM documents WHERE kind IN ('track','playlist','deleted_track','deleted_playlist')",
+      );
+    }
+    for (final key in ['track', 'playlist']) {
+      final incomingIds = <String>{};
+      for (final dynamic value in response['${key}s'] as List? ?? []) {
+        final j = Map<String, dynamic>.from(value as Map);
+        // Validate the complete model before committing its JSON and cursor.
+        // Keep the original document so unknown fields survive caching.
+        final id = key == 'track'
+            ? Track.fromJson(j).id
+            : Playlist.fromJson(j).id;
+        incomingIds.add(id);
+        final current = await get(key, id);
+        if ((current?['revision'] as num? ?? -1) <=
+                (j['revision'] as num? ?? 0) &&
+            await get('deleted_$key', id) == null) {
+          await put(key, id, j);
         }
-        for (final key in ['track', 'playlist']) {
-          for (final dynamic value in response['${key}s'] as List? ?? []) {
-            final j = Map<String, dynamic>.from(value as Map);
-            await put(key, j['id'] as String, j);
-          }
-          for (final dynamic id
-              in response['deleted_${key}_ids'] as List? ?? []) {
-            await remove(key, id as String);
+      }
+      if (response['reset'] == true) {
+        // Keep mutations committed after this snapshot was taken.
+        for (final current in await list(key)) {
+          if (!incomingIds.contains(current['id']) &&
+              (current['revision'] as num? ?? 0) <= cursor) {
+            await remove(key, current['id'] as String);
           }
         }
-        await put('meta', 'cursor', {'value': response['cursor']});
-      });
+        for (final deleted in await list('deleted_$key')) {
+          if (!incomingIds.contains(deleted['id']) &&
+              (deleted['sequence'] as int) <= confirmedDeletionSequence) {
+            await remove('deleted_$key', deleted['id'] as String);
+          }
+        }
+      }
+      for (final dynamic id in response['deleted_${key}_ids'] as List? ?? []) {
+        final current = await get(key, id as String);
+        if ((current?['revision'] as num? ?? -1) <= cursor) {
+          await remove(key, id);
+        }
+        final deleted = await get('deleted_$key', id);
+        if (deleted != null &&
+            (deleted['sequence'] as int) <= confirmedDeletionSequence) {
+          await remove('deleted_$key', id);
+        }
+      }
+    }
+    await put('meta', 'cursor', {'value': cursor});
+  });
   Future<void> enqueueEvent(ListeningEvent event) =>
       put('event', event.id, event.toJson());
   Future<void> acknowledgeEvents(Iterable<String> ids) => transaction(() async {

@@ -4,6 +4,19 @@ This document separates implemented automation from executed evidence. A green
 compiler/unit-test run does not certify audio playback, background behavior,
 secure storage, recovery, signing, or third-party redistribution rights.
 
+## Playback TLS: Dart-owned streaming
+
+Finding 1 is implemented through a verifying Dart HTTP relay, not a native
+library upgrade. The native player receives a credential-free loopback URL;
+Dart owns the fixed upstream URL, token, TLS verification, range requests,
+backpressure and cancellation. Redirects fail closed. macOS Release now grants
+the loopback-listener entitlement. See [architecture and tests](PLAYBACK_TLS.md).
+
+Real TLS fixtures and Linux libmpv integration cover the authenticated relay
+path. Package-build CI is not signed-device certification: still run the
+macOS sandbox and Android runtime acceptance checks below, including trusted
+public roots, invalid DNS/IP certificates, seeking and background playback.
+
 ## Tray branding and primary-click follow-up — local only
 
 For integrated code `f5c990e`, local formatting/analysis, **401 Flutter tests**

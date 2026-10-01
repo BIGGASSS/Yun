@@ -206,7 +206,11 @@ void main() {
     },
   );
 
-  for (final status in [DownloadStatus.downloading, DownloadStatus.verifying]) {
+  for (final status in [
+    DownloadStatus.downloading,
+    DownloadStatus.verifying,
+    DownloadStatus.downloaded,
+  ]) {
     test('$status restores completed from a committed verified file', () async {
       final file = await File('${root.path}/t.audio').writeAsBytes(bytes);
       await db.put('track', track.id, track.toJson());
@@ -250,6 +254,7 @@ void main() {
       'missing track',
       'older revision',
       'truncated file',
+      'same-length corruption',
       'not a file',
     ]) {
       test(
@@ -258,7 +263,11 @@ void main() {
           final file = File('${root.path}/t.audio');
           if (invalid != 'missing file') {
             await file.writeAsBytes(
-              invalid == 'truncated file' ? bytes.take(50).toList() : bytes,
+              invalid == 'truncated file'
+                  ? bytes.take(50).toList()
+                  : invalid == 'same-length corruption'
+                  ? bytes.reversed.toList()
+                  : bytes,
             );
           }
           if (invalid != 'missing track') {
@@ -279,6 +288,7 @@ void main() {
               totalBytes: track.sizeBytes,
               receivedBytes: 20,
               status: status,
+              historyCleared: status == DownloadStatus.downloaded,
             ).toJson(),
           );
           await File('${root.path}/t.audio.part')
@@ -288,15 +298,65 @@ void main() {
           expect(restored.status, DownloadStatus.queued);
           expect(restored.receivedBytes, 40);
           expect(restored.historyCleared, isFalse);
+          expect(await db.get('file', track.id), isNull);
+          if (invalid != 'missing record' && invalid != 'not a file') {
+            expect(await file.exists(), isFalse);
+          }
+          expect((await db.get('download', track.id))!['status'], 'queued');
           await transfers.clearDoneDownloads([track]);
           expect(transfers.progressFor(track.id), same(restored));
           expect(
             (await db.get('download', track.id))!['history_cleared'],
             isFalse,
           );
+          api.dio.httpClientAdapter = FakeAdapter((options, _) {
+            expect(options.headers['Range'], 'bytes=40-');
+            return ResponseBody.fromBytes(
+              bytes.sublist(40),
+              206,
+              headers: {
+                'content-range': ['bytes 40-99/100'],
+              },
+            );
+          });
+          await transfers.reconcile([track], [], pins);
+          expect(
+            transfers.progressFor(track.id)!.status,
+            DownloadStatus.downloaded,
+          );
+          expect(await file.readAsBytes(), bytes);
+          expect(await db.get('file', track.id), isNotNull);
         },
       );
     }
+  }
+
+  for (final status in [DownloadStatus.queued, DownloadStatus.failed]) {
+    test(
+      'startup invalidates corrupt cached audio with $status activity',
+      () async {
+        final file = await File('${root.path}/t.audio')
+            .writeAsBytes(bytes.reversed.toList());
+        await db.put('track', track.id, track.toJson());
+        await db.put('file', track.id, {
+          'id': track.id,
+          'path': file.path,
+          'sha256': track.sha256,
+        });
+        final saved = DownloadProgress(
+          trackId: track.id,
+          totalBytes: track.sizeBytes,
+          status: status,
+          error: status == DownloadStatus.failed ? 'connection lost' : null,
+        );
+        await db.put('download', track.id, saved.toJson());
+        await transfers.restoreDownloads();
+        expect(await db.get('file', track.id), isNull);
+        expect(await file.exists(), isFalse);
+        expect(transfers.progressFor(track.id)!.toJson(), saved.toJson());
+        expect(await db.get('download', track.id), saved.toJson());
+      },
+    );
   }
 
   test(
@@ -405,6 +465,7 @@ void main() {
       });
       await transfers.reconcile([track], [], pins);
       final localRecord = await db.get('file', track.id);
+      await db.put('track', track.id, track.toJson());
       await db.put('pin', 'track:t', pins.single.toJson());
       const failed = DownloadProgress(
         trackId: 'failed',
@@ -460,6 +521,32 @@ void main() {
       expect(transfers.progressFor(track.id)!.historyCleared, isTrue);
       expect(await file.exists(), isTrue);
       expect(await db.get('file', track.id), isNotNull);
+    },
+  );
+
+  test(
+    'close before a request starts does not create a fresh live transport',
+    () async {
+      final saved = Completer<void>(), release = Completer<void>();
+      (db as _GatedDatabase).afterPut = (kind) async {
+        if (kind == 'download' && !saved.isCompleted) {
+          saved.complete();
+          await release.future;
+        }
+      };
+      var requests = 0;
+      api.dio.httpClientAdapter = FakeAdapter((_, _) {
+        requests++;
+        return ResponseBody.fromBytes(bytes, 200);
+      });
+      final running = transfers.reconcile([track], [], pins);
+      await saved.future;
+      final closing = transfers.close();
+      release.complete();
+      await Future.wait([running, closing]);
+      expect(requests, 0);
+      expect(transfers.progressFor(track.id)!.status, DownloadStatus.queued);
+      expect(await db.get('file', track.id), isNull);
     },
   );
 

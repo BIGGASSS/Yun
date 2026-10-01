@@ -33,14 +33,12 @@ void main() {
     final directory = Directory(p.join(root.path, 'accounts', key));
     await directory.create(recursive: true);
     final db = CacheDatabase(File(p.join(directory.path, 'cache.sqlite')));
-    final track = interrupted == null
-        ? const Track(id: 't', title: 'Offline track')
-        : Track(
-            id: 't',
-            title: 'Offline track',
-            sizeBytes: 3,
-            sha256: sha256.convert([1, 2, 3]).toString(),
-          );
+    final track = Track(
+      id: 't',
+      title: 'Offline track',
+      sizeBytes: 3,
+      sha256: sha256.convert([1, 2, 3]).toString(),
+    );
     await db.applyLibrary({
       'cursor': 5,
       'reset': true,
@@ -120,6 +118,89 @@ void main() {
     app.dispose();
   });
 
+  for (final contents in ['valid', 'truncated', 'same-length corruption']) {
+    test(
+      'startup validates $contents legacy audio without download history',
+      () async {
+        final directory = await seedAccount();
+        final databaseFile = File(p.join(directory.path, 'cache.sqlite'));
+        final seed = CacheDatabase(databaseFile);
+        final record = (await seed.get('file', 't'))!;
+        final file = File(record['path'] as String);
+        await seed.put(
+          'pin',
+          'track:t',
+          const PinSelection('track', 't').toJson(),
+        );
+        expect(await seed.get('download', 't'), isNull);
+        await seed.close();
+        if (contents != 'valid') {
+          await file.writeAsBytes(contents == 'truncated' ? [1, 2] : [3, 2, 1]);
+        }
+        var requests = 0;
+        final engine = FakeEngine();
+        final app = AppController(
+          api: ApiClient(
+            dio: Dio()
+              ..httpClientAdapter = FakeAdapter((options, _) {
+                requests++;
+                throw DioException(
+                  requestOptions: options,
+                  type: DioExceptionType.connectionError,
+                );
+              }),
+            credentials: credentials,
+          ),
+          storageDirectory: () async => root,
+          playbackEngine: engine,
+          enableSystemControls: false,
+          automaticRefresh: false,
+        );
+        final publishedPaths = <String>[];
+        app.addListener(() {
+          final path = app.localPath('t');
+          if (path != null) publishedPaths.add(path);
+        });
+        try {
+          await app.initialize();
+          expect(app.isAuthenticated, isTrue);
+          expect(app.tracks.single.id, 't');
+          expect(app.pins.single.id, 't');
+          final valid = contents == 'valid';
+          expect(app.localPath('t'), valid ? file.path : isNull);
+          expect(app.downloadedTrackIds, valid ? {'t'} : isEmpty);
+          expect(
+            app.downloadProgress(app.tracks.single).status,
+            valid ? DownloadStatus.downloaded : DownloadStatus.queued,
+          );
+          if (valid) {
+            await app.play(app.tracks.single);
+            expect(engine.opened, file.path);
+            expect(await file.readAsBytes(), [1, 2, 3]);
+          } else {
+            expect(publishedPaths, isEmpty);
+            expect(await file.exists(), isFalse);
+          }
+          expect(requests, 0);
+        } finally {
+          await app.shutdown();
+          app.dispose();
+        }
+        final persisted = CacheDatabase(databaseFile);
+        try {
+          expect(
+            await persisted.get('file', 't'),
+            contents == 'valid' ? record : isNull,
+          );
+          expect(await persisted.get('pin', 'track:t'), isNotNull);
+          expect(await persisted.get('download', 't'), isNull);
+        } finally {
+          await persisted.close();
+        }
+      },
+    );
+  }
+
   for (final interrupted in [
     null,
     DownloadStatus.downloading,
@@ -197,7 +278,12 @@ void main() {
       final fileRecord = (await seed.get('file', 't'))!;
       await seed.transaction(() async {
         for (var i = 0; i < 100; i++) {
-          final track = Track(id: 'download-$i', title: 'Download $i');
+          final track = Track(
+            id: 'download-$i',
+            title: 'Download $i',
+            sizeBytes: 3,
+            sha256: fileRecord['sha256'] as String,
+          );
           await seed.put('track', track.id, track.toJson());
           await seed.put('file', track.id, {...fileRecord, 'id': track.id});
         }

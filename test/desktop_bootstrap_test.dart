@@ -1,5 +1,7 @@
 import 'dart:async';
+import 'dart:io';
 
+import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart' hide RepeatMode;
 import 'package:flutter/services.dart';
@@ -38,17 +40,39 @@ class _CollectionPreferencesStore extends InMemorySharedPreferencesStore {
   }
 }
 
-/// Only startup storage is replaced. Playback and the entire orderly shutdown
-/// remain real; a gate lets tests inspect the native-exit ordering.
+ApiClient _bootstrapApi() =>
+    ApiClient(
+        credentials: MemoryCredentials(),
+        dio: Dio()
+          ..httpClientAdapter = FakeAdapter((options, _) {
+            throw StateError('Unexpected bootstrap request: ${options.uri}');
+          }),
+      )
+      ..session = SessionCredentials(
+        account: const Account(
+          server: 'https://yun.test',
+          userId: 'user',
+          username: 'listener',
+        ),
+        accessToken: 'test-access',
+        refreshToken: 'test-refresh',
+        expiresAt: DateTime.now()
+            .add(const Duration(days: 1))
+            .millisecondsSinceEpoch,
+      );
+
+/// Credentials, storage and the engine are isolated. Playback and the entire
+/// orderly shutdown remain real; a gate exposes the native-exit ordering.
 class _BootstrapApp extends AppController {
   _BootstrapApp({
     required FakeEngine engine,
+    required super.storageDirectory,
     required super.playbackSettings,
     required super.savePlaybackSettings,
     required this.events,
     this.failStartup = false,
   }) : super(
-         api: ApiClient(credentials: MemoryCredentials()),
+         api: _bootstrapApi(),
          playbackEngine: engine,
          enableSystemControls: false,
          automaticRefresh: false,
@@ -65,7 +89,7 @@ class _BootstrapApp extends AppController {
   Future<void> initialize() async {
     initializeCalls++;
     if (failStartup) throw StateError('fixture startup failure');
-    initialized = true;
+    await super.initialize();
   }
 
   @override
@@ -87,6 +111,7 @@ class _Fixture {
   final engines = <FakeEngine>[];
   final hosts = <FakeDesktopHost>[];
   final events = <String>[];
+  Directory? storage;
 
   _BootstrapApp get app => apps.last;
   FakeEngine get engine => engines.last;
@@ -95,6 +120,7 @@ class _Fixture {
       tester.widget<YunApp>(find.byType(YunApp)).desktop!;
 
   Future<void> mount() async {
+    storage ??= await Directory.systemTemp.createTemp('yun-bootstrap-test-');
     await tester.pumpWidget(
       YunBootstrap(
         desktopHostFactory: () {
@@ -108,6 +134,7 @@ class _Fixture {
               engines.add(engine);
               final app = _BootstrapApp(
                 engine: engine,
+                storageDirectory: () async => storage!,
                 playbackSettings: playbackSettings,
                 savePlaybackSettings: savePlaybackSettings,
                 events: events,
@@ -118,10 +145,12 @@ class _Fixture {
             },
       ),
     );
-    // Native/settings futures can finish after pumpAndSettle observes no
-    // scheduled frame. Yield real time until bootstrap has built its result.
-    for (var i = 0; i < 100; i++) {
-      await Future<void>.delayed(Duration.zero);
+    // Native/settings and SQLite filesystem work can finish after
+    // pumpAndSettle observes no scheduled frame. Bound by elapsed real time,
+    // not zero-delay event-loop turns that can expire before CI disk I/O.
+    final opening = Stopwatch()..start();
+    while (opening.elapsed < const Duration(seconds: 10)) {
+      await Future<void>.delayed(const Duration(milliseconds: 10));
       await tester.pumpAndSettle();
       if (find.byType(YunApp).evaluate().isNotEmpty ||
           find
@@ -146,6 +175,7 @@ class _Fixture {
       await app.shutdown();
     }
     await tester.pumpWidget(const SizedBox.shrink());
+    await storage?.delete(recursive: true);
   }
 }
 
@@ -179,14 +209,11 @@ Future<void> _withBootstrap(
 }
 
 Future<void> _startFakePlayback(_Fixture fixture) async {
-  // Resolve through the real AppController: this unsigned fixture must refuse
-  // storage/network access. The queue and engine subscription are still real.
-  await expectLater(
-    fixture.app.playback.playQueue(const [Track(id: 'a', title: 'A')]),
-    throwsA(isA<StateError>()),
-  );
-  // FakeEngine.play supplies playing states without opening a native player.
-  await fixture.app.playback.play();
+  // Resolve through the real, authenticated AppController. FakeEngine opens
+  // the resulting source without accessing the network or a native player.
+  await fixture.app.playback.playQueue(const [Track(id: 'a', title: 'A')]);
+  expect(fixture.engine.opened, 'https://yun.test/api/v1/tracks/a/audio');
+  expect(fixture.app.playback.error, isNull);
   expect(fixture.app.playback.isPlaying, isTrue);
   expect(fixture.engine.controller.isClosed, isFalse);
 }

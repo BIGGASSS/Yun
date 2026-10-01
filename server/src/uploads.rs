@@ -131,18 +131,20 @@ pub(crate) async fn append(
     Extension(admission): Extension<crate::admission::Admission>,
     bytes: Bytes,
 ) -> Result<Json<Offset>, ApiError> {
+    let offset = headers
+        .get("upload-offset")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<i64>().ok())
+        .filter(|v| *v >= 0)
+        .ok_or_else(|| ApiError::bad("valid Upload-Offset required"))?;
+    if bytes.is_empty() {
+        return Err(ApiError::bad("empty upload chunk"));
+    }
+    // Wait in the request future: cancellation must release admission for work
+    // that has not started. Once acquired, the detached worker owns exclusion.
+    let guard = state.upload_lock(&id).await.lock_owned().await;
     finish(tokio::spawn(async move {
         let _admission = admission.0;
-        let offset = headers
-            .get("upload-offset")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.parse::<i64>().ok())
-            .filter(|v| *v >= 0)
-            .ok_or_else(|| ApiError::bad("valid Upload-Offset required"))?;
-        if bytes.is_empty() {
-            return Err(ApiError::bad("empty upload chunk"));
-        }
-        let guard = state.upload_lock(&id).await.lock_owned().await;
         let upload = load(&mut *state.0.pool.acquire().await?, &auth.user, &id).await?;
         if upload.offset != offset {
             return Err(ApiError::conflict(
@@ -199,9 +201,10 @@ pub(crate) async fn cancel(
     Path(id): Path<String>,
     Extension(admission): Extension<crate::admission::Admission>,
 ) -> Result<StatusCode, ApiError> {
+    let upload = state.upload_lock(&id).await.lock_owned().await;
     finish(tokio::spawn(async move {
         let _admission = admission.0;
-        let _upload = state.upload_lock(&id).await.lock_owned().await;
+        let _upload = upload;
         let guard = state.0.writes.lock().await;
         let result = sqlx::query("DELETE FROM uploads WHERE user_id=? AND id=?")
             .bind(auth.user)
@@ -224,9 +227,10 @@ pub(crate) async fn complete(
     Path(upload_id): Path<String>,
     Extension(admission): Extension<crate::admission::Admission>,
 ) -> Result<Json<Track>, ApiError> {
+    let upload = state.upload_lock(&upload_id).await.lock_owned().await;
     finish(tokio::spawn(async move {
     let _admission = admission.0;
-    let _upload = state.upload_lock(&upload_id).await.lock_owned().await;
+    let _upload = upload;
     let permit = state
         .0
         .parsers

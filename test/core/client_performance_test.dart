@@ -149,11 +149,22 @@ void main() {
     () async {
       final file = await File('${root.path}/cached.audio')
           .writeAsBytes([1, 2, 3]);
-      await db.put('file', 't', {'id': 't', 'sha256': '', 'path': file.path});
+      final cachedTrack = Track(
+        id: track.id,
+        title: track.title,
+        sizeBytes: track.sizeBytes,
+        sha256: sha256.convert([1, 2, 3]).toString(),
+      );
+      await db.put('track', cachedTrack.id, cachedTrack.toJson());
+      await db.put('file', 't', {
+        'id': 't',
+        'sha256': cachedTrack.sha256,
+        'path': file.path,
+      });
       final value = await open();
       await file.delete();
       expect(value.localPath('t'), file.path);
-      await value.play(track);
+      await value.play(cachedTrack);
       expect(engine.opened, endsWith('/tracks/t/audio'));
       expect(value.localPath('t'), isNull);
       expect(value.downloadedTrackIds, isEmpty);
@@ -230,17 +241,19 @@ void main() {
       final file = await File('${root.path}/cached.audio')
           .writeAsBytes([1, 2, 3]);
       const count = 1000;
+      final hash = sha256.convert([1, 2, 3]).toString();
       final tracks = List.generate(
         count,
-        (i) => Track(id: '$i', title: '$i', sizeBytes: 3),
+        (i) => Track(id: '$i', title: '$i', sizeBytes: 3, sha256: hash),
       );
       final pins = List.generate(count, (i) => PinSelection('track', '$i'));
       await db.transaction(() async {
         for (final t in tracks) {
+          await db.put('track', t.id, t.toJson());
           await db.put('file', t.id, {
             'id': t.id,
             'path': file.path,
-            'sha256': '',
+            'sha256': hash,
             'references': 1,
           });
           await db.put(
@@ -291,7 +304,8 @@ void main() {
       (_, _) => jsonResponse({
         'id': '${id++}',
         'name': 'Playlist',
-        'revision': 1,
+        // Server mutations advance the global library revision (cursor=5).
+        'revision': 5 + id,
         'entries': [],
       }),
     );

@@ -75,11 +75,22 @@ class FakeEngine implements PlaybackEngine {
   }
 
   @override
-  Future<void> open(String uri, {Map<String, String>? headers}) async {
+  Future<void> open(
+    String uri, {
+    Map<String, String>? headers,
+    bool play = true,
+    Duration start = Duration.zero,
+  }) async {
     calls.add('open');
     opened = uri;
     opens++;
-    emit(const EngineState(playing: true, duration: Duration(seconds: 120)));
+    emit(
+      EngineState(
+        playing: play,
+        position: start,
+        duration: const Duration(seconds: 120),
+      ),
+    );
   }
 
   @override
@@ -100,6 +111,7 @@ class FakeEngine implements PlaybackEngine {
 
   @override
   Future<void> seek(Duration position) async {
+    calls.add('seek');
     emit(
       EngineState(
         playing: state.playing,

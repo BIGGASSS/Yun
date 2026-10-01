@@ -23,6 +23,8 @@ target, destination = sys.argv[1:]
 def quoted(value):
     if any(c in value for c in '\n\r'):
         raise SystemExit('Newlines in install paths are not supported')
+    # Percent field codes are expanded even inside quotes; %% is literal %.
+    value = value.replace('%', '%%')
     return '"' + value.replace('\\', '\\\\\\\\').replace('"', '\\\\"').replace('`', '\\\\`').replace('$', '\\\\$') + '"'
 text = pathlib.Path(target, 'yun.desktop').read_text()
 text = text.replace('Exec=yun', 'Exec=' + quoted(target + '/yun'))
