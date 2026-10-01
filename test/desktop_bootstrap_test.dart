@@ -145,10 +145,12 @@ class _Fixture {
             },
       ),
     );
-    // Native/settings futures can finish after pumpAndSettle observes no
-    // scheduled frame. Yield real time until bootstrap has built its result.
-    for (var i = 0; i < 100; i++) {
-      await Future<void>.delayed(Duration.zero);
+    // Native/settings and SQLite filesystem work can finish after
+    // pumpAndSettle observes no scheduled frame. Bound by elapsed real time,
+    // not zero-delay event-loop turns that can expire before CI disk I/O.
+    final opening = Stopwatch()..start();
+    while (opening.elapsed < const Duration(seconds: 10)) {
+      await Future<void>.delayed(const Duration(milliseconds: 10));
       await tester.pumpAndSettle();
       if (find.byType(YunApp).evaluate().isNotEmpty ||
           find
