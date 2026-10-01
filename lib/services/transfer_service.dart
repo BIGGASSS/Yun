@@ -8,6 +8,9 @@ import 'package:path/path.dart' as p;
 import '../models/models.dart';
 import 'api_client.dart';
 import 'cache_database.dart';
+import 'download_verification.dart';
+
+export 'download_verification.dart';
 
 /// Pin selections are durable references, not independent copies of audio.
 Map<String, int> pinReferences(
@@ -63,6 +66,7 @@ class DownloadProgress {
     this.status = DownloadStatus.queued,
     this.error,
     this.historyCleared = false,
+    this.repairRequired = false,
   });
   final String trackId;
   final int receivedBytes, totalBytes;
@@ -71,6 +75,9 @@ class DownloadProgress {
 
   /// Dismiss completed activity without removing its verified local audio.
   final bool historyCleared;
+
+  /// A manual check found corrupt bytes. Only an explicit repair clears this.
+  final bool repairRequired;
   double get fraction =>
       totalBytes <= 0 ? 0 : (receivedBytes / totalBytes).clamp(0.0, 1.0);
   Map<String, dynamic> toJson() => {
@@ -80,6 +87,7 @@ class DownloadProgress {
     'status': status.name,
     'error': error,
     'history_cleared': historyCleared,
+    'repair_required': repairRequired,
   };
   factory DownloadProgress.fromJson(Map<String, dynamic> j) => DownloadProgress(
     trackId: j['id'] as String,
@@ -88,6 +96,7 @@ class DownloadProgress {
     status: DownloadStatus.values.byName(j['status'] as String),
     error: j['error'] as String?,
     historyCleared: j['history_cleared'] as bool? ?? false,
+    repairRequired: j['repair_required'] as bool? ?? false,
   );
 }
 
@@ -107,8 +116,12 @@ class TransferService {
     this.onDownloadChanged,
     this.onFilesChanged,
     this.onDownloaded,
+    this.onVerificationChanged,
+    DownloadFileVerifier Function()? verificationWorkerFactory,
     Directory? importsDirectory,
-  }) : importsDirectory =
+  }) : _verificationWorkerFactory =
+           verificationWorkerFactory ?? IsolateDownloadFileVerifier.new,
+       importsDirectory =
            importsDirectory ?? Directory(p.join(directory.path, 'imports'));
   final ApiClient api;
   final CacheDatabase database;
@@ -269,6 +282,8 @@ class TransferService {
   final void Function()? onDownloadChanged;
   final void Function()? onFilesChanged;
   final Future<void> Function(Track)? onDownloaded;
+  final void Function()? onVerificationChanged;
+  final DownloadFileVerifier Function() _verificationWorkerFactory;
   final Map<String, DownloadProgress> _downloads = {};
   Map<String, DownloadProgress> get downloads => Map.unmodifiable(_downloads);
   DownloadProgress? progressFor(String trackId) => _downloads[trackId];
@@ -279,17 +294,17 @@ class TransferService {
 
   /// Startup only, before accepting reconciliations or history clears.
   Future<void> restoreDownloads() async {
-    // Legacy caches can have file records without download activity. Verify
-    // every playable reference before the controller publishes its cache, and
-    // reuse the results below so history restoration never hashes a file twice.
-    final verified = <String, Track>{};
+    // Restore cached identities with cheap metadata checks only. Full hashing
+    // of existing audio belongs exclusively to the explicit Downloads action.
+    // Keep the legacy-file path, but do not read its audio bytes at startup.
+    final available = <String, Track>{};
     for (final record in await database.list('file')) {
       final id = record['id'] as String;
       final trackRecord = await database.get('track', id);
       if (trackRecord != null) {
         final track = Track.fromJson(trackRecord);
-        if (await _matchesFile(track, record)) {
-          verified[id] = track;
+        if (await _hasExpectedFileMetadata(track, record)) {
+          available[id] = track;
           continue;
         }
       }
@@ -303,7 +318,7 @@ class TransferService {
       final needsVerification =
           interrupted || saved.status == DownloadStatus.downloaded;
       if (needsVerification) {
-        final track = verified[saved.trackId];
+        final track = available[saved.trackId];
         if (track != null) {
           _downloads[saved.trackId] = DownloadProgress(
             trackId: saved.trackId,
@@ -329,12 +344,35 @@ class TransferService {
         status: needsVerification ? DownloadStatus.queued : saved.status,
         error: needsVerification ? null : saved.error,
         historyCleared: saved.historyCleared && !needsVerification,
+        repairRequired: saved.repairRequired,
       );
       if (needsVerification) await _saveDownload(saved.trackId);
     }
+    final knownIds = {
+      for (final track in await database.list('track')) track['id'],
+    };
+    final damaged = [
+      for (final progress in _downloads.values)
+        if (progress.repairRequired && knownIds.contains(progress.trackId))
+          progress.trackId,
+    ];
+    if (damaged.isNotEmpty) {
+      _verificationProgress = DownloadVerificationProgress(
+        status: VerificationStatus.completed,
+        totalFiles: damaged.length,
+        checkedFiles: damaged.length,
+        invalidFiles: damaged.length,
+        invalidTrackIds: List.unmodifiable(damaged),
+        error: 'A previous check found files that still need repair.',
+      );
+      onVerificationChanged?.call();
+    }
   }
 
-  Future<bool> _matchesFile(Track track, Map<String, dynamic> record) async {
+  Future<bool> _hasExpectedFileMetadata(
+    Track track,
+    Map<String, dynamic> record,
+  ) async {
     if (record['sha256'] != track.sha256) return false;
     final file = File(record['path'] as String);
     final stat = await file.stat();
@@ -342,8 +380,7 @@ class TransferService {
         stat.size != track.sizeBytes) {
       return false;
     }
-    return (await sha256.bind(file.openRead()).first).toString() ==
-        track.sha256;
+    return true;
   }
 
   Future<void> _invalidateFile(String id, Map<String, dynamic> record) async {
@@ -354,6 +391,268 @@ class TransferService {
     if (await file.exists()) await file.delete();
   }
 
+  DownloadVerificationProgress? _verificationProgress;
+  DownloadVerificationProgress? get verificationProgress =>
+      _verificationProgress;
+  Future<void>? _verificationRunning;
+  DownloadFileVerifier? _verificationWorker;
+  bool _verificationCancelled = false;
+  Completer<void>? _verificationStop;
+
+  /// One scan per account. Navigation does not own or cancel this operation.
+  Future<void> verifyDownloads() {
+    if (_closed) return Future.error(TransferCancelled());
+    if (_verificationRunning != null) return _verificationRunning!;
+    final completed = Completer<void>();
+    _verificationRunning = completed.future;
+    _verificationCancelled = false;
+    _verificationStop = Completer<void>();
+    _verificationProgress = const DownloadVerificationProgress(
+      status: VerificationStatus.preparing,
+    );
+    onVerificationChanged?.call();
+    unawaited(() async {
+      try {
+        await _verifyDownloads();
+      } finally {
+        _verificationRunning = null;
+        completed.complete();
+        // Existing sync/download requests retain their latest selections. Files
+        // quarantined by this scan are held until explicit repair, even on restart.
+        unawaited(
+          _resumeReconciliations().catchError((Object e) => onError(e)),
+        );
+      }
+    }());
+    return completed.future;
+  }
+
+  void cancelVerification() {
+    _verificationCancelled = true;
+    if (_verificationStop?.isCompleted == false) _verificationStop!.complete();
+    _verificationWorker?.cancel();
+  }
+
+  Future<void> _resumeReconciliations() {
+    if (_closed ||
+        _verificationRunning != null ||
+        _nextReconciliation == null) {
+      return Future.value();
+    }
+    return _downloadsRunning ??= _drainReconciliations();
+  }
+
+  Future<void> _verifyDownloads() async {
+    final clock = Stopwatch();
+    var total = 0, checked = 0, valid = 0, invalid = 0, skipped = 0;
+    var totalBytes = 0, processed = 0, hashed = 0, currentReading = 0;
+    final damaged = <String>{
+      for (final progress in _downloads.values)
+        if (progress.repairRequired) progress.trackId,
+    };
+    String? lastError;
+    var terminalStatus = VerificationStatus.completed;
+    void publish(VerificationStatus status, {int reading = 0}) {
+      _verificationProgress = DownloadVerificationProgress(
+        status: status,
+        totalFiles: total,
+        checkedFiles: checked,
+        validFiles: valid,
+        invalidFiles: invalid,
+        skippedFiles: skipped,
+        processedBytes: (processed + reading).clamp(0, totalBytes),
+        totalBytes: totalBytes,
+        hashedBytes: hashed + reading,
+        elapsed: clock.elapsed,
+        invalidTrackIds: List.unmodifiable(damaged),
+        error: lastError,
+      );
+      if (!_closed) onVerificationChanged?.call();
+    }
+
+    bool getCancelled() => _closed || _verificationCancelled;
+    try {
+      // Let the current track finish; the reconciliation loop yields before
+      // opening another. A scan never hashes a partial or replacement in flight.
+      if (_downloadsRunning != null) {
+        await Future.any([_downloadsRunning!, _verificationStop!.future]);
+      }
+      if (getCancelled()) throw VerificationCancelled();
+      final records = await database.list('file');
+      final tracks = {
+        for (final record in await database.list('track'))
+          record['id'] as String: Track.fromJson(record),
+      };
+      damaged.retainAll(tracks.keys);
+      total = records.length;
+      for (final record in records) {
+        final size = tracks[record['id']]?.sizeBytes ?? 0;
+        if (size > 0) totalBytes += size;
+      }
+      if (getCancelled()) throw VerificationCancelled();
+      clock.start();
+      publish(VerificationStatus.running);
+      final worker = _verificationWorker = _verificationWorkerFactory();
+      for (final record in records) {
+        if (getCancelled()) throw VerificationCancelled();
+        final id = record['id'] as String;
+        final track = tracks[id];
+        if (track == null) {
+          checked++;
+          skipped++;
+          lastError = 'A cached file has no library metadata and was skipped.';
+          publish(VerificationStatus.running);
+          continue;
+        }
+        var reading = 0;
+        final result = await worker.verify(
+          VerificationFile(
+            path: record['path'] as String,
+            sizeBytes: track.sizeBytes,
+            sha256: track.sha256,
+            recordedSha256: record['sha256'],
+          ),
+          (bytes) {
+            reading = bytes.clamp(0, track.sizeBytes);
+            currentReading = reading;
+            if (!getCancelled()) {
+              publish(VerificationStatus.running, reading: reading);
+            }
+          },
+        );
+        if (getCancelled()) throw VerificationCancelled();
+        var outcome = result.outcome;
+        DownloadProgress? invalidProgress;
+        lastError = result.error ?? lastError;
+        // Library sync may update metadata while the worker runs. Compare under
+        // a transaction and never invalidate a newer identity or replacement.
+        await database.transaction(() async {
+          if (getCancelled()) throw VerificationCancelled();
+          final current = await database.get('file', id);
+          final currentTrack = await database.get('track', id);
+          if (current?['path'] != record['path'] ||
+              current?['sha256'] != record['sha256'] ||
+              currentTrack?['sha256'] != track.sha256 ||
+              currentTrack?['size_bytes'] != track.sizeBytes) {
+            outcome = FileVerificationOutcome.skipped;
+            lastError = 'Library changed during verification; run it again.';
+            return;
+          }
+          if (outcome == FileVerificationOutcome.invalid) {
+            final failed = DownloadProgress(
+              trackId: id,
+              totalBytes: track.sizeBytes,
+              status: DownloadStatus.failed,
+              error: 'Cached audio failed verification. Redownload to repair.',
+              repairRequired: true,
+            );
+            await database.remove('file', id);
+            await database.put('download', id, failed.toJson());
+            invalidProgress = failed;
+          }
+        });
+        if (outcome == FileVerificationOutcome.invalid) {
+          _downloads[id] = invalidProgress!;
+          damaged.add(id);
+          invalid++;
+          _downloadSectionsRevision++;
+          (onFilesChanged ?? onChanged)();
+          (onDownloadChanged ?? onChanged)();
+          // The invalid reference is already quarantined. Failure to delete
+          // leftover bytes does not allow playback or prevent other checks.
+          try {
+            final file = File(record['path'] as String);
+            if (await FileSystemEntity.type(file.path, followLinks: false) ==
+                FileSystemEntityType.file) {
+              await file.delete();
+            }
+          } on FileSystemException {
+            lastError =
+                'A corrupt file was quarantined but could not be removed.';
+          }
+        } else if (outcome == FileVerificationOutcome.valid) {
+          valid++;
+        } else {
+          skipped++;
+        }
+        checked++;
+        processed += track.sizeBytes > 0 ? track.sizeBytes : 0;
+        hashed += reading;
+        currentReading = 0;
+        publish(VerificationStatus.running);
+      }
+      terminalStatus = getCancelled()
+          ? VerificationStatus.cancelled
+          : VerificationStatus.completed;
+    } on VerificationCancelled {
+      terminalStatus = VerificationStatus.cancelled;
+    } catch (_) {
+      lastError =
+          'Verification could not finish. Check storage access and try again.';
+      terminalStatus = getCancelled()
+          ? VerificationStatus.cancelled
+          : VerificationStatus.failed;
+    } finally {
+      clock.stop();
+      try {
+        await _verificationWorker?.close();
+      } catch (_) {
+        if (!getCancelled()) {
+          lastError = 'Verification worker could not close cleanly. Try again.';
+          terminalStatus = VerificationStatus.failed;
+        }
+      }
+      _verificationWorker = null;
+      publish(terminalStatus, reading: currentReading);
+    }
+  }
+
+  /// Repairs only explicit manual-check failures through the existing verified
+  /// download path. The controller adds a pin only if no selection covers it.
+  Future<void> redownloadCorruptedFiles(
+    List<Track> tracks,
+    List<Playlist> playlists,
+    List<PinSelection> pins,
+  ) async {
+    if (_closed) throw TransferCancelled();
+    if (_verificationRunning != null) return;
+    final known = {for (final track in tracks) track.id: track};
+    for (final id in _verificationProgress?.invalidTrackIds ?? <String>[]) {
+      final track = known[id];
+      if (track == null ||
+          _downloads[id]?.status == DownloadStatus.downloaded) {
+        continue;
+      }
+      _progress(track, DownloadStatus.queued, 0);
+      await _saveDownload(id);
+    }
+    await reconcile(tracks, playlists, pins);
+    final previous = _verificationProgress;
+    if (previous != null && !_closed) {
+      _verificationProgress = DownloadVerificationProgress(
+        status: previous.status,
+        totalFiles: previous.totalFiles,
+        checkedFiles: previous.checkedFiles,
+        validFiles: previous.validFiles,
+        invalidFiles: previous.invalidFiles,
+        skippedFiles: previous.skippedFiles,
+        processedBytes: previous.processedBytes,
+        totalBytes: previous.totalBytes,
+        hashedBytes: previous.hashedBytes,
+        elapsed: previous.elapsed,
+        error: previous.error,
+        invalidTrackIds: List.unmodifiable(
+          previous.invalidTrackIds.where(
+            (id) =>
+                known.containsKey(id) &&
+                _downloads[id]?.status != DownloadStatus.downloaded,
+          ),
+        ),
+      );
+      onVerificationChanged?.call();
+    }
+  }
+
   bool _progress(
     Track track,
     DownloadStatus status,
@@ -362,6 +661,7 @@ class TransferService {
   }) {
     final previous = _downloads[track.id];
     if (previous != null &&
+        !previous.repairRequired &&
         previous.status == status &&
         previous.totalBytes == track.sizeBytes &&
         previous.receivedBytes == bytes &&
@@ -406,7 +706,7 @@ class TransferService {
           continue;
         }
         final record = await database.get('file', track.id);
-        if (record == null || !await _matchesFile(track, record)) {
+        if (record == null || !await _hasExpectedFileMetadata(track, record)) {
           continue;
         }
         final dismissed = DownloadProgress(
@@ -700,12 +1000,17 @@ class TransferService {
   ) {
     if (_closed) return Future.value();
     _nextReconciliation = (List.of(tracks), List.of(playlists), List.of(pins));
+    if (_verificationRunning != null) {
+      return _verificationRunning!.then((_) => _resumeReconciliations());
+    }
     return _downloadsRunning ??= _drainReconciliations();
   }
 
   Future<void> _drainReconciliations() async {
     try {
-      while (!_closed && _nextReconciliation != null) {
+      while (!_closed &&
+          _verificationRunning == null &&
+          _nextReconciliation != null) {
         final (tracks, playlists, pins) = _nextReconciliation!;
         _nextReconciliation = null;
         await _reconcile(tracks, playlists, pins);
@@ -724,10 +1029,16 @@ class TransferService {
     final refs = pinReferences(pins, tracks, playlists);
     for (final record in await database.list('download')) {
       final id = record['id'] as String;
-      if (!refs.containsKey(id)) await database.remove('download', id);
+      if (!refs.containsKey(id) && record['repair_required'] != true) {
+        await database.remove('download', id);
+      }
     }
-    final removedProgress = _downloads.keys.any((id) => !refs.containsKey(id));
-    _downloads.removeWhere((id, _) => !refs.containsKey(id));
+    final removedProgress = _downloads.entries.any(
+      (entry) => !refs.containsKey(entry.key) && !entry.value.repairRequired,
+    );
+    _downloads.removeWhere(
+      (id, progress) => !refs.containsKey(id) && !progress.repairRequired,
+    );
     if (removedProgress) {
       _downloadSectionsRevision++;
       (onDownloadChanged ?? onChanged)();
@@ -766,9 +1077,14 @@ class TransferService {
     if (removedFiles) (onFilesChanged ?? onChanged)();
     for (final track in tracks.where((t) => refs.containsKey(t.id))) {
       if (_closed) break;
+      if (_verificationRunning != null) {
+        _nextReconciliation ??= (tracks, playlists, pins);
+        break;
+      }
+      if (_downloads[track.id]?.repairRequired == true) continue;
       try {
         final record = files[track.id];
-        if (record != null && await _matchesFile(track, record)) {
+        if (record != null && await _hasExpectedFileMetadata(track, record)) {
           if (_progress(track, DownloadStatus.downloaded, track.sizeBytes)) {
             await _saveDownload(track.id);
             await onDownloaded?.call(track);
@@ -886,6 +1202,7 @@ class TransferService {
 
   Future<void> close() async {
     _closed = true;
+    cancelVerification();
     _downloadToken?.cancel('Account locked');
     for (final token in _uploadTokens.values) {
       token.cancel('Account locked');
@@ -893,6 +1210,7 @@ class TransferService {
     await Future.wait([
       ?_uploadsRunning,
       ?_downloadsRunning,
+      ?_verificationRunning,
       ..._importsRunning.map(
         (f) => f.then<void>((_) {}, onError: (Object _, StackTrace _) {}),
       ),

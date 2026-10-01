@@ -25,6 +25,12 @@ class PlayerTestApp extends ChangeNotifier implements AppController {
   @override
   final downloadChanges = ChangeNotifier();
   @override
+  final verificationChanges = ChangeNotifier();
+  @override
+  DownloadVerificationProgress? get verificationProgress => null;
+  @override
+  bool get redownloadingCorruptedFiles => false;
+  @override
   final artworkChanges = ChangeNotifier();
   @override
   int get downloadSectionsRevision => 0;
@@ -68,6 +74,7 @@ class PlayerTestApp extends ChangeNotifier implements AppController {
   @override
   void dispose() {
     downloadChanges.dispose();
+    verificationChanges.dispose();
     artworkChanges.dispose();
     playback.dispose();
     super.dispose();

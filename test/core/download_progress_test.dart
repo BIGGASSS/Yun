@@ -254,7 +254,6 @@ void main() {
       'missing track',
       'older revision',
       'truncated file',
-      'same-length corruption',
       'not a file',
     ]) {
       test(
@@ -333,7 +332,7 @@ void main() {
 
   for (final status in [DownloadStatus.queued, DownloadStatus.failed]) {
     test(
-      'startup invalidates corrupt cached audio with $status activity',
+      'startup defers same-size corruption with $status activity to manual check',
       () async {
         final file = await File('${root.path}/t.audio')
             .writeAsBytes(bytes.reversed.toList());
@@ -351,10 +350,15 @@ void main() {
         );
         await db.put('download', track.id, saved.toJson());
         await transfers.restoreDownloads();
-        expect(await db.get('file', track.id), isNull);
-        expect(await file.exists(), isFalse);
+        expect(await db.get('file', track.id), isNotNull);
+        expect(await file.exists(), isTrue);
         expect(transfers.progressFor(track.id)!.toJson(), saved.toJson());
         expect(await db.get('download', track.id), saved.toJson());
+        await transfers.verifyDownloads();
+        expect(await db.get('file', track.id), isNull);
+        expect(await file.exists(), isFalse);
+        expect(transfers.verificationProgress!.invalidFiles, 1);
+        expect(transfers.progressFor(track.id)!.repairRequired, isTrue);
       },
     );
   }

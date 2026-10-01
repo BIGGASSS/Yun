@@ -80,156 +80,177 @@ class DownloadsScreen extends StatelessWidget {
     }
     wanted.retainAll(tracks.map((track) => track.id));
     final ready = wanted.intersection(downloadedIds).length;
-    return DefaultTabController(
-      length: 2,
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          SectionHeading(
-            'Downloads',
-            subtitle:
-                '${downloaded.length} tracks · ${formatBytes(bytes)} on this device',
-            actions: [
-              OutlinedButton.icon(
-                onPressed: app.isAuthenticated && !app.busy
-                    ? () => runUiAction(context, app.refresh)
-                    : null,
-                icon: const Icon(Icons.sync_rounded),
-                label: const Text('Sync downloads'),
+    return LayoutBuilder(
+      builder: (context, constraints) => DefaultTabController(
+        length: 2,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            ConstrainedBox(
+              constraints: BoxConstraints(
+                maxHeight: constraints.maxHeight * 0.6,
               ),
-            ],
-          ),
-          if (app.busy)
-            const QuietProgress(
-              label: 'Syncing library and offline selections',
+              child: SingleChildScrollView(
+                key: const PageStorageKey('download-controls'),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    SectionHeading(
+                      'Downloads',
+                      subtitle:
+                          '${downloaded.length} tracks · ${formatBytes(bytes)} on this device',
+                      actions: [
+                        _VerificationActions(app: app),
+                        OutlinedButton.icon(
+                          onPressed: app.isAuthenticated && !app.busy
+                              ? () => runUiAction(context, app.refresh)
+                              : null,
+                          icon: const Icon(Icons.sync_rounded),
+                          label: const Text('Sync downloads'),
+                        ),
+                      ],
+                    ),
+                    _VerificationSummary(app: app),
+                  ],
+                ),
+              ),
             ),
-          const TabBar(
-            isScrollable: true,
-            tabAlignment: TabAlignment.start,
-            tabs: [
-              Tab(text: 'Activity'),
-              Tab(text: 'On this device'),
-            ],
-          ),
-          Expanded(
-            child: TabBarView(
-              children: [
-                CustomScrollView(
-                  key: const PageStorageKey('download-activity'),
-                  slivers: [
-                    if (wanted.isNotEmpty)
-                      SliverPadding(
-                        padding: const EdgeInsets.fromLTRB(24, 20, 24, 0),
-                        sliver: SliverToBoxAdapter(
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              QuietProgress(
-                                value: ready / wanted.length,
-                                label: 'Offline download completion',
-                              ),
-                              const SizedBox(height: 8),
-                              Text(
-                                '$ready of ${wanted.length} selected tracks ready${ready < wanted.length ? ' · ${wanted.length - ready} remaining' : ''}',
-                              ),
-                            ],
+            if (app.busy)
+              const QuietProgress(
+                label: 'Syncing library and offline selections',
+              ),
+            const TabBar(
+              isScrollable: true,
+              tabAlignment: TabAlignment.start,
+              tabs: [
+                Tab(text: 'Activity'),
+                Tab(text: 'On this device'),
+              ],
+            ),
+            Expanded(
+              child: TabBarView(
+                children: [
+                  CustomScrollView(
+                    key: const PageStorageKey('download-activity'),
+                    slivers: [
+                      if (wanted.isNotEmpty)
+                        SliverPadding(
+                          padding: const EdgeInsets.fromLTRB(24, 20, 24, 0),
+                          sliver: SliverToBoxAdapter(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                QuietProgress(
+                                  value: ready / wanted.length,
+                                  label: 'Offline download completion',
+                                ),
+                                const SizedBox(height: 8),
+                                Text(
+                                  '$ready of ${wanted.length} selected tracks ready${ready < wanted.length ? ' · ${wanted.length - ready} remaining' : ''}',
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                      _section(
+                        context,
+                        'Done',
+                        done.length,
+                        action: Tooltip(
+                          message: 'Clear completed entries. Downloaded music stays on this device.',
+                          child: TextButton.icon(
+                            onPressed: done.isNotEmpty && app.isAuthenticated
+                                ? () => runUiAction(
+                                    context,
+                                    app.clearDoneDownloads,
+                                  )
+                                : null,
+                            icon: const Icon(Icons.clear_all_rounded),
+                            label: const Text('Clear All'),
                           ),
                         ),
                       ),
-                    _section(
-                      context,
-                      'Done',
-                      done.length,
-                      action: Tooltip(
-                        message: 'Clear completed entries. Downloaded music stays on this device.',
-                        child: TextButton.icon(
-                          onPressed: done.isNotEmpty && app.isAuthenticated
-                              ? () =>
-                                    runUiAction(context, app.clearDoneDownloads)
-                              : null,
-                          icon: const Icon(Icons.clear_all_rounded),
-                          label: const Text('Clear All'),
+                      if (done.isEmpty)
+                        _emptySection('No completed downloads')
+                      else
+                        SliverList.builder(
+                          itemCount: done.length,
+                          itemBuilder: (context, index) => TrackTile(
+                            key: ValueKey('done-${done[index].id}'),
+                            app: app,
+                            track: done[index],
+                            queue: done,
+                          ),
                         ),
+                      _section(context, 'Pending', pending.length),
+                      if (pending.isEmpty)
+                        _emptySection('No pending downloads')
+                      else
+                        _downloadRows(pending),
+                      _section(
+                        context,
+                        'Failed',
+                        failed.length,
+                        action: failed.isEmpty
+                            ? null
+                            : TextButton.icon(
+                                onPressed: app.isAuthenticated && !app.busy
+                                    ? () => runUiAction(
+                                        context,
+                                        app.retryDownloads,
+                                      )
+                                    : null,
+                                icon: const Icon(Icons.refresh_rounded),
+                                label: const Text('Retry'),
+                              ),
                       ),
-                    ),
-                    if (done.isEmpty)
-                      _emptySection('No completed downloads')
-                    else
-                      SliverList.builder(
-                        itemCount: done.length,
-                        itemBuilder: (context, index) => TrackTile(
-                          key: ValueKey('done-${done[index].id}'),
-                          app: app,
-                          track: done[index],
-                          queue: done,
+                      if (failed.isEmpty)
+                        _emptySection('No failed downloads')
+                      else
+                        _downloadRows(failed),
+                      if (wanted.isEmpty && downloaded.isEmpty)
+                        const SliverToBoxAdapter(
+                          child: EmptyState(
+                            icon: Icons.offline_pin_outlined,
+                            title: 'Music for wherever you go',
+                            message: 'Choose “Keep offline” from a track, album, or playlist menu. Downloaded audio stays available without a connection.',
+                          ),
                         ),
-                      ),
-                    _section(context, 'Pending', pending.length),
-                    if (pending.isEmpty)
-                      _emptySection('No pending downloads')
-                    else
-                      _downloadRows(pending),
-                    _section(
-                      context,
-                      'Failed',
-                      failed.length,
-                      action: failed.isEmpty
-                          ? null
-                          : TextButton.icon(
-                              onPressed: app.isAuthenticated && !app.busy
-                                  ? () =>
-                                        runUiAction(context, app.retryDownloads)
-                                  : null,
-                              icon: const Icon(Icons.refresh_rounded),
-                              label: const Text('Retry'),
-                            ),
-                    ),
-                    if (failed.isEmpty)
-                      _emptySection('No failed downloads')
-                    else
-                      _downloadRows(failed),
-                    if (wanted.isEmpty && downloaded.isEmpty)
-                      const SliverToBoxAdapter(
-                        child: EmptyState(
-                          icon: Icons.offline_pin_outlined,
-                          title: 'Music for wherever you go',
-                          message: 'Choose “Keep offline” from a track, album, or playlist menu. Downloaded audio stays available without a connection.',
+                      const SliverToBoxAdapter(child: SizedBox(height: 24)),
+                    ],
+                  ),
+                  CustomScrollView(
+                    key: const PageStorageKey('device-downloads'),
+                    slivers: [
+                      if (pins.isNotEmpty)
+                        _OfflineSelections(pins: pins, itemBuilder: _pinTile),
+                      if (downloaded.isEmpty)
+                        const SliverFillRemaining(
+                          hasScrollBody: false,
+                          child: EmptyState(
+                            icon: Icons.offline_pin_outlined,
+                            title: 'No music on this device yet',
+                            message: 'Your completed downloads appear here, including entries cleared from Activity.',
+                          ),
+                        )
+                      else
+                        SliverList.builder(
+                          itemCount: downloaded.length,
+                          itemBuilder: (context, index) => TrackTile(
+                            key: ValueKey('device-${downloaded[index].id}'),
+                            app: app,
+                            track: downloaded[index],
+                            queue: downloaded,
+                          ),
                         ),
-                      ),
-                    const SliverToBoxAdapter(child: SizedBox(height: 24)),
-                  ],
-                ),
-                CustomScrollView(
-                  key: const PageStorageKey('device-downloads'),
-                  slivers: [
-                    if (pins.isNotEmpty)
-                      _OfflineSelections(pins: pins, itemBuilder: _pinTile),
-                    if (downloaded.isEmpty)
-                      const SliverFillRemaining(
-                        hasScrollBody: false,
-                        child: EmptyState(
-                          icon: Icons.offline_pin_outlined,
-                          title: 'No music on this device yet',
-                          message: 'Your completed downloads appear here, including entries cleared from Activity.',
-                        ),
-                      )
-                    else
-                      SliverList.builder(
-                        itemCount: downloaded.length,
-                        itemBuilder: (context, index) => TrackTile(
-                          key: ValueKey('device-${downloaded[index].id}'),
-                          app: app,
-                          track: downloaded[index],
-                          queue: downloaded,
-                        ),
-                      ),
-                    const SliverToBoxAdapter(child: SizedBox(height: 24)),
-                  ],
-                ),
-              ],
+                      const SliverToBoxAdapter(child: SizedBox(height: 24)),
+                    ],
+                  ),
+                ],
+              ),
             ),
-          ),
-        ],
+          ],
+        ),
       ),
     );
   }
@@ -400,5 +421,129 @@ class _OfflineSelectionsState extends State<_OfflineSelections> {
               widget.itemBuilder(widget.pins[index]),
         ),
     ],
+  );
+}
+
+class _VerificationActions extends StatelessWidget {
+  const _VerificationActions({required this.app});
+
+  final AppController app;
+
+  @override
+  Widget build(BuildContext context) => SelectedBuilder(
+    listenable: Listenable.merge([app, app.verificationChanges]),
+    select: () => (
+      app.isAuthenticated,
+      app.verificationProgress?.isRunning ?? false,
+      app.redownloadingCorruptedFiles,
+    ),
+    builder: (context, state, _) => Wrap(
+      spacing: 8,
+      runSpacing: 8,
+      crossAxisAlignment: WrapCrossAlignment.center,
+      children: [
+        OutlinedButton.icon(
+          onPressed: state.$1 && !state.$2 && !state.$3
+              ? () => runUiAction(context, app.verifyDownloads)
+              : null,
+          icon: const Icon(Icons.fact_check_outlined),
+          label: const Text('Verify downloads'),
+        ),
+        if (state.$2)
+          TextButton(
+            onPressed: app.cancelVerification,
+            child: const Text('Cancel verification'),
+          ),
+      ],
+    ),
+  );
+}
+
+class _VerificationSummary extends StatelessWidget {
+  const _VerificationSummary({required this.app});
+
+  final AppController app;
+
+  @override
+  Widget build(BuildContext context) => SelectedBuilder(
+    listenable: Listenable.merge([app, app.verificationChanges]),
+    select: () => (
+      app.verificationProgress,
+      app.isAuthenticated,
+      app.isOffline,
+      app.redownloadingCorruptedFiles,
+    ),
+    builder: (context, state, _) {
+      final progress = state.$1;
+      if (progress == null || !state.$2) return const SizedBox.shrink();
+      final heading = switch (progress.status) {
+        VerificationStatus.preparing => 'Preparing download verification…',
+        VerificationStatus.running => 'Verifying downloads',
+        VerificationStatus.completed => 'Verification complete',
+        VerificationStatus.cancelled => 'Verification cancelled',
+        VerificationStatus.failed => 'Verification failed',
+      };
+      final eta = progress.eta;
+      final fraction = progress.fraction;
+      final canRepair =
+          !progress.isRunning && progress.invalidTrackIds.isNotEmpty;
+      return Padding(
+        padding: const EdgeInsets.fromLTRB(24, 0, 24, 16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(heading, style: Theme.of(context).textTheme.titleSmall),
+            const SizedBox(height: 8),
+            QuietProgress(
+              value: fraction,
+              label:
+                  'Download verification${fraction == null ? '' : ' · ${(fraction * 100).round()}%'}',
+            ),
+            const SizedBox(height: 8),
+            if (progress.status == VerificationStatus.preparing)
+              const Text('Finding downloaded files on this device')
+            else if (progress.status == VerificationStatus.completed &&
+                progress.totalFiles == 0)
+              const Text('No downloaded files to verify')
+            else ...[
+              Text(
+                '${progress.checkedFiles} of ${progress.totalFiles} files checked · ${progress.validFiles} valid · ${progress.invalidFiles} invalid${progress.skippedFiles > 0 ? ' · ${progress.skippedFiles} skipped' : ''}',
+              ),
+              if (progress.isRunning)
+                Text(
+                  '${formatBytes(progress.processedBytes)} of ${formatBytes(progress.totalBytes)} · ${eta == null ? 'Estimating time remaining…' : 'About ${formatDuration(eta)} remaining'}',
+                ),
+            ],
+            if (progress.skippedFiles > 0)
+              const Text(
+                'Skipped files could not be read or changed during the check',
+              ),
+            if (canRepair && progress.invalidFiles == 0)
+              const Text('Previously flagged files still need repair'),
+            if (progress.error != null) ...[
+              const SizedBox(height: 4),
+              Text(progress.error!),
+            ],
+            if (canRepair) ...[
+              const SizedBox(height: 8),
+              Align(
+                alignment: Alignment.centerLeft,
+                child: OutlinedButton.icon(
+                  onPressed: !state.$3 && !state.$4
+                      ? () => runUiAction(context, app.redownloadCorruptedFiles)
+                      : null,
+                  icon: const Icon(Icons.download_rounded),
+                  label: Text(
+                    state.$4 ? 'Redownloading…' : 'Redownload corrupted files',
+                  ),
+                ),
+              ),
+              if (state.$3) const Text('Connect to redownload corrupted files'),
+            ],
+          ],
+        ),
+      );
+    },
   );
 }
