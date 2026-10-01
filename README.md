@@ -77,7 +77,10 @@ fvm flutter run -d linux
 In **Settings**, connect to `http://127.0.0.1:8080` and sign in. HTTP is permitted
 only on loopback. Use an HTTPS server URL for remote clients. An attached Android
 device can use `adb reverse tcp:8080 tcp:8080` for local development; do not enable
-global cleartext or bypass certificate validation.
+global cleartext or bypass certificate validation. Remote audio is fetched by
+Dart with certificate verification and streamed to the decoder over a private
+loopback relay; account tokens never reach the native decoder. Audio redirects
+are rejected: use the final server URL. See [playback TLS](docs/PLAYBACK_TLS.md).
 
 Native prerequisites and caveats: [Linux](linux/README.md),
 [Android](android/README.md), [macOS](macos/README.md),

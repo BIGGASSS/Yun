@@ -14,11 +14,13 @@ import 'package:yun/models/models.dart';
 import 'package:yun/services/playback_engine.dart';
 
 void main() {
-  TestWidgetsFlutterBinding.ensureInitialized();
-  // These fixtures deliberately inject a private CA to isolate peer identity
-  // checks. They do NOT establish that production can find public trust roots.
-  // In particular, a Linux pass does not certify the pinned Android/macOS
-  // mbedTLS backends. See docs/PLAYBACK_TLS.md for the unresolved release gate.
+  // Unlike widget tests, these opt-in integration tests need real Dart HTTP
+  // as well as native sockets: the production relay owns the upstream client.
+  _NativePlaybackBinding();
+  // Exercise the production relay and real decoder, injecting a private CA
+  // only into Dart's HttpClient. mpv never connects to the TLS peer or receives
+  // credentials. These fixtures test identity checks, not platform trust-root
+  // discovery; the optional public HTTPS fixture below covers the latter.
   for (final (name, trusted, host, san, accepted) in [
     ('untrusted DNS', false, 'localhost', 'DNS:localhost', false),
     ('untrusted IP', false, '127.0.0.1', 'IP:127.0.0.1', false),
@@ -29,7 +31,7 @@ void main() {
     ('trusted IP', true, '127.0.0.1', 'IP:127.0.0.1', true),
   ]) {
     test(
-      'REAL native TLS $name: verify before sending bearer',
+      'REAL native relay TLS $name: verify before sending bearer',
       () async {
         native.MediaKit.ensureInitialized(
           libmpv: Platform.environment['LIBMPV_PATH'],
@@ -67,11 +69,21 @@ void main() {
           context,
         );
         final authorizations = <String?>[];
+        final ranges = <String?>[];
         final serving = server.listen(
           (request) async {
-            authorizations.add(
-              request.headers.value(HttpHeaders.authorizationHeader),
+            final authorization = request.headers.value(
+              HttpHeaders.authorizationHeader,
             );
+            authorizations.add(authorization);
+            ranges.add(request.headers.value(HttpHeaders.rangeHeader));
+            expect(request.uri.path, '/audio.wav');
+            expect(request.uri.queryParameters['token'], 'native-query-secret');
+            if (authorization != 'Bearer native-test') {
+              request.response.statusCode = HttpStatus.unauthorized;
+              await request.response.close();
+              return;
+            }
             await _serveTone(request);
           },
           onError: (Object error) {
@@ -79,15 +91,23 @@ void main() {
             if (error is! HandshakeException) throw error;
           },
         );
+        final clientContext = SecurityContext(withTrustedRoots: false);
+        if (trusted) clientContext.setTrustedCertificates(certificate);
+        late native.Player player;
+        var clients = 0;
         final engine = MediaKitEngine(
+          createHttpClient: () {
+            clients++;
+            return HttpClient(context: clientContext);
+          },
           createPlayer: () async {
-            final player = native.Player();
+            player = native.Player();
             final platform = player.platform as native.NativePlayer;
             await platform.setProperty('ao', 'null');
-            if (trusted) {
-              await platform.setProperty('tls-ca-file', certificate);
-              expect(await platform.getProperty('tls-ca-file'), certificate);
-            }
+            // Force a seek to fetch a new upstream range instead of satisfying
+            // it from mpv's demuxer cache. TLS remains the relay's concern.
+            await platform.setProperty('cache', 'no');
+            await platform.setProperty('demuxer-max-back-bytes', '0');
             return player;
           },
         );
@@ -99,9 +119,10 @@ void main() {
         });
         try {
           await engine.open(
-            'https://$host:${server.port}/audio.wav',
+            'https://$host:${server.port}/audio.wav?token=native-query-secret',
             headers: {'Authorization': 'Bearer native-test'},
           );
+          await _expectCredentialFreeRelay(player, server.port);
           if (accepted) {
             await _until(
               () => position.inMilliseconds > 100 || errors.isNotEmpty,
@@ -113,6 +134,35 @@ void main() {
               isTrue,
             );
             expect(position.inMilliseconds, greaterThan(100));
+            final platform = player.platform as native.NativePlayer;
+            expect(
+              await platform.getProperty('audio-params/samplerate'),
+              '44100',
+            );
+            await engine.pause();
+            await _until(() => !player.state.playing);
+            final beforeSeek = ranges.length;
+            await engine.seek(const Duration(seconds: 4));
+            await engine.play();
+            await _until(
+              () => position.inMilliseconds >= 4200 || errors.isNotEmpty,
+            );
+            expect(errors, isEmpty);
+            expect(position.inMilliseconds, greaterThanOrEqualTo(4200));
+            expect(
+              ranges.skip(beforeSeek).any((range) {
+                final match = RegExp(r'^bytes=(\d+)-').firstMatch(range ?? '');
+                return match != null && int.parse(match[1]!) > 0;
+              }),
+              isTrue,
+              reason:
+                  'Native seek must fetch a new authenticated byte range: $ranges',
+            );
+            expect(
+              authorizations.every((value) => value == 'Bearer native-test'),
+              isTrue,
+            );
+            await _expectCredentialFreeRelay(player, server.port);
           } else {
             // Fail immediately on credential disclosure, rather than waiting
             // for an error that an insecure backend will never emit.
@@ -122,9 +172,10 @@ void main() {
               isEmpty,
               reason: '$name sent an HTTP request',
             );
-            expect(errors, isNotEmpty);
+            expect(errors, contains('Unable to load audio from the server.'));
             expect(position, Duration.zero);
           }
+          expect(clients, greaterThan(0));
         } finally {
           await engine.dispose();
           await subscription.cancel();
@@ -158,7 +209,7 @@ void main() {
             'ao',
             'null',
           );
-          // No tls-ca-file or verification override: production configuration.
+          // No injected HttpClient or trust context: production relay roots.
           return player;
         },
       );
@@ -325,6 +376,31 @@ void main() {
     skip: Platform.environment['RUN_NATIVE_PLAYBACK'] != '1',
     timeout: const Timeout(Duration(seconds: 30)),
   );
+}
+
+class _NativePlaybackBinding extends AutomatedTestWidgetsFlutterBinding {
+  @override
+  bool get overrideHttpClient => false;
+}
+
+Future<void> _expectCredentialFreeRelay(
+  native.Player player,
+  int upstreamPort,
+) async {
+  await _until(() => player.state.playlist.medias.isNotEmpty);
+  final media = player.state.playlist.medias.single;
+  final uri = Uri.parse(media.uri);
+  expect(uri.scheme, 'http');
+  expect(uri.host, InternetAddress.loopbackIPv4.address);
+  expect(uri.port, isNot(upstreamPort));
+  expect(uri.userInfo, isEmpty);
+  expect(uri.query, isEmpty);
+  expect(uri.path, matches(RegExp(r'^/[a-f0-9]{64}$')));
+  expect(media.httpHeaders, isNull);
+  final platform = player.platform as native.NativePlayer;
+  expect(await platform.getProperty('playlist/0/filename'), media.uri);
+  expect(await platform.getProperty('http-header-fields'), isEmpty);
+  expect(await platform.getProperty('tls-verify'), 'yes');
 }
 
 Future<void> _serveTone(HttpRequest request) async {

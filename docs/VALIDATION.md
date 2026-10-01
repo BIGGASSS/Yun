@@ -4,14 +4,18 @@ This document separates implemented automation from executed evidence. A green
 compiler/unit-test run does not certify audio playback, background behavior,
 secure storage, recovery, signing, or third-party redistribution rights.
 
-## Open playback TLS release blocker
+## Playback TLS: Dart-owned streaming
 
-The current `tls-verify=yes` change is necessary but insufficient on the pinned
-Android/macOS mbedTLS builds: production roots are missing and numeric-host
-identity checks are skipped. A CA-only patch would not be safe. See the
-[pinned-build investigation and required acceptance gates](PLAYBACK_TLS.md).
-The expanded Linux native TLS fixtures pass locally, but do not certify these
-other backends or production trust-root availability.
+Finding 1 is implemented through a verifying Dart HTTP relay, not a native
+library upgrade. The native player receives a credential-free loopback URL;
+Dart owns the fixed upstream URL, token, TLS verification, range requests,
+backpressure and cancellation. Redirects fail closed. macOS Release now grants
+the loopback-listener entitlement. See [architecture and tests](PLAYBACK_TLS.md).
+
+Real TLS fixtures and Linux libmpv integration cover the authenticated relay
+path. Package-build CI is not signed-device certification: still run the
+macOS sandbox and Android runtime acceptance checks below, including trusted
+public roots, invalid DNS/IP certificates, seeking and background playback.
 
 ## Tray branding and primary-click follow-up — local only
 
