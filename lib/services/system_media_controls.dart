@@ -33,6 +33,7 @@ abstract interface class SystemMediaControls {
     required int index,
     required bool playing,
     required bool buffering,
+    bool waitingForAudio = false,
     required Duration position,
     required bool shuffle,
     required int repeat,
@@ -44,7 +45,45 @@ class NativeSystemMediaControls implements SystemMediaControls {
   NativeSystemMediaControls({
     @visibleForTesting this._handler,
     @visibleForTesting this._windows,
-  });
+    @visibleForTesting this._initializeHandler,
+    @visibleForTesting this._initializeWindows,
+  }) : _initialized = _handler != null || _windows != null {
+    final handler = _handler;
+    if (handler != null) _handlerOwners[handler] = this;
+  }
+
+  static final _handlerOwners = Expando<NativeSystemMediaControls>();
+
+  final Future<BaseAudioHandler> Function()? _initializeHandler;
+  final Future<win.SMTCWindows> Function()? _initializeWindows;
+  static Future<_YunAudioHandler>? _sharedHandler;
+  static bool _mprisRegistered = false;
+  Future<void>? _initialization;
+  bool _initialized;
+
+  static Future<_YunAudioHandler> _audioHandler() => _sharedHandler ??=
+      _createAudioHandler().onError((Object error, StackTrace stack) {
+        _sharedHandler = null;
+        Error.throwWithStackTrace(error, stack);
+      });
+
+  static Future<_YunAudioHandler> _createAudioHandler() {
+    if (Platform.isLinux && !_mprisRegistered) {
+      AudioServiceMpris.registerWith();
+      _mprisRegistered = true;
+    }
+    return AudioService.init<_YunAudioHandler>(
+      builder: () => _YunAudioHandler(),
+      config: const AudioServiceConfig(
+        androidNotificationChannelId: 'org.yun.audio',
+        androidNotificationChannelName: '韵 playback',
+        androidNotificationOngoing: false,
+        // Keep paused sessions eligible for headset/lock-screen resume on
+        // Android 12+. Stop still releases foreground service/notification.
+        androidStopForegroundOnPause: false,
+      ),
+    );
+  }
 
   BaseAudioHandler? _handler;
   win.SMTCWindows? _windows;
@@ -60,56 +99,116 @@ class NativeSystemMediaControls implements SystemMediaControls {
   int? _lastRepeat;
   Duration? _lastPosition;
   @override
-  Future<void> initialize(MediaCommands commands) async {
-    if (Platform.isWindows) {
-      await win.SMTCWindows.initialize();
-      final windows = win.SMTCWindows();
-      _windows = windows;
-      _subscriptions.add(
-        windows.buttonPressStream.listen((button) {
-          switch (button) {
-            case win.PressedButton.play:
-              unawaited(commands.play());
-            case win.PressedButton.pause:
-              unawaited(commands.pause());
-            case win.PressedButton.next:
-              unawaited(commands.next());
-            case win.PressedButton.previous:
-              unawaited(commands.previous());
-            case win.PressedButton.stop:
-              unawaited(commands.stop());
-            default:
-              break;
-          }
-        }),
-      );
-      _subscriptions.add(windows.shuffleChangeStream.listen(commands.shuffle));
-      _subscriptions.add(
-        windows.repeatModeChangeStream.listen(
-          (mode) => commands.repeat(
-            mode == win.RepeatMode.none
-                ? 0
-                : mode == win.RepeatMode.list
-                ? 1
-                : 2,
+  Future<void> initialize(MediaCommands commands) {
+    if (_disposed) return Future.value();
+    if (_initialized) return Future.value();
+    return _initialization ??= _initialize(commands).whenComplete(() {
+      _initialization = null;
+    });
+  }
+
+  Future<void> _initialize(MediaCommands commands) async {
+    // Native callbacks may arrive while disposing. Never retain authority to
+    // call a retired controller, even if native initialization completes late.
+    final guarded = MediaCommands(
+      play: () async {
+        if (!_disposed) await commands.play();
+      },
+      pause: () async {
+        if (!_disposed) await commands.pause();
+      },
+      stop: () async {
+        if (!_disposed) await commands.stop();
+      },
+      next: () async {
+        if (!_disposed) await commands.next();
+      },
+      previous: () async {
+        if (!_disposed) await commands.previous();
+      },
+      seek: (position) async {
+        if (!_disposed) await commands.seek(position);
+      },
+      shuffle: (value) {
+        if (!_disposed) commands.shuffle(value);
+      },
+      repeat: (value) {
+        if (!_disposed) commands.repeat(value);
+      },
+    );
+    if (_initializeWindows != null ||
+        (Platform.isWindows && _initializeHandler == null)) {
+      win.SMTCWindows? windows;
+      final subscriptions = <StreamSubscription<dynamic>>[];
+      try {
+        if (_initializeWindows != null) {
+          windows = await _initializeWindows();
+        } else {
+          await win.SMTCWindows.initialize();
+          windows = win.SMTCWindows();
+        }
+        if (_disposed) {
+          final retired = windows;
+          windows = null;
+          await retired.dispose();
+          return;
+        }
+        subscriptions.add(
+          windows.buttonPressStream.listen((button) {
+            switch (button) {
+              case win.PressedButton.play:
+                unawaited(guarded.play());
+              case win.PressedButton.pause:
+                unawaited(guarded.pause());
+              case win.PressedButton.next:
+                unawaited(guarded.next());
+              case win.PressedButton.previous:
+                unawaited(guarded.previous());
+              case win.PressedButton.stop:
+                unawaited(guarded.stop());
+              default:
+                break;
+            }
+          }),
+        );
+        subscriptions.add(windows.shuffleChangeStream.listen(guarded.shuffle));
+        subscriptions.add(
+          windows.repeatModeChangeStream.listen(
+            (mode) => guarded.repeat(
+              mode == win.RepeatMode.none
+                  ? 0
+                  : mode == win.RepeatMode.list
+                  ? 1
+                  : 2,
+            ),
           ),
-        ),
-      );
+        );
+        _windows = windows;
+        _subscriptions.addAll(subscriptions);
+      } catch (_) {
+        // A subscription getter/listen can fail after native allocation.
+        // Preserve the original failure while releasing every partial owner.
+        for (final subscription in subscriptions) {
+          try {
+            await subscription.cancel();
+          } catch (_) {}
+        }
+        try {
+          await windows?.dispose();
+        } catch (_) {}
+        rethrow;
+      }
     } else {
-      if (Platform.isLinux) AudioServiceMpris.registerWith();
-      _handler = await AudioService.init<_YunAudioHandler>(
-        builder: () => _YunAudioHandler(commands),
-        config: const AudioServiceConfig(
-          androidNotificationChannelId: 'org.yun.audio',
-          androidNotificationChannelName: '韵 playback',
-          androidNotificationOngoing: false,
-          // Keep the service foreground while paused so headset/lock-screen
-          // resume does not illegally restart a background FGS on Android 12+.
-          // Explicit Stop releases the service/notification.
-          androidStopForegroundOnPause: false,
-        ),
-      );
+      final handler = await (_initializeHandler?.call() ?? _audioHandler());
+      _handler = handler;
+      if (!_disposed) {
+        _handlerOwners[handler] = this;
+        if (handler is _YunAudioHandler) handler.commands = guarded;
+      }
     }
+    if (_disposed) return;
+    _forceUpdate = true;
+    _initialized = true;
   }
 
   @override
@@ -119,11 +218,12 @@ class NativeSystemMediaControls implements SystemMediaControls {
     required int index,
     required bool playing,
     required bool buffering,
+    bool waitingForAudio = false,
     required Duration position,
     required bool shuffle,
     required int repeat,
   }) {
-    if (_disposed) return Future.value();
+    if (_disposed || !_initialized) return Future.value();
     // At most one bridge call and one latest snapshot are retained. All callers
     // in a burst wait for the same drain, including its final/latest state.
     // PlaybackController supplies an immutable, stable queue snapshot.
@@ -133,6 +233,7 @@ class NativeSystemMediaControls implements SystemMediaControls {
       index: index,
       playing: playing,
       buffering: buffering,
+      waitingForAudio: waitingForAudio,
       position: position,
       shuffle: shuffle,
       repeat: repeat,
@@ -176,11 +277,13 @@ class NativeSystemMediaControls implements SystemMediaControls {
     required int index,
     required bool playing,
     required bool buffering,
+    bool waitingForAudio = false,
     required Duration position,
     required bool shuffle,
     required int repeat,
   }) async {
     final handler = _handler;
+    if (handler != null && !identical(_handlerOwners[handler], this)) return;
     final metadataChanged =
         _forceUpdate ||
         (!identical(_lastTrack, track) &&
@@ -206,7 +309,7 @@ class NativeSystemMediaControls implements SystemMediaControls {
         PlaybackState(
           controls: [
             MediaControl.skipToPrevious,
-            playing ? MediaControl.pause : MediaControl.play,
+            playing || waitingForAudio ? MediaControl.pause : MediaControl.play,
             MediaControl.skipToNext,
             MediaControl.stop,
           ],
@@ -214,10 +317,14 @@ class NativeSystemMediaControls implements SystemMediaControls {
           androidCompactActionIndices: const [0, 1, 2],
           processingState: track == null
               ? AudioProcessingState.idle
-              : buffering
+              : buffering || waitingForAudio
               ? AudioProcessingState.buffering
               : AudioProcessingState.ready,
-          playing: playing,
+          // audio_service defines this as play-when-ready, not audible output.
+          // An eligible user-started wait must enter foreground before screen
+          // lock; promoting only on a later GAIN may be disallowed in background.
+          // Buffering keeps the system position frozen while waiting.
+          playing: playing || waitingForAudio,
           updatePosition: position,
           queueIndex: index < 0 ? null : index,
           shuffleMode: shuffle
@@ -296,40 +403,52 @@ class NativeSystemMediaControls implements SystemMediaControls {
   Future<void> _dispose() async {
     // Refuse new snapshots immediately, but drain the accepted latest state.
     _disposed = true;
+    try {
+      await _initialization;
+    } catch (_) {}
     await _updates;
     for (final sub in _subscriptions) {
       await sub.cancel();
     }
-    _handler?.playbackState.add(
-      PlaybackState(processingState: AudioProcessingState.idle),
-    );
-    _handler?.mediaItem.add(null);
-    _handler?.queue.add([]);
+    final handler = _handler;
+    // A process-wide audio_service handler can be reused by a later app
+    // controller. An older disposer must not detach or clear its new owner.
+    if (handler != null &&
+        (_handlerOwners[handler] == null ||
+            identical(_handlerOwners[handler], this))) {
+      _handlerOwners[handler] = null;
+      if (handler is _YunAudioHandler) handler.commands = null;
+      handler.playbackState.add(
+        PlaybackState(processingState: AudioProcessingState.idle),
+      );
+      handler.mediaItem.add(null);
+      handler.queue.add([]);
+    }
     await _windows?.dispose();
   }
 }
 
 class _YunAudioHandler extends BaseAudioHandler {
-  _YunAudioHandler(this.commands);
-  final MediaCommands commands;
+  MediaCommands? commands;
   @override
-  Future<void> play() => commands.play();
+  Future<void> play() => commands?.play() ?? Future.value();
   @override
-  Future<void> pause() => commands.pause();
+  Future<void> pause() => commands?.pause() ?? Future.value();
   @override
-  Future<void> stop() => commands.stop();
+  Future<void> stop() => commands?.stop() ?? Future.value();
   @override
-  Future<void> skipToNext() => commands.next();
+  Future<void> skipToNext() => commands?.next() ?? Future.value();
   @override
-  Future<void> skipToPrevious() => commands.previous();
+  Future<void> skipToPrevious() => commands?.previous() ?? Future.value();
   @override
-  Future<void> seek(Duration position) => commands.seek(position);
+  Future<void> seek(Duration position) =>
+      commands?.seek(position) ?? Future.value();
   @override
   Future<void> setShuffleMode(AudioServiceShuffleMode mode) async =>
-      commands.shuffle(mode != AudioServiceShuffleMode.none);
+      commands?.shuffle(mode != AudioServiceShuffleMode.none);
   @override
   Future<void> setRepeatMode(AudioServiceRepeatMode mode) async =>
-      commands.repeat(
+      commands?.repeat(
         mode == AudioServiceRepeatMode.none
             ? 0
             : mode == AudioServiceRepeatMode.one

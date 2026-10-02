@@ -259,6 +259,14 @@ do not publish credentials, listening history, personal library files, or tokens
   runtime observation; Dart mocks cannot establish those behaviors.
 - [ ] Background/minimized/locked playback, resume after interruption, headphone/
   Bluetooth transitions, Android audio focus and battery/background constraints.
+  For automatic focus waiting, verify API 26+ delayed acquisition and GAIN,
+  cancellation by Pause/Stop/track replacement/logout while waiting, position
+  after seek, permanent loss without autoplay, and a cold background media-service
+  engine. Repeat while screen-off and on API 35+; an ineligible background focus
+  request must remain a denial, never an endless wait or focus-reclaim loop.
+  Also verify failed background-service binding followed by explicit Play retry,
+  a durable service warning while foreground audio remains playable, successful
+  metadata/control restoration, and Pause/Stop during a delayed initialization.
 - [ ] Secure storage on the actual OS: Linux Secret Service/keyring, macOS Keychain,
   Windows protected storage, Android Keystore; logout/account switching remove
   inappropriate credentials/cache and never expose another account's resources.

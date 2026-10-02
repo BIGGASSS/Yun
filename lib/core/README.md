@@ -151,12 +151,59 @@ only after successful download/checksum verification. No local playback error
 silently resolves a network source. Remote stream failures retain one bounded
 local-first recovery attempt, preserving position and paused intent.
 
-Audio-focus denial and interruption before native open are session failures,
-not evidence of a damaged download. They expose `audioFocusError` instead of
-`localPlaybackError`, show a Play retry message without Redownload, and never
-trigger automatic streaming/recovery. Explicit Play reopens the same local-first
-source and preserves the paused position. Native interruption pauses retain the
-OS focus registration while waiting for gain; explicit pause/stop release it.
-Old pause/release completion cannot abandon a newer playback command's focus.
-Deterministic tests cover these ordering rules with fake native/session APIs;
-Android hardware focus, routing and background policy still require device QA.
+Audio-focus denial is a session failure, not evidence of a damaged download.
+It exposes `audioFocusError` instead of `localPlaybackError`, shows a Play retry
+message without Redownload, and never triggers automatic streaming/recovery.
+Explicit Play reopens the same local-first source at the paused position.
+
+Android API 26+ uses the engine-owned `yun_android_audio_focus` plugin to request
+media focus with delayed gain enabled. GRANTED, DELAYED and FAILED remain distinct:
+only a real delayed request or resumable transient interruption enters
+`isWaitingForAudio`. The UI shows **Waiting for audio**, and both app and system
+controls offer Pause to cancel. The system media state uses audio_service's
+play-when-ready plus buffering semantics during waiting, so an eligible user-started
+wait establishes the foreground service before screen lock. Actual engine playing,
+listening time and position advancement remain inactive until GAIN. Focus GAIN
+automatically resumes the selected
+source and position, including an initial open interrupted before native loading.
+Pending opens hold the already-resolved source; they do not re-resolve a completed
+download into streaming. Native Android loading is silent until the grant and
+playback intent are still current. Seeking while waiting updates the pending start.
+
+Pause, Stop, noisy output, replacement, account teardown, disposal and permanent
+loss invalidate pending resume. Late or duplicate gains cannot resurrect it.
+Transient waits retain their OS registration; explicit cancellation releases it.
+The bridge is generated-plugin registered, including cold background service
+engines, owns the noisy-output receiver while registered, and does not retain an
+Activity. It never polls/reclaims focus or upgrades
+an outright denial to a promise of eventual gain. API 24–25 retain ordinary
+immediate-grant/denial semantics. Existing Apple session behavior is retained.
+
+Dart engine/controller/channel and widget tests plus Android-free JVM coordinator
+tests exercise these ordering rules. Full Android compilation runs in native CI;
+hardware focus, audible output, routing and background policy still require device
+QA. In particular Android 15+ focus eligibility requires a foreground app or
+eligible foreground service; delayed focus support does not bypass that rule.
+
+### Background media initialization recovery
+
+Engine initialization and system-media initialization have independent success
+states. A failed service attempt remains visible as `systemMediaControlsError`,
+including in compact player strips after foreground audio starts; it never
+marks downloaded bytes as damaged or offers Redownload. The original foreground
+playback policy is preserved, but background service availability is not implied
+until `systemMediaControlsAvailable` is true.
+
+A later explicit Play, source selection, Next or Previous retries failed service
+setup once. A concurrent burst shares the same attempt; native state events,
+automatic track advancement, settings and timers do not retry it. Successful setup
+replays the current metadata/state without recreating the engine, subscriptions,
+or recording timer. Pause, Stop and shutdown cancel stale initialization intents;
+retired native control owners cannot clear a newer owner's handler.
+
+The pinned `packages/audio_service` runtime patch makes failed pre-handler
+configuration retryable without re-registering global observers. Its exact
+upstream provenance and bounded native-binding recovery changes are documented in
+`packages/audio_service/FORK.md`. OS binding/foreground restrictions still apply.
+Linux MPRIS/DBus recovery has separate platform constraints; this Android service
+fix is not a claim of universal native-service recovery.

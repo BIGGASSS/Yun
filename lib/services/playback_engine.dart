@@ -2,10 +2,11 @@ import 'dart:async';
 import 'dart:io';
 import 'dart:math' as math;
 
-import 'package:audio_session/audio_session.dart';
+import 'package:audio_session/audio_session.dart' hide AndroidAudioFocus;
 import 'package:media_kit/media_kit.dart';
 import 'package:path/path.dart' as path;
 
+import 'android_audio_focus.dart';
 import 'playback_relay.dart';
 
 /// Playback was not permitted by the operating system, not a file failure.
@@ -32,11 +33,12 @@ class EngineState {
     this.completed = false,
     this.error,
     this.audioFocusFailure = false,
+    this.waitingForAudio = false,
   });
   final bool playing, buffering, completed;
   final Duration position, duration;
   final String? error;
-  final bool audioFocusFailure;
+  final bool audioFocusFailure, waitingForAudio;
 }
 
 abstract interface class PlaybackEngine {
@@ -67,10 +69,12 @@ class MediaKitEngine implements PlaybackEngine {
     Future<AudioSession?> Function()? loadSession,
     // Override only when testing Android versus Apple interruption semantics.
     bool? androidAudioFocus,
+    AndroidAudioFocus? focus,
     this._createHttpClient,
   }) : _createPlayer = createPlayer ?? _nativePlayer,
        _loadSession = loadSession ?? _nativeSession,
        _androidAudioFocus = androidAudioFocus ?? Platform.isAndroid,
+       _focus = focus ?? (Platform.isAndroid ? AndroidAudioFocus() : null),
        _sessionOptional = loadSession == null && Platform.isMacOS;
 
   final Future<Player> Function() _createPlayer;
@@ -80,6 +84,7 @@ class MediaKitEngine implements PlaybackEngine {
   final Future<AudioSession?> Function() _loadSession;
   final bool _sessionOptional;
   final bool _androidAudioFocus;
+  final AndroidAudioFocus? _focus;
   Player? _player;
   AudioSession? _session;
   Future<void>? _initializing;
@@ -88,13 +93,16 @@ class MediaKitEngine implements PlaybackEngine {
   bool _resumeAfterInterruption = false,
       _interrupted = false,
       _disposed = false;
-  int _intent = 0;
-  int? _interruptionIntent, _openingBeforeNative;
+  int _intent = 0, _focusGainSerial = 0;
+  int? _interruptionIntent;
   final _pendingHalts = <Future<void>>{};
   Future<void>? _deactivating;
   bool _wantsPlayback = false, _focusNeedsRelease = false;
   _NativeSource? _nativeSource;
   String? _retiredLocalUri;
+  bool _waitingForAudio = false;
+  _OpenSource? _selectedOpen, _openingRequest, _pendingOpen;
+  Future<void>? _openingDone;
 
   // Only our relay capability URLs have this shape. Native log events have no
   // source ID, but a failed-open message naming a different capability cannot
@@ -140,21 +148,7 @@ class MediaKitEngine implements PlaybackEngine {
 
   Future<void> _initialize() async {
     final player = await _createPlayer();
-    void emit([Object? error]) {
-      if (_disposed) return;
-      final s = player.state;
-      _states.add(
-        EngineState(
-          playing: s.playing,
-          buffering: s.buffering,
-          position: s.position,
-          duration: s.duration,
-          completed: s.completed,
-          error: error?.toString(),
-          audioFocusFailure: error is AudioFocusUnavailable,
-        ),
-      );
-    }
+    void emit([Object? error]) => _emit(player, error);
 
     try {
       // Defense in depth: native playback receives only loopback relay URLs,
@@ -185,68 +179,37 @@ class MediaKitEngine implements PlaybackEngine {
           emit(message);
         }),
       ]);
-      if (session != null) {
+      final focus = _focus;
+      if (focus != null) {
         _subscriptions.add(
-          session.interruptionEventStream.listen((event) {
-            if (event.begin) {
-              // A late loss notification must not re-arm automatic resume or
-              // invalidate a user pause/stop that is still awaiting native work.
-              if (!_wantsPlayback && !_interrupted) return;
-              // Android unknown means permanent loss. Apple begins every
-              // interruption as unknown and supplies shouldResume at its end.
-              final permanent =
-                  _androidAudioFocus &&
-                  event.type == AudioInterruptionType.unknown;
-              if (!_interrupted) {
-                _resumeAfterInterruption =
-                    !permanent &&
-                    _wantsPlayback &&
-                    player.state.playing &&
-                    _openingBeforeNative == null;
-              }
-              if (permanent) _resumeAfterInterruption = false;
-              _interrupted = !permanent;
-              _focusNeedsRelease |= permanent;
-              _wantsPlayback = false;
-              final intent = _interruptionIntent = ++_intent;
-              // A transient loss must retain the OS registration to receive
-              // focus gain. It is not the same operation as a user pause.
-              unawaited(
-                _pausePlayer(intent, releaseFocus: permanent).catchError((
-                  Object error,
-                ) {
-                  if (intent == _intent) emit(error);
-                }),
-              );
-            } else {
-              final resume =
-                  _interrupted &&
-                  _resumeAfterInterruption &&
-                  event.type != AudioInterruptionType.unknown;
-              _interrupted = false;
-              _resumeAfterInterruption = false;
-              if (resume) {
-                final playing = play();
-                final intent = _intent;
-                unawaited(
-                  playing.catchError((Object error) {
-                    if (intent == _intent) emit(error);
-                  }),
-                );
-              }
+          focus.changes.listen((change) {
+            if (change == AndroidFocusChange.noisy) {
+              _handleNoisy(player);
+              return;
             }
-          }),
-        );
-        _subscriptions.add(
-          session.becomingNoisyEventStream.listen((_) {
-            final pausing = pause();
-            final intent = _intent;
-            unawaited(
-              pausing.catchError((Object error) {
-                if (intent == _intent) emit(error);
-              }),
+            _handleInterruption(
+              player,
+              AudioInterruptionEvent(
+                change != AndroidFocusChange.gain,
+                change == AndroidFocusChange.loss
+                    ? AudioInterruptionType.unknown
+                    : AudioInterruptionType.pause,
+              ),
             );
           }),
+        );
+      } else if (session != null) {
+        _subscriptions.add(
+          session.interruptionEventStream.listen(
+            (event) => _handleInterruption(player, event),
+          ),
+        );
+      }
+      // On Android the native focus owner also owns the noisy receiver.
+      // audio_session only registers that receiver when it acquires focus.
+      if (session != null && focus == null) {
+        _subscriptions.add(
+          session.becomingNoisyEventStream.listen((_) => _handleNoisy(player)),
         );
       }
       // Publish only a fully configured player. TLS/session failures below
@@ -260,6 +223,129 @@ class MediaKitEngine implements PlaybackEngine {
       _subscriptions.clear();
       await player.dispose();
       rethrow;
+    }
+  }
+
+  void _emit(Player player, [Object? error]) {
+    if (_disposed) return;
+    final s = player.state;
+    final unopened =
+        _openingRequest ?? (_nativeSource == null ? _selectedOpen : null);
+    _states.add(
+      EngineState(
+        playing: s.playing && !_waitingForAudio,
+        buffering: s.buffering && !_waitingForAudio,
+        position: unopened?.start ?? s.position,
+        duration: unopened == null ? s.duration : Duration.zero,
+        completed: s.completed && !_waitingForAudio && unopened == null,
+        error: error?.toString(),
+        audioFocusFailure: error is AudioFocusUnavailable,
+        waitingForAudio: _waitingForAudio,
+      ),
+    );
+  }
+
+  void _clearWaiting({bool releaseFocus = false}) {
+    if (releaseFocus && _waitingForAudio) _focusNeedsRelease = true;
+    _waitingForAudio = false;
+    _pendingOpen = null;
+  }
+
+  void _waitForAudio() {
+    _pendingOpen ??= _openingRequest;
+    _waitingForAudio = true;
+    _interrupted = true;
+    _resumeAfterInterruption = true;
+    final player = _player;
+    if (player != null) _emit(player);
+  }
+
+  void _handleNoisy(Player player) {
+    final pausing = pause();
+    final intent = _intent;
+    unawaited(
+      pausing.catchError((Object error) {
+        if (intent == _intent) _emit(player, error);
+      }),
+    );
+  }
+
+  void _handleInterruption(Player player, AudioInterruptionEvent event) {
+    if (_disposed) return;
+    if (event.begin) {
+      // Explicit Pause/Stop always wins, including while native pause is pending.
+      if (!_wantsPlayback && !_interrupted && !_waitingForAudio) return;
+      final permanent =
+          _androidAudioFocus && event.type == AudioInterruptionType.unknown;
+      if (!_interrupted) {
+        _resumeAfterInterruption =
+            !permanent && (_wantsPlayback || _waitingForAudio);
+      }
+      if (permanent) _resumeAfterInterruption = false;
+      if (_resumeAfterInterruption) {
+        _pendingOpen ??= _openingRequest;
+        _waitingForAudio = true;
+      } else {
+        _clearWaiting();
+      }
+      _interrupted = !permanent;
+      _focusNeedsRelease |= permanent;
+      _wantsPlayback = false;
+      final intent = _interruptionIntent = ++_intent;
+      _emit(player);
+      // Keep transient registrations alive: only the OS gain event resumes us.
+      unawaited(
+        _pausePlayer(intent, releaseFocus: permanent).catchError((
+          Object error,
+        ) {
+          if (intent == _intent) {
+            _clearWaiting();
+            _emit(player, error);
+          }
+        }),
+      );
+    } else {
+      if (event.type != AudioInterruptionType.unknown) _focusGainSerial++;
+      // Duplicate/late gains carry no new intent. In particular they must not
+      // clear a resume already waiting for an interrupted open to finish.
+      if (!_interrupted && event.type != AudioInterruptionType.unknown) return;
+      final resume =
+          _interrupted &&
+          _resumeAfterInterruption &&
+          event.type != AudioInterruptionType.unknown;
+      _interrupted = false;
+      _resumeAfterInterruption = false;
+      if (resume) {
+        final intent = _intent;
+        unawaited(_resumeOnGain(intent));
+      } else {
+        _clearWaiting();
+        _emit(player);
+      }
+    }
+  }
+
+  Future<void> _resumeOnGain(int intent) async {
+    final pending = _pendingOpen;
+    // A gain may arrive before the interrupted open/request has settled. Never
+    // overlap its cleanup with the replacement native open.
+    await _openingDone;
+    if (_disposed || intent != _intent || !_waitingForAudio) return;
+    _clearWaiting();
+    Future<void> resumed;
+    if (pending != null) {
+      resumed = _open(pending);
+    } else {
+      resumed = play();
+    }
+    final resumedIntent = _intent;
+    try {
+      await resumed;
+    } catch (error) {
+      if (!_disposed && resumedIntent == _intent) {
+        _clearWaiting();
+        _emit(_player!, error);
+      }
     }
   }
 
@@ -317,9 +403,9 @@ class MediaKitEngine implements PlaybackEngine {
 
   bool _openCancelled(int intent) {
     if (intent == _intent && !_disposed) return false;
-    // Unlike an explicit stop/pause/replacement, interruption must not make an
-    // unopened source look successfully loaded to the controller.
-    if (!_disposed && _intent == _interruptionIntent) {
+    // Transient loss owns a pending open; permanent loss is still a typed
+    // focus failure rather than a successfully loaded, empty native player.
+    if (!_disposed && _intent == _interruptionIntent && !_waitingForAudio) {
       throw const AudioFocusUnavailable.interrupted();
     }
     return true;
@@ -333,11 +419,11 @@ class MediaKitEngine implements PlaybackEngine {
     }
     if (intent != _intent) return;
     final session = targetSession ?? _session;
-    if (session == null) return;
+    if (session == null && _focus == null) return;
     _focusNeedsRelease = true;
     Future<void> release() async {
       try {
-        if (!await session.setActive(false)) {
+        if (!await (_focus?.abandon() ?? session!.setActive(false))) {
           throw const AudioFocusUnavailable();
         }
         _focusNeedsRelease = false;
@@ -370,15 +456,14 @@ class MediaKitEngine implements PlaybackEngine {
       rethrow;
     }
     if (intent != _intent || _disposed) return false;
-    // audio_session caches the registered Android request, including while
-    // transiently interrupted. Asking again can report a cached true without
-    // an OS grant; only the matching interruption end permits another play.
+    // Only the matching OS gain permits another play. Never treat a cached
+    // registration or a new Play press as a grant during an interruption.
     if (_interrupted) {
-      _wantsPlayback = false;
-      throw const AudioFocusUnavailable();
+      _waitForAudio();
+      return false;
     }
     // Permanent loss and failed cleanup require a real release before asking
-    // again; audio_session must not answer from its cached request.
+    // again; no adapter may answer from an obsolete registration.
     try {
       if (_focusNeedsRelease) await _deactivate(intent);
     } catch (_) {
@@ -388,24 +473,56 @@ class MediaKitEngine implements PlaybackEngine {
     }
     if (intent != _intent || _disposed) return false;
     final session = _session;
-    var accepted = false;
+    final gainAtRequest = _focusGainSerial;
+    var result = AudioFocusRequestResult.failed;
     try {
-      accepted = session == null || await session.setActive(true);
+      result = _focus != null
+          ? await _focus.request()
+          : session == null || await session.setActive(true)
+          ? AudioFocusRequestResult.granted
+          : AudioFocusRequestResult.failed;
     } catch (_) {
       // Platform activation exceptions are focus failures too. The same
       // cleanup/retry rules apply as for a refused request.
     }
     if (intent != _intent || _disposed) {
+      if (!_disposed &&
+          _intent == _interruptionIntent &&
+          _waitingForAudio &&
+          result == AudioFocusRequestResult.failed) {
+        // An interruption callback does not turn an ultimately refused request
+        // into a delayed grant. Failed acquisition owns no future gain promise.
+        _clearWaiting();
+        _interrupted = _resumeAfterInterruption = _wantsPlayback = false;
+        if (_player != null) _emit(_player!);
+        try {
+          await _deactivate(_intent);
+        } catch (_) {
+          /* retain denial */
+        }
+        throw const AudioFocusUnavailable();
+      }
       // A late grant following an explicit stop/pause must be released again.
-      // Retain registration for a transient interruption of loaded playback.
-      if (!_wantsPlayback && !_interrupted) {
+      // Retain registration while a transient initial-open/resume is pending.
+      if (!_wantsPlayback && !_interrupted && !_waitingForAudio) {
         // dispose may already have detached _session while this OS request
         // was pending; its captured session still owns the late grant.
         await _deactivate(_intent, targetSession: session);
       }
       return false;
     }
-    if (!accepted) {
+    if (result == AudioFocusRequestResult.delayed &&
+        gainAtRequest != _focusGainSerial &&
+        !_interrupted) {
+      // Method responses and callbacks can cross in transit. A verified gain
+      // received during this request supersedes its earlier DELAYED result.
+      result = AudioFocusRequestResult.granted;
+    }
+    if (result == AudioFocusRequestResult.delayed) {
+      _waitForAudio();
+      return false;
+    }
+    if (result == AudioFocusRequestResult.failed) {
       _wantsPlayback = false;
       // audio_session may cache a denied request; clear it before any retry.
       try {
@@ -426,9 +543,21 @@ class MediaKitEngine implements PlaybackEngine {
     Map<String, String>? headers,
     bool play = true,
     Duration start = Duration.zero,
-  }) async {
+  }) {
+    _clearWaiting(releaseFocus: true);
+    _interrupted = false;
+    return _open(_OpenSource(uri, headers, play, start));
+  }
+
+  Future<void> _open(_OpenSource request) async {
+    final uri = request.uri;
+    final headers = request.headers;
+    final play = request.play;
+    final start = request.start;
     final intent = ++_intent;
-    _openingBeforeNative = intent;
+    final done = Completer<void>();
+    _openingDone = done.future;
+    _selectedOpen = _openingRequest = request;
     _wantsPlayback = play;
     _resumeAfterInterruption = false;
     _retireNativeSource();
@@ -494,10 +623,15 @@ class MediaKitEngine implements PlaybackEngine {
         httpHeaders: network ? null : headers,
         start: start,
       );
-      _openingBeforeNative = null;
       _nativeSource = nativeSource = _NativeSource(media.uri, local, source);
-      await _player!.open(media, play: play);
+      // Android native loading is staged silently. A focus loss or explicit
+      // cancellation during an asynchronous load must not make that load start
+      // audio after the interruption's pause command has already completed.
+      final nativeOpening = _player!.open(media, play: play && _focus == null);
+      await nativeOpening;
       nativeOpenCompleted = true;
+      if (intent != _intent || _disposed) return;
+      if (play && _focus != null) await _player!.play();
       if (intent != _intent || _disposed) return;
       opened = true;
       source?.opening = false;
@@ -505,34 +639,48 @@ class MediaKitEngine implements PlaybackEngine {
       openingFailure = error;
       rethrow;
     } finally {
-      if (_openingBeforeNative == intent) _openingBeforeNative = null;
-      if (!opened) {
-        // A pause can invalidate intent while a local open finishes. The file
-        // remains loaded and must still report its own errors on resume.
-        if (!nativeOpenCompleted && identical(_nativeSource, nativeSource)) {
-          _retireNativeSource();
-        }
-        if (source != null) await _retireRelay(source);
-        // An unsuccessful open owns no audio output. Do not leak granted or
-        // denied focus, but never release a replacement command's focus.
-        if (!nativeOpenCompleted &&
-            (intent == _intent ||
-                (_intent == _interruptionIntent && _nativeSource == null))) {
-          _wantsPlayback = false;
-          try {
-            await _deactivate(_intent);
-          } catch (_) {
-            // A cleanup failure must not relabel denied/interrupted focus as
-            // a broken file. Keep the original cause available for retry.
-            if (openingFailure == null) rethrow;
+      try {
+        if (!opened) {
+          // A pause can invalidate intent while a local open finishes. The file
+          // remains loaded and must still report its own errors on resume.
+          if (!nativeOpenCompleted && identical(_nativeSource, nativeSource)) {
+            _retireNativeSource();
+          }
+          if (source != null) await _retireRelay(source);
+          // An unsuccessful open owns no audio output. Do not leak granted or
+          // denied focus, but never release a replacement command's focus.
+          if (!nativeOpenCompleted &&
+              !(_waitingForAudio && identical(_pendingOpen, request)) &&
+              (intent == _intent ||
+                  (_intent == _interruptionIntent && _nativeSource == null))) {
+            _wantsPlayback = false;
+            try {
+              await _deactivate(_intent);
+            } catch (_) {
+              // A cleanup failure must not relabel denied/interrupted focus as
+              // a broken file. Keep the original cause available for retry.
+              if (openingFailure == null) rethrow;
+            }
           }
         }
+      } finally {
+        if (identical(_openingRequest, request)) _openingRequest = null;
+        if (identical(_openingDone, done.future)) _openingDone = null;
+        done.complete();
       }
     }
   }
 
   @override
   Future<void> play() async {
+    if (_waitingForAudio) return;
+    final selected = _selectedOpen;
+    if (_nativeSource == null && selected != null) {
+      await _open(
+        _OpenSource(selected.uri, selected.headers, true, selected.start),
+      );
+      return;
+    }
     final intent = ++_intent;
     _wantsPlayback = true;
     await initialize();
@@ -604,6 +752,7 @@ class MediaKitEngine implements PlaybackEngine {
 
   @override
   Future<void> pause() async {
+    _clearWaiting();
     _wantsPlayback = false;
     final intent = ++_intent;
     _resumeAfterInterruption = false;
@@ -613,6 +762,12 @@ class MediaKitEngine implements PlaybackEngine {
 
   @override
   Future<void> seek(Duration position) async {
+    final selected = _selectedOpen;
+    if (selected != null) selected.start = position;
+    if (_nativeSource == null && selected != null) {
+      if (_player != null) _emit(_player!);
+      return;
+    }
     await _player?.seek(position);
   }
 
@@ -634,6 +789,8 @@ class MediaKitEngine implements PlaybackEngine {
 
   @override
   Future<void> stop() async {
+    _clearWaiting();
+    _selectedOpen = null;
     _wantsPlayback = false;
     _retireNativeSource();
     final intent = ++_intent;
@@ -661,6 +818,8 @@ class MediaKitEngine implements PlaybackEngine {
   Future<void> dispose() async {
     if (_disposed) return;
     _disposed = true;
+    _clearWaiting();
+    _selectedOpen = null;
     _wantsPlayback = false;
     _interrupted = false;
     _nativeSource = null;
@@ -698,6 +857,9 @@ class MediaKitEngine implements PlaybackEngine {
         await _player?.dispose();
       });
       await cleanup(() => _deactivate(_intent));
+      await cleanup(() async {
+        await _focus?.dispose();
+      });
     } finally {
       _player = null;
       _session = null;
@@ -705,6 +867,16 @@ class MediaKitEngine implements PlaybackEngine {
     }
     if (failure != null) Error.throwWithStackTrace(failure!, failureStack!);
   }
+}
+
+class _OpenSource {
+  _OpenSource(this.uri, Map<String, String>? headers, this.play, this.start)
+    : headers = headers == null ? null : Map.unmodifiable(headers);
+  final String uri;
+  final Map<String, String>? headers;
+  final bool play;
+  // Seeking while acquisition is pending updates the eventual native start.
+  Duration start;
 }
 
 class _NativeSource {

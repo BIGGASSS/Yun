@@ -12,6 +12,8 @@ dependencies:
   audio_service: ^0.18.18
   audio_service_mpris: ^0.2.0
   audio_session: ^0.2.2
+  yun_android_audio_focus:
+    path: packages/yun_android_audio_focus
   crypto: ^3.0.6
   dbus: ^0.7.15
   desktop_drop: ^0.8.4
@@ -33,13 +35,18 @@ dependencies:
   uuid: ^4.5.2
   window_manager: 0.5.2
 
-# Linux-only patch: retain libsecret encryption and support KDE's advertised
-# org.kde.secretservicecompat endpoint when the standard name is absent.
 dependency_overrides:
+  # Pinned 0.18.19: permit failed pre-handler service configuration to retry.
+  audio_service:
+    path: packages/audio_service
+  # Retain libsecret encryption and support KDE's advertised
+  # org.kde.secretservicecompat endpoint when the standard name is absent.
   flutter_secure_storage_linux:
     path: packages/flutter_secure_storage_linux
 
 dev_dependencies:
+  audio_service_platform_interface: ^0.1.3
+  flutter_cache_manager: ^3.4.1
   flutter_test:
     sdk: flutter
   flutter_lints: ^6.0.0

@@ -25,6 +25,17 @@ Dart `AudioServiceConfig` must choose a deliberate pause/resume policy (see the
 installed audio_service README's `androidStopForegroundOnPause` guidance); native
 manifest configuration alone cannot guarantee background resume.
 
+Audio focus is owned by the local `yun_android_audio_focus` Flutter plugin. Its
+generated registration also covers the audio_service cold background engine.
+Android 8+ can return a real delayed grant; Yun displays **Waiting for audio** and
+starts only on a matching gain. Pause/Stop, replacement, permanent loss and
+account teardown cancel waiting. Android 7 uses immediate grant/denial only.
+The bridge never polls or attempts to bypass foreground eligibility rules.
+The plugin also owns the headphone-unplug/noisy-output receiver for every
+active registration. `audio_session` supplies configuration on Android, but does
+not separately request focus or own the noisy receiver. Run `bash android/test-audio-focus.sh` for JVM
+registration/cancellation tests; these are not device or Android-adapter tests.
+
 Launcher density icons come from the unchanged `assets/icon.png`.
 Build with `fvm flutter build apk --release --split-per-abi` or
 `fvm flutter build appbundle --release`. Configure production signing before

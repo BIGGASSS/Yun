@@ -67,6 +67,7 @@ class _CompactPlayerBar extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final player = app.playback;
+    final canPause = player.isPlaying || player.isWaitingForAudio;
     return Column(
       mainAxisSize: MainAxisSize.min,
       children: [
@@ -87,12 +88,10 @@ class _CompactPlayerBar extends StatelessWidget {
             children: [
               Expanded(child: _MetadataButton(app: app, artSize: 40)),
               IconButton.filledTonal(
-                tooltip: player.isPlaying ? 'Pause' : 'Play',
+                tooltip: canPause ? 'Pause' : 'Play',
                 onPressed: () => runUiAction(context, player.toggle),
                 icon: Icon(
-                  player.isPlaying
-                      ? Icons.pause_rounded
-                      : Icons.play_arrow_rounded,
+                  canPause ? Icons.pause_rounded : Icons.play_arrow_rounded,
                 ),
               ),
               IconButton(
@@ -268,11 +267,12 @@ class DesktopPlayerBar extends StatelessWidget {
   }
 }
 
-/// The first local playback failure remains visible without opening a sheet.
-/// Compact strips show downloaded and audio-focus failures and cap text; the
-/// tooltip and scrollable now-playing sheet retain the full message. The sheet
-/// also keeps other playback errors. Actions wrap below the message at narrow
-/// widths or larger accessibility text sizes.
+/// Waiting, local playback failures and unavailable background controls remain
+/// visible without opening a sheet. Waiting is a neutral status, cancelled with
+/// Pause. A separate service warning survives playback success and other errors;
+/// it never offers file repair. Compact strips cap text, while tooltips and the
+/// scrollable now-playing sheet retain each full message. Repair actions wrap at
+/// narrow widths or larger accessibility text sizes.
 class PlaybackErrorNotice extends StatelessWidget {
   const PlaybackErrorNotice({
     super.key,
@@ -291,58 +291,93 @@ class PlaybackErrorNotice extends StatelessWidget {
       app.playback.localPlaybackError,
       app.playback.error,
       app.playback.audioFocusError,
+      app.playback.isWaitingForAudio,
+      app.playback.systemMediaControlsError,
     ),
     builder: (context, state, _) {
-      final message = state.$2 ?? state.$4 ?? (compact ? null : state.$3);
-      if (message == null) return const SizedBox.shrink();
-      final track = state.$1;
-      // Keep the decoder's cause visible at narrow widths and large text,
-      // rather than spending every available line on the explanatory prefix.
-      const localPrefix = 'Could not play the downloaded audio: ';
-      final displayMessage =
-          compact && state.$2 != null && message.startsWith(localPrefix)
-          ? message.substring(localPrefix.length)
-          : message;
-      return Padding(
-        padding: EdgeInsets.fromLTRB(compact ? 12 : 0, 4, compact ? 12 : 0, 8),
-        child: LayoutBuilder(
-          builder: (context, constraints) {
-            final detail = Semantics(
-              liveRegion: true,
-              child: Tooltip(
-                message: message,
-                child: Text(
-                  displayMessage,
-                  semanticsLabel: message,
-                  maxLines: compact ? 3 : null,
-                  overflow: compact ? TextOverflow.ellipsis : null,
-                  style: Theme.of(context).textTheme.bodySmall
-                      ?.copyWith(color: Theme.of(context).colorScheme.error),
-                ),
-              ),
-            );
-            if (track == null || state.$2 == null) return detail;
-            final action = RedownloadTrackButton(app: app, track: track);
-            if (constraints.maxWidth >= 700 &&
-                MediaQuery.textScalerOf(context).scale(14) <= 18) {
-              return Row(
-                children: [
-                  Expanded(child: detail),
-                  const SizedBox(width: 16),
-                  Flexible(child: action),
-                ],
-              );
-            }
-            return Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [detail, const SizedBox(height: 4), action],
-            );
-          },
-        ),
+      final waiting = state.$5;
+      final serviceWarning = state.$6;
+      // The general error falls back to the service warning. Render it only in
+      // its own notice so the full sheet does not show the same warning twice.
+      final otherError = state.$3 == serviceWarning ? null : state.$3;
+      final message = waiting
+          ? 'Waiting for audio'
+          : state.$2 ?? state.$4 ?? (compact ? null : otherError);
+      if (message == null && serviceWarning == null) {
+        return const SizedBox.shrink();
+      }
+      return Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          if (message != null)
+            _notice(
+              context,
+              message,
+              waiting: waiting,
+              repairTrack: !waiting && state.$2 != null ? state.$1 : null,
+            ),
+          if (serviceWarning != null) _notice(context, serviceWarning),
+        ],
       );
     },
   );
+
+  Widget _notice(
+    BuildContext context,
+    String message, {
+    bool waiting = false,
+    Track? repairTrack,
+  }) {
+    // Keep the decoder's cause visible at narrow widths and large text,
+    // rather than spending every available line on the explanatory prefix.
+    const localPrefix = 'Could not play the downloaded audio: ';
+    final displayMessage =
+        compact && repairTrack != null && message.startsWith(localPrefix)
+        ? message.substring(localPrefix.length)
+        : message;
+    return Padding(
+      padding: EdgeInsets.fromLTRB(compact ? 12 : 0, 4, compact ? 12 : 0, 8),
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          final detail = Semantics(
+            liveRegion: true,
+            child: Tooltip(
+              message: message,
+              child: Text(
+                displayMessage,
+                semanticsLabel: message,
+                maxLines: compact ? 3 : null,
+                overflow: compact ? TextOverflow.ellipsis : null,
+                style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                  color: waiting
+                      ? Theme.of(context).colorScheme.onSurfaceVariant
+                      : Theme.of(context).colorScheme.error,
+                ),
+              ),
+            ),
+          );
+          if (repairTrack == null) return detail;
+          final action = RedownloadTrackButton(app: app, track: repairTrack);
+          if (constraints.maxWidth >= 700 &&
+              MediaQuery.textScalerOf(context).scale(14) <= 18) {
+            return Row(
+              children: [
+                Expanded(child: detail),
+                const SizedBox(width: 16),
+                Flexible(child: action),
+              ],
+            );
+          }
+          return Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [detail, const SizedBox(height: 4), action],
+          );
+        },
+      ),
+    );
+  }
 }
 
 /// Artwork plus truncated title/artist that opens the now playing sheet.
@@ -404,6 +439,7 @@ class _DesktopTransport extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final player = app.playback;
+    final canPause = player.isPlaying || player.isWaitingForAudio;
     final scheme = Theme.of(context).colorScheme;
     // A filled secondary container plus primary glyph makes the persistent
     // shuffle/repeat selection unmistakable in a low-chroma theme.
@@ -441,15 +477,13 @@ class _DesktopTransport extends StatelessWidget {
         ),
         const SizedBox(width: 6),
         IconButton.filled(
-          tooltip: player.isPlaying ? 'Pause' : 'Play',
+          tooltip: canPause ? 'Pause' : 'Play',
           onPressed: player.currentTrack == null
               ? null
               : () => runUiAction(context, player.toggle),
           constraints: const BoxConstraints.tightFor(width: 40, height: 40),
           iconSize: 24,
-          icon: PlayerIcon(
-            player.isPlaying ? PlayerGlyph.pause : PlayerGlyph.play,
-          ),
+          icon: PlayerIcon(canPause ? PlayerGlyph.pause : PlayerGlyph.play),
         ),
         const SizedBox(width: 6),
         IconButton(
@@ -574,6 +608,7 @@ class PlaybackButtons extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final player = app.playback;
+    final canPause = player.isPlaying || player.isWaitingForAudio;
     return Wrap(
       alignment: WrapAlignment.center,
       crossAxisAlignment: WrapCrossAlignment.center,
@@ -592,13 +627,11 @@ class PlaybackButtons extends StatelessWidget {
           iconSize: small ? 24 : 32,
         ),
         IconButton.filled(
-          tooltip: player.isPlaying ? 'Pause' : 'Play',
+          tooltip: canPause ? 'Pause' : 'Play',
           onPressed: player.currentTrack == null
               ? null
               : () => runUiAction(context, player.toggle),
-          icon: Icon(
-            player.isPlaying ? Icons.pause_rounded : Icons.play_arrow_rounded,
-          ),
+          icon: Icon(canPause ? Icons.pause_rounded : Icons.play_arrow_rounded),
           iconSize: small ? 24 : 36,
         ),
         IconButton(

@@ -28,10 +28,9 @@ packages:
   audio_service:
     dependency: "direct main"
     description:
-      name: audio_service
-      sha256: "95f3267f3449eb5cf71c8fcf1d556f57af1e898e2dc5815fb168d1843653edb7"
-      url: "https://pub.dev"
-    source: hosted
+      path: "packages/audio_service"
+      relative: true
+    source: path
     version: "0.18.19"
   audio_service_mpris:
     dependency: "direct main"
@@ -42,7 +41,7 @@ packages:
     source: hosted
     version: "0.2.1"
   audio_service_platform_interface:
-    dependency: transitive
+    dependency: "direct dev"
     description:
       name: audio_service_platform_interface
       sha256: "6283782851f6c8b501b60904a32fc7199dc631172da0629d7301e66f672ab777"
@@ -223,7 +222,7 @@ packages:
     source: sdk
     version: "0.0.0"
   flutter_cache_manager:
-    dependency: transitive
+    dependency: "direct dev"
     description:
       name: flutter_cache_manager
       sha256: f94fc6f5480977e3eb7b622ed488f671ba96c971bd0e274e6bd0f0ba9b044816
@@ -1012,6 +1011,13 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "3.1.4"
+  yun_android_audio_focus:
+    dependency: "direct main"
+    description:
+      path: "packages/yun_android_audio_focus"
+      relative: true
+    source: path
+    version: "0.1.0"
 sdks:
   dart: ">=3.13.4 <4.0.0"
   flutter: ">=3.44.0"

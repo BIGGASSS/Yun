@@ -470,6 +470,7 @@ class _MockSystemControls implements SystemMediaControls {
     required int index,
     required bool playing,
     required bool buffering,
+    bool waitingForAudio = false,
     required Duration position,
     required bool shuffle,
     required int repeat,
