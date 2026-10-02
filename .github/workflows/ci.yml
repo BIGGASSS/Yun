@@ -78,6 +78,7 @@ jobs:
       - run: shellcheck scripts/*.sh scripts/release/*.sh
       - run: python3 scripts/test-release-tooling.py
       - run: python3 scripts/release/test-android-signing.py
+      - run: python3 scripts/release/test-android-resources.py
       - run: python3 scripts/release/test-workflow-policy.py
       - run: YUN_DOMAIN=music.example.com ACME_EMAIL=ci@example.com docker compose -f deploy/compose.yaml config --quiet
       - run: docker build -f deploy/Dockerfile -t yun-server:ci server

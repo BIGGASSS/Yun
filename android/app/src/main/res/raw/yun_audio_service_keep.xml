@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- audio_service receives these resource names from Dart at runtime. The
+     Android release shrinker cannot infer those references from native code.
+     Android 13+ requires a nonzero icon for the Stop custom media action. -->
+<resources xmlns:tools="http://schemas.android.com/tools"
+    tools:keep="@drawable/audio_service_*" />

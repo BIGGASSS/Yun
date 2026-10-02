@@ -71,6 +71,27 @@ class WorkflowPolicyTests(unittest.TestCase):
         cls.native = (WORKFLOWS / "native-builds.yml").read_text()
         cls.android = block(cls.native, "  android:")
 
+    def test_pr_android_build_audits_optimized_release_resources(self):
+        step = block(self.android, "      - name: Verify optimized release APK media resources without signing")
+        self.assertIn("        if: inputs.android_signing == 'debug-signed'\n", step)
+        self.assertIn("        run: bash scripts/release/build-android.sh release-validation\n", step)
+        self.assertNotIn("secrets.", step)
+        upload = block(self.android, "      - name: Preserve verified unsigned release APK for inspection")
+        self.assertIn("        if: inputs.android_signing == 'debug-signed'\n", upload)
+        self.assertIn("          name: yun-android-arm64-release-validation-unsigned\n", upload)
+        self.assertIn("          path: build/release-validation/yun-android-arm64-release-validation-unsigned.apk\n", upload)
+        self.assertLess(self.android.index(step), self.android.index(upload))
+        sdk_tests = block(self.android, "      - name: Resource verifier regressions with installed Android SDK")
+        self.assertIn("        run: python3 scripts/release/test-android-resources.py\n", sdk_tests)
+        self.assertLess(self.android.index(step), self.android.index(sdk_tests))
+        # Keep the actual release shrinker active; a debug build cannot catch
+        # removal of icon names supplied only by Dart at runtime.
+        gradle = (ROOT / "android/app/build.gradle.kts").read_text()
+        release = block(gradle, "        release {")
+        self.assertIn("            isMinifyEnabled = true\n", release)
+        self.assertIn("            isShrinkResources = true\n", release)
+        self.assertIn("python3 scripts/release/test-android-resources.py", self.files[".github/workflows/ci.yml"])
+
     def test_every_external_use_is_sha_pinned_with_ref_comment(self):
         count = 0
         for path, text in self.files.items():

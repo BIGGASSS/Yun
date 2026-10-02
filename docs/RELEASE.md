@@ -83,6 +83,31 @@ ID signing/notarization remain operator-only procedures below; their workflow
 artifacts remain explicitly unsigned. Play App Signing/AAB publication is not
 implemented. Never commit signing keys, passwords, or notarization credentials.
 
+## Android release media-resource validation
+
+Every Android native-build job checks the final optimized release APK, including
+pull requests that otherwise produce a debug-mode evaluation APK. PR/debug jobs
+also build an **unsigned release-mode** APK with code/resource shrinking enabled,
+audit it, and upload `yun-android-arm64-release-validation-unsigned` separately
+from distribution artifacts. It is inspection evidence, not an installable
+candidate, and uses no release-signing credentials.
+
+`scripts/release/verify-android-resources.py FINAL.apk` uses the Android SDK's
+`aapt2` to check the final resource table, nonzero drawable IDs, and their actual
+packaged assets. It fails closed if required `audio_service_*` icons are missing
+or cannot be validated. Signed release builds run the same audit before copying
+anything to `dist/`. Set `--aapt2` explicitly if the SDK is not on PATH or in
+`ANDROID_SDK_ROOT`/`ANDROID_HOME`.
+
+The narrow `android/app/src/main/res/raw/yun_audio_service_keep.xml` rule retains
+icons whose names cross from Dart to Android at runtime. The release shrinker
+cannot infer those references. In particular, Android 13+ requires a valid icon
+for the Stop custom action; dropping it throws before foreground-service startup.
+Run `python3 scripts/release/test-android-resources.py` for the verifier regressions
+and `python3 scripts/release/test-android-signing.py` for fail-closed build ordering.
+APK inspection does not replace first-play/lock-screen testing on an Android 13+
+device, and does not certify audio focus or vendor background-policy behavior.
+
 ## Repository and workflow protections
 
 GitHub settings are not defined by workflow YAML. Keep these controls enabled:
