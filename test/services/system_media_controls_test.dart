@@ -60,6 +60,70 @@ Future<void> _update(
 );
 
 void main() {
+  test(
+    'waiting publishes play-when-ready and buffering with frozen position',
+    () async {
+      final handler = BaseAudioHandler();
+      final controls = NativeSystemMediaControls(handler: handler);
+      const track = Track(id: 'a', title: 'A');
+      Future<void> update(bool waiting, {bool playing = false}) =>
+          controls.update(
+            track: track,
+            queue: const [track],
+            index: 0,
+            playing: playing,
+            buffering: false,
+            waitingForAudio: waiting,
+            position: const Duration(seconds: 12),
+            shuffle: false,
+            repeat: 0,
+          );
+      await update(true);
+      expect(handler.playbackState.value.playing, isTrue);
+      expect(
+        handler.playbackState.value.processingState,
+        AudioProcessingState.buffering,
+      );
+      expect(handler.playbackState.value.position, const Duration(seconds: 12));
+      expect(
+        handler.playbackState.value.controls,
+        contains(MediaControl.pause),
+      );
+      expect(handler.playbackState.value.controls, contains(MediaControl.stop));
+      expect(
+        handler.playbackState.value.controls,
+        isNot(contains(MediaControl.play)),
+      );
+      expect(
+        handler.playbackState.value.updatePosition,
+        const Duration(seconds: 12),
+      );
+      await update(false);
+      expect(handler.playbackState.value.playing, isFalse);
+      expect(
+        handler.playbackState.value.processingState,
+        AudioProcessingState.ready,
+      );
+      expect(handler.playbackState.value.controls, contains(MediaControl.play));
+      expect(
+        handler.playbackState.value.controls,
+        isNot(contains(MediaControl.pause)),
+      );
+      await update(true);
+      await update(false, playing: true);
+      expect(handler.playbackState.value.playing, isTrue);
+      expect(
+        handler.playbackState.value.processingState,
+        AudioProcessingState.ready,
+      );
+      expect(
+        handler.playbackState.value.controls,
+        contains(MediaControl.pause),
+      );
+      await controls.dispose();
+    },
+  );
+
   test('slow native updates retain only latest pending snapshot', () async {
     final windows = _Windows();
     final handler = BaseAudioHandler();

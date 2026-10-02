@@ -888,7 +888,7 @@ void main() {
         AudioInterruptionEvent(true, AudioInterruptionType.pause),
       );
       await Future<void>.delayed(Duration.zero);
-      await expectLater(engine.play(), throwsA(isA<AudioFocusUnavailable>()));
+      await engine.play();
       expect(player.plays, 0);
       expect(player.state.playing, isFalse);
       expect(session.activations, [true]);
@@ -972,41 +972,37 @@ void main() {
 
   for (final path in ['/cache/valid.audio', 'https://yun.test/audio']) {
     test(
-      'interruption before native submission fails explicitly and retry opens $path',
+      'interruption before native submission waits and gain opens $path',
       () async {
+        final states = <EngineState>[];
+        final subscription = engine.states.listen(states.add);
+        addTearDown(subscription.cancel);
         session.activation = Completer<bool>();
         final activating = Completer<void>();
         session.onActivate = () {
           if (!activating.isCompleted) activating.complete();
         };
-        final opening = engine.open(path);
-        final failed = expectLater(
-          opening,
-          throwsA(
-            isA<AudioFocusUnavailable>().having(
-              (e) => e.message,
-              'message',
-              contains('interrupted'),
-            ),
-          ),
-        );
+        final opening = engine.open(path, start: const Duration(seconds: 19));
         await activating.future;
         session.interruptions.add(
           AudioInterruptionEvent(true, AudioInterruptionType.pause),
         );
         session.activation!.complete(true);
-        await failed;
+        await opening;
         expect(player.opens, 0);
-        expect(session.active, isFalse);
+        expect(session.active, isTrue);
+        expect(states.last.waitingForAudio, isTrue);
+        expect(states.last.position, const Duration(seconds: 19));
+        expect(states.where((state) => state.error != null), isEmpty);
         session.activation = null;
         session.interruptions.add(
           AudioInterruptionEvent(false, AudioInterruptionType.pause),
         );
-        await Future<void>.delayed(Duration.zero);
-        expect(player.plays, 0);
-        await engine.open(path);
+        await Future<void>.delayed(const Duration(milliseconds: 20));
         expect(player.opens, 1);
+        expect(player.media!.start, const Duration(seconds: 19));
         expect(player.state.playing, isTrue);
+        expect(states.last.waitingForAudio, isFalse);
       },
     );
   }
@@ -1066,7 +1062,7 @@ void main() {
     },
   );
 
-  test('controller retries the selected local source after interrupted initial focus', () async {
+  test('controller resumes the selected local source after interrupted initial focus', () async {
     final controller = PlaybackController(
       engine: engine,
       enableSystemControls: false,
@@ -1085,21 +1081,22 @@ void main() {
     final opening = controller.playQueue([
       const yun.Track(id: 'valid', title: 'Valid'),
     ]);
-    final failed = expectLater(opening, throwsA(isA<AudioFocusUnavailable>()));
     await activating.future;
     session.interruptions.add(
       AudioInterruptionEvent(true, AudioInterruptionType.pause),
     );
     session.activation!.complete(true);
-    await failed;
+    await opening;
     expect(player.opens, 0);
-    expect(controller.audioFocusError, contains('interrupted'));
+    expect(controller.isWaitingForAudio, isTrue);
+    expect(controller.audioFocusError, isNull);
     expect(controller.localPlaybackError, isNull);
     session.activation = null;
     session.interruptions.add(
       AudioInterruptionEvent(false, AudioInterruptionType.pause),
     );
-    await controller.play();
+    await Future<void>.delayed(Duration.zero);
+    expect(controller.isWaitingForAudio, isFalse);
     expect(player.opens, 1);
     expect(player.opened, '/cache/valid.audio');
     expect(controller.isPlaying, isTrue);
@@ -1179,38 +1176,34 @@ void main() {
     },
   );
 
-  test('interrupted pre-open keeps its typed cause if cleanup fails', () async {
-    final activating = Completer<void>();
-    final grant = Completer<bool>();
-    var rejectRelease = true;
-    session.onSetActive = (active) async {
-      if (active) {
-        if (!activating.isCompleted) activating.complete();
-        return grant.future;
-      }
-      if (rejectRelease) throw StateError('Focus release failed');
-      return true;
-    };
-    final opening = engine.open('/cache/valid.audio');
-    final failed = expectLater(
-      opening,
-      throwsA(
-        isA<AudioFocusUnavailable>().having(
-          (e) => e.message,
-          'message',
-          contains('interrupted'),
-        ),
-      ),
-    );
-    await activating.future;
-    session.interruptions.add(
-      AudioInterruptionEvent(true, AudioInterruptionType.pause),
-    );
-    grant.complete(true);
-    await failed;
-    expect(player.opens, 0);
-    rejectRelease = false;
-  });
+  test(
+    'interrupted pre-open retains registration instead of releasing it',
+    () async {
+      final activating = Completer<void>();
+      final grant = Completer<bool>();
+      var rejectRelease = true;
+      session.onSetActive = (active) async {
+        if (active) {
+          if (!activating.isCompleted) activating.complete();
+          return grant.future;
+        }
+        if (rejectRelease) throw StateError('Focus release failed');
+        return true;
+      };
+      final opening = engine.open('/cache/valid.audio');
+      await activating.future;
+      session.interruptions.add(
+        AudioInterruptionEvent(true, AudioInterruptionType.pause),
+      );
+      grant.complete(true);
+      await opening;
+      expect(player.opens, 0);
+      expect(session.activations, [true]);
+      rejectRelease = false;
+      await engine.pause();
+      expect(session.activations, [true, false]);
+    },
+  );
 
   for (final action in ['pause', 'stop', 'noisy']) {
     test(

@@ -92,14 +92,26 @@ class PlaybackController extends ChangeNotifier {
   Track? get currentTrack =>
       _manualCurrent?.track ??
       (index >= 0 && index < _queue.length ? _queue[index] : null);
-  bool isPlaying = false, isBuffering = false, shuffle = false;
+  bool isPlaying = false,
+      isBuffering = false,
+      isWaitingForAudio = false,
+      shuffle = false;
   RepeatMode repeatMode = RepeatMode.off;
   double _volume = 100, _lastPositiveVolume = 100;
   bool _volumeOverridden = false;
   double get volume => _volume;
   bool get isMuted => _volume == 0;
   Duration position = Duration.zero, duration = Duration.zero;
-  String? error;
+  String? _error, _systemControlsError, _systemControlsUpdateError;
+  String? get error => _error ?? systemMediaControlsError;
+  set error(String? value) => _error = value;
+
+  /// A service failure does not imply that the selected audio is damaged.
+  /// Foreground playback remains available; background controls may not work.
+  String? get systemMediaControlsError =>
+      _systemControlsError ?? _systemControlsUpdateError;
+  bool get systemMediaControlsAvailable =>
+      _controlsInitialized && !_closing && !_disposed;
   String? _playbackError;
   bool _audioFocusFailure = false;
 
@@ -117,7 +129,10 @@ class PlaybackController extends ChangeNotifier {
   StreamSubscription<EngineState>? _subscription;
   Timer? _timer;
   int _ticks = 0;
-  bool _initialized = false,
+  Future<void>? _initialization;
+  int _initializationCancellation = 0, _controlsAttempt = 0;
+  bool _engineInitialized = false,
+      _controlsInitialized = false,
       _opening = false,
       _seeking = false,
       _completedSeen = false,
@@ -191,16 +206,43 @@ class PlaybackController extends ChangeNotifier {
     }
   }
 
-  Future<void> _initialize() async {
-    if (_initialized) return;
-    await _engine.initialize();
-    // Leave native defaults untouched unless volume was adjusted or restored.
-    // Apply before opening audio; a failure leaves initialization retryable.
-    if (_volumeOverridden) await _engine.setVolume(_volume);
-    _subscription = _engine.states.listen(_onState);
-    _initialized = true;
+  /// A failed service gets one attempt per explicit playback command. Native
+  /// state ticks, automatic track advancement and settings never retry it.
+  Future<bool> _initialize(int requestedAttempt) async {
+    final cancellation = _initializationCancellation;
+    await (_initialization ??= _initializePlayback(requestedAttempt)
+        .whenComplete(() {
+          _initialization = null;
+        }));
+    return !_closing &&
+        !_disposed &&
+        cancellation == _initializationCancellation;
+  }
+
+  Future<void> _initializePlayback(int requestedAttempt) async {
+    if (!_engineInitialized) {
+      await _engine.initialize();
+      if (_closing || _disposed) return;
+      // Leave native defaults untouched unless volume was adjusted or restored.
+      // Apply before opening audio; a failure leaves initialization retryable.
+      if (_volumeOverridden) await _engine.setVolume(_volume);
+      if (_closing || _disposed) return;
+      _subscription = _engine.states.listen(_onState);
+      _engineInitialized = true;
+      _timer = Timer.periodic(const Duration(seconds: 1), (_) {
+        _tracker?.tick();
+        if (++_ticks % 10 == 0) unawaited(_safe(checkpoint));
+      });
+    }
+    if (_controlsInitialized ||
+        _controls == null ||
+        _closing ||
+        _disposed ||
+        requestedAttempt != _controlsAttempt) {
+      return;
+    }
     try {
-      await _controls?.initialize(
+      await _controls.initialize(
         MediaCommands(
           play: () => _safe(play),
           pause: () => _safe(pause),
@@ -212,13 +254,17 @@ class PlaybackController extends ChangeNotifier {
           repeat: (v) => setRepeat(RepeatMode.values[v]),
         ),
       );
+      _controlsInitialized = true;
+      _systemControlsError = null;
     } catch (e) {
-      error = 'System media controls unavailable: $e';
+      _systemControlsError ??=
+          'Background playback and system media controls unavailable: $e. '
+          'Try Play again to reconnect.';
+    } finally {
+      _controlsAttempt++;
     }
-    _timer = Timer.periodic(const Duration(seconds: 1), (_) {
-      _tracker?.tick();
-      if (++_ticks % 10 == 0) unawaited(_safe(checkpoint));
-    });
+    // Also replay the current snapshot when reconnecting a paused selection.
+    if (!_closing && !_disposed) _notify();
   }
 
   Future<void> _safe(Future<void> Function() action) async {
@@ -228,6 +274,21 @@ class PlaybackController extends ChangeNotifier {
       error = _playbackError ?? e.toString();
       _notify();
     }
+  }
+
+  Future<void> _enqueuePlayback(
+    Future<void> Function(int) action, {
+    bool replacesPendingInitialization = false,
+  }) {
+    if (replacesPendingInitialization && _initialization != null) {
+      _initializationCancellation++;
+    }
+    final requestedAttempt = _controlsAttempt;
+    final cancellation = _initializationCancellation;
+    return _enqueue(() async {
+      if (cancellation != _initializationCancellation) return;
+      await action(requestedAttempt);
+    });
   }
 
   Future<void> _enqueue(
@@ -248,13 +309,14 @@ class PlaybackController extends ChangeNotifier {
   void _notify() {
     if (_disposed || _notifierDisposed) return;
     notifyListeners();
-    if (_initialized) {
+    if (_controlsInitialized) {
       final update = _controls?.update(
         track: currentTrack,
         queue: _effectiveTracks,
         index: effectiveIndex,
         playing: isPlaying,
         buffering: isBuffering,
+        waitingForAudio: isWaitingForAudio,
         position: position,
         shuffle: shuffle,
         repeat: repeatMode.index,
@@ -266,11 +328,18 @@ class PlaybackController extends ChangeNotifier {
         unawaited(
           update.then(
             (_) {
-              if (identical(_controlsUpdate, update)) _controlsUpdate = null;
+              if (!identical(_controlsUpdate, update)) return;
+              _controlsUpdate = null;
+              if (_systemControlsUpdateError != null) {
+                _systemControlsUpdateError = null;
+                if (!_disposed && !_notifierDisposed) notifyListeners();
+              }
             },
             onError: (Object e) {
-              if (identical(_controlsUpdate, update)) _controlsUpdate = null;
-              error = 'System media controls: $e';
+              if (!identical(_controlsUpdate, update) || _disposed) return;
+              _controlsUpdate = null;
+              _systemControlsUpdateError = 'System media controls: $e';
+              if (!_notifierDisposed) notifyListeners();
             },
           ),
         );
@@ -287,10 +356,11 @@ class PlaybackController extends ChangeNotifier {
     // Error/end states may already report playing=false. Preserve the last
     // intent through recovery, while honoring native interruptions and pauses.
     if (!_opening && _playbackError == null && !state.completed) {
-      _wantsPlayback = state.playing;
+      _wantsPlayback = state.playing || state.waitingForAudio;
     }
     final wasActive = isPlaying && !isBuffering;
-    isPlaying = state.playing && _playbackError == null;
+    isWaitingForAudio = state.waitingForAudio && _playbackError == null;
+    isPlaying = state.playing && !isWaitingForAudio && _playbackError == null;
     isBuffering = state.buffering;
     position = state.position;
     duration = state.duration > Duration.zero
@@ -384,7 +454,7 @@ class PlaybackController extends ChangeNotifier {
   /// Start a collection using shuffle unless a specific [index] is requested.
   /// Keep queue order and playback preferences unchanged.
   Future<void> playQueue(List<Track> tracks, {int? index}) =>
-      _enqueue(() async {
+      _enqueuePlayback((attempt) async {
         if (tracks.isEmpty) {
           await _stop();
           return;
@@ -392,7 +462,7 @@ class PlaybackController extends ChangeNotifier {
         if (index != null && (index < 0 || index >= tracks.length)) {
           throw RangeError.index(index, tracks);
         }
-        await _initialize();
+        if (!await _initialize(attempt)) return;
         await _haltForTransition();
         if (!listEquals(_queue, tracks)) {
           _queue = List.unmodifiable(tracks);
@@ -406,7 +476,7 @@ class PlaybackController extends ChangeNotifier {
         _resetShuffle();
         _refreshEffectiveQueue();
         await _openCurrent();
-      });
+      }, replacesPendingInitialization: true);
 
   /// Append an occurrence to the FIFO next-up queue without changing the
   /// collection cursor or consuming/rebuilding its shuffled continuation.
@@ -415,10 +485,10 @@ class PlaybackController extends ChangeNotifier {
 
   Future<void> queueNextTracks(List<Track> tracks) {
     final entries = [for (final track in tracks) PlaybackQueueEntry._(track)];
-    return _enqueue(() async {
+    return _enqueuePlayback((attempt) async {
       if (entries.isEmpty) return;
       if (currentTrack == null) {
-        await _initialize();
+        if (!await _initialize(attempt)) return;
         await _haltForTransition();
         _manualCurrent = entries.first;
         _manualPending.addAll(entries.skip(1));
@@ -434,8 +504,11 @@ class PlaybackController extends ChangeNotifier {
 
   /// Select the exact displayed occurrence without rebuilding the shuffle bag.
   /// Stale occurrences removed by a transition are ignored.
-  Future<void> selectQueueEntry(PlaybackQueueEntry entry) => _enqueue(() async {
+  Future<void> selectQueueEntry(PlaybackQueueEntry entry) => _enqueuePlayback((
+    attempt,
+  ) async {
     if (!_effectiveQueue.contains(entry)) return;
+    if (!await _initialize(attempt)) return;
     await _haltForTransition();
     if (entry.isManuallyQueued) {
       final manual = [..._manualHistory, ?_manualCurrent, ..._manualPending];
@@ -476,7 +549,7 @@ class PlaybackController extends ChangeNotifier {
     }
     _refreshEffectiveQueue();
     await _openCurrent();
-  });
+  }, replacesPendingInitialization: _effectiveQueue.contains(entry));
 
   void _clearManualQueue() {
     _manualCurrent = null;
@@ -528,7 +601,7 @@ class PlaybackController extends ChangeNotifier {
     _opening = true;
     _acceptSourceState = false;
     _tracker?.setActive(false);
-    isPlaying = isBuffering = false;
+    isPlaying = isBuffering = isWaitingForAudio = false;
     try {
       await _engine.stop();
       await checkpoint();
@@ -570,7 +643,7 @@ class PlaybackController extends ChangeNotifier {
     _failedOver = false;
     _wantsPlayback = true;
     _tracker?.start(track.id);
-    isPlaying = isBuffering = false;
+    isPlaying = isBuffering = isWaitingForAudio = false;
     position = start;
     duration = track.duration;
     _playbackError = error = null;
@@ -590,7 +663,7 @@ class PlaybackController extends ChangeNotifier {
       _recordPlaybackFailure(e);
       if (_sourceLocal || _audioFocusFailure) await _haltFailedSource();
       _acceptSourceState = false;
-      isPlaying = isBuffering = false;
+      isPlaying = isBuffering = isWaitingForAudio = false;
       rethrow;
     } finally {
       _opening = false;
@@ -609,7 +682,7 @@ class PlaybackController extends ChangeNotifier {
     // but retire native events before stopping a failed decoder.
     _acceptSourceState = false;
     _tracker?.setActive(false);
-    isPlaying = isBuffering = false;
+    isPlaying = isBuffering = isWaitingForAudio = false;
     try {
       try {
         await _engine.stop();
@@ -648,7 +721,7 @@ class PlaybackController extends ChangeNotifier {
     _opening = true;
     _acceptSourceState = false;
     _tracker?.setActive(false);
-    isPlaying = isBuffering = false;
+    isPlaying = isBuffering = isWaitingForAudio = false;
     try {
       await _engine.stop();
       await checkpoint();
@@ -685,7 +758,7 @@ class PlaybackController extends ChangeNotifier {
       error = _playbackError;
       if (_sourceLocal || _audioFocusFailure) await _haltFailedSource();
       _acceptSourceState = false;
-      isPlaying = isBuffering = false;
+      isPlaying = isBuffering = isWaitingForAudio = false;
       rethrow;
     } finally {
       _opening = false;
@@ -699,9 +772,9 @@ class PlaybackController extends ChangeNotifier {
     }
   }
 
-  Future<void> play() => _enqueue(() async {
+  Future<void> play() => _enqueuePlayback((attempt) async {
     if (currentTrack == null) return;
-    await _initialize();
+    if (!await _initialize(attempt)) return;
     if (_playbackError != null) {
       // A selected track can have no loaded media after resolution/open fails.
       // Retry local-first resolution, not play on an empty mpv. A focus denial
@@ -720,13 +793,17 @@ class PlaybackController extends ChangeNotifier {
       }
     }
   });
-  Future<void> pause() => _enqueue(() async {
-    _wantsPlayback = false;
-    _tracker?.setActive(false);
-    await _engine.pause();
-    await checkpoint();
-  });
-  Future<void> toggle() => isPlaying ? pause() : play();
+  Future<void> pause() {
+    _initializationCancellation++;
+    return _enqueue(() async {
+      _wantsPlayback = false;
+      _tracker?.setActive(false);
+      await _engine.pause();
+      await checkpoint();
+    });
+  }
+
+  Future<void> toggle() => isPlaying || isWaitingForAudio ? pause() : play();
 
   Future<void> setVolume(double value) => _enqueue(() async {
     if (!value.isFinite) {
@@ -741,7 +818,7 @@ class PlaybackController extends ChangeNotifier {
   Future<void> _setVolume(double value) async {
     // Idle changes must not load native audio. Once initialized, publish only
     // after the native command succeeds, including the remembered restore level.
-    if (_initialized) await _engine.setVolume(value);
+    if (_engineInitialized) await _engine.setVolume(value);
     _volumeOverridden = true;
     _volume = value;
     if (value > 0) _lastPositiveVolume = value;
@@ -807,7 +884,10 @@ class PlaybackController extends ChangeNotifier {
       );
     }
   });
-  Future<void> next() => _enqueue(() => _advance(completed: false));
+  Future<void> next() => _enqueuePlayback((attempt) async {
+    if (currentTrack == null || !await _initialize(attempt)) return;
+    await _advance(completed: false);
+  });
   Future<void> _advance({required bool completed}) async {
     if (currentTrack == null) return;
     await _haltForTransition();
@@ -860,8 +940,8 @@ class PlaybackController extends ChangeNotifier {
     await _openCurrent();
   }
 
-  Future<void> previous() => _enqueue(() async {
-    if (currentTrack == null) return;
+  Future<void> previous() => _enqueuePlayback((attempt) async {
+    if (currentTrack == null || !await _initialize(attempt)) return;
     final restart = position > const Duration(seconds: 3);
     await _haltForTransition();
     if (!restart) {
@@ -941,6 +1021,7 @@ class PlaybackController extends ChangeNotifier {
       _sourceLocal = false;
       isPlaying = false;
       isBuffering = false;
+      isWaitingForAudio = false;
       position = duration = Duration.zero;
       _queue = const [];
       _sourceEntries = const [];
@@ -953,7 +1034,10 @@ class PlaybackController extends ChangeNotifier {
     }
   }
 
-  Future<void> stop() => _enqueue(_stop);
+  Future<void> stop() {
+    _initializationCancellation++;
+    return _enqueue(_stop);
+  }
 
   /// Await before closing the account cache/application to durably flush events.
   Future<void> shutdown() => _shutdownFuture ??= _shutdown();

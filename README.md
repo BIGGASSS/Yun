@@ -101,6 +101,9 @@ cargo clippy --manifest-path server/Cargo.toml --locked --all-targets --all-feat
 fvm dart format --output=none --set-exit-if-changed lib test
 fvm flutter analyze
 fvm flutter test
+# Android-free registration/cancellation contracts (JDK 17+):
+bash android/test-audio-focus.sh
+bash packages/audio_service/android/test-connection.sh
 python3 scripts/api_smoke.py
 python3 scripts/test-release-tooling.py
 # Requires libmpv; real decoding/transport with null audio, not hardware proof:

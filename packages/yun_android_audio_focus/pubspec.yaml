@@ -1,0 +1,19 @@
+name: yun_android_audio_focus
+description: Engine-owned Android audio focus registration for Yun.
+version: 0.1.0
+publish_to: none
+
+environment:
+  sdk: ^3.13.4
+  flutter: '>=3.44.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+flutter:
+  plugin:
+    platforms:
+      android:
+        package: app.yun.yun
+        pluginClass: AndroidAudioFocusPlugin
