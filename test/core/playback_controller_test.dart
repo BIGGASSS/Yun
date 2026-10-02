@@ -35,6 +35,21 @@ void main() {
     await player.shutdown();
     player.dispose();
   });
+
+  Future<void> usePlayer({
+    required Future<AudioSource> Function(Track, bool) resolveSource,
+    FakeEngine? playbackEngine,
+  }) async {
+    await player.shutdown();
+    player.dispose();
+    engine = playbackEngine ?? FakeEngine();
+    player = PlaybackController(
+      engine: engine,
+      enableSystemControls: false,
+      resolveSource: resolveSource,
+    );
+  }
+
   test('playback preferences do not notify the general app channel', () async {
     final app = AppController(
       playbackEngine: FakeEngine(),
@@ -449,8 +464,14 @@ void main() {
 
   for (final paused in [false, true]) {
     test(
-      'recovery preserves position and paused=$paused at load time',
+      'stream recovery preserves position and paused=$paused at load time',
       () async {
+        await usePlayer(
+          resolveSource: (_, localFirst) async {
+            expect(localFirst, isTrue);
+            return const AudioSource('https://yun.test/audio');
+          },
+        );
         await player.playQueue(tracks);
         if (paused) await player.pause();
         engine.emit(
@@ -512,14 +533,15 @@ void main() {
   );
 
   test(
-    'decoder error plus completion recovers without advancing queue',
+    'local decoder error plus completion stays failed without advancing queue',
     () async {
       await player.playQueue(tracks);
       engine.emit(const EngineState(error: 'bad decoder', completed: true));
       await Future<void>.delayed(Duration.zero);
       await player.pause();
       expect(player.currentTrack!.id, 'a');
-      expect(engine.opens, 2);
+      expect(engine.opens, 1);
+      expect(player.localPlaybackError, contains('bad decoder'));
     },
   );
 
@@ -753,7 +775,7 @@ void main() {
   });
 
   test(
-    'asynchronous local decoder failures fall back to authenticated streaming',
+    'asynchronous local failures stay local and preserve their first cause',
     () async {
       await player.shutdown();
       player.dispose();
@@ -775,17 +797,362 @@ void main() {
           position: Duration(seconds: 12),
         ),
       );
-      await Future<void>.delayed(Duration.zero);
-      expect(engine.opened, 'https://yun.test/audio');
+      await player.flushSettings();
+      expect(engine.opened, '/cache/a');
+      expect(engine.opens, 1);
       expect(player.position, const Duration(seconds: 12));
       expect(player.currentTrack!.id, 'a');
+      final firstError = player.localPlaybackError;
+      expect(firstError, contains('local file became unreadable'));
+      engine.emit(const EngineState(error: 'secondary decoder diagnostic'));
+      await player.flushSettings();
+      expect(player.localPlaybackError, firstError);
+      expect(player.error, firstError);
+      await player.play();
+      expect(engine.opens, 2);
+      expect(engine.opened, '/cache/a');
+      expect(player.localPlaybackError, isNull);
     },
   );
+
+  test(
+    'repeated local open failures never resolve a network fallback',
+    () async {
+      final resolutions = <bool>[];
+      final failing = OpenHookEngine()
+        ..onOpen = () async => throw StateError('file permission denied');
+      await usePlayer(
+        playbackEngine: failing,
+        resolveSource: (_, localFirst) async {
+          resolutions.add(localFirst);
+          return const AudioSource('/cache/a', local: true);
+        },
+      );
+      await expectLater(player.playQueue(tracks), throwsStateError);
+      expect(player.localPlaybackError, contains('file permission denied'));
+      await expectLater(player.play(), throwsStateError);
+      expect(resolutions, [true, true]);
+      expect(failing.attempts, 2);
+      expect(player.error, player.localPlaybackError);
+      failing.onOpen = null;
+      await player.play();
+      expect(failing.attempts, 3);
+      expect(player.localPlaybackError, isNull);
+      expect(player.isPlaying, isTrue);
+    },
+  );
+
+  test('local resolution failures retain local intent through retry', () async {
+    var resolves = 0;
+    await usePlayer(
+      resolveSource: (_, localFirst) async {
+        expect(localFirst, isTrue);
+        resolves++;
+        throw const LocalAudioUnavailable('Downloaded audio is missing');
+      },
+    );
+    await expectLater(
+      player.playQueue(tracks),
+      throwsA(isA<LocalAudioUnavailable>()),
+    );
+    await expectLater(player.play(), throwsA(isA<LocalAudioUnavailable>()));
+    expect(resolves, 2);
+    expect(engine.opens, 0);
+    expect(player.localPlaybackError, 'Downloaded audio is missing');
+    await player.stop();
+    expect(player.localPlaybackError, isNull);
+  });
+
+  test('retired source events during async local lookup are ignored', () async {
+    final lookup = Completer<AudioSource>();
+    final started = Completer<void>();
+    await usePlayer(
+      resolveSource: (track, localFirst) async {
+        expect(localFirst, isTrue);
+        if (track.id == 'a') return const AudioSource('https://yun.test/audio');
+        started.complete();
+        return lookup.future;
+      },
+    );
+    await player.playQueue(tracks);
+    final next = player.next();
+    await started.future;
+    engine.emit(
+      const EngineState(
+        playing: true,
+        completed: true,
+        position: Duration(seconds: 99),
+        error: 'Failed to open http://127.0.0.1:123/retired',
+      ),
+    );
+    expect(player.error, isNull);
+    lookup.complete(const AudioSource('/cache/b', local: true));
+    await next;
+    await player.flushSettings();
+    expect(player.currentTrack!.id, 'b');
+    expect(engine.opened, '/cache/b');
+    expect(engine.opens, 2);
+    expect(player.position, Duration.zero);
+    expect(player.error, isNull);
+    expect(player.isPlaying, isTrue);
+  });
+
+  test('genuine local errors emitted during open are not discarded', () async {
+    final failing = OpenHookEngine();
+    failing.onOpen = () async {
+      failing.emit(const EngineState(error: 'unsupported local audio format'));
+      throw StateError('secondary open failure');
+    };
+    await usePlayer(
+      playbackEngine: failing,
+      resolveSource: (_, _) async => const AudioSource('/cache/a', local: true),
+    );
+    await expectLater(player.playQueue(tracks), throwsStateError);
+    expect(
+      player.localPlaybackError,
+      contains('unsupported local audio format'),
+    );
+    expect(player.error, isNot(contains('secondary')));
+    expect(failing.attempts, 1);
+  });
+
+  test('stopped playback ignores late errors and completion', () async {
+    await player.playQueue(tracks);
+    await player.stop();
+    engine.emit(const EngineState(error: 'retired source', completed: true));
+    await player.flushSettings();
+    expect(player.error, isNull);
+    expect(player.currentTrack, isNull);
+    expect(engine.opens, 1);
+  });
+
+  test(
+    'failed stream recovery preserves the original cause and stays bounded',
+    () async {
+      final failing = OpenHookEngine();
+      await usePlayer(
+        playbackEngine: failing,
+        resolveSource: (_, localFirst) async {
+          expect(localFirst, isTrue);
+          return const AudioSource('https://yun.test/audio');
+        },
+      );
+      await player.playQueue(tracks);
+      failing.onOpen = () async =>
+          throw StateError('secondary relay open failure');
+      engine.emit(const EngineState(error: 'original stream interruption'));
+      await player.flushSettings();
+      expect(failing.attempts, 2);
+      expect(player.error, 'original stream interruption');
+      expect(player.localPlaybackError, isNull);
+      engine.emit(const EngineState(error: 'later diagnostic'));
+      await player.flushSettings();
+      expect(failing.attempts, 2);
+      expect(player.error, 'original stream interruption');
+    },
+  );
+
+  test(
+    'transition is stopped while its listening checkpoint is pending',
+    () async {
+      final saving = Completer<void>();
+      final saved = Completer<void>();
+      final events = <ListeningEvent>[];
+      player.configureRecording('device', (event) async {
+        events.add(event);
+        saving.complete();
+        await saved.future;
+      });
+      await player.playQueue(tracks);
+      expect(player.isPlaying, isTrue);
+      monotonicMs += 1000;
+      final next = player.next();
+      await saving.future;
+      try {
+        expect(player.isPlaying, isFalse);
+        expect(player.isBuffering, isFalse);
+        engine.emit(
+          const EngineState(
+            playing: true,
+            buffering: true,
+            error: 'retired source during checkpoint',
+          ),
+        );
+        expect(player.isPlaying, isFalse);
+        expect(player.isBuffering, isFalse);
+        expect(player.error, isNull);
+      } finally {
+        saved.complete();
+        await next;
+      }
+      expect(events.single.trackId, 'a');
+      expect(events.single.listenedMs, 1000);
+      expect(player.currentTrack!.id, 'b');
+      expect(player.isPlaying, isTrue);
+      expect(player.error, isNull);
+    },
+  );
+
+  test(
+    'local cleanup failure preserves cause and retries listening checkpoint',
+    () async {
+      await player.shutdown();
+      player.dispose();
+      final failing = StopHookEngine();
+      engine = failing;
+      var saveAttempts = 0;
+      final events = <ListeningEvent>[];
+      player =
+          PlaybackController(
+            engine: engine,
+            monotonicMs: () => monotonicMs,
+            enableSystemControls: false,
+            resolveSource: (_, _) async =>
+                const AudioSource('/cache/a', local: true),
+          )..configureRecording('device', (event) async {
+            if (++saveAttempts == 1) throw StateError('checkpoint unavailable');
+            events.add(event);
+          });
+      await player.playQueue(tracks);
+      monotonicMs += 1000;
+      failing.onStop = () async {
+        // Let the first eager checkpoint fail before stop fails. Cleanup must
+        // still retry the buffered listening event in its finally block.
+        await Future<void>.delayed(Duration.zero);
+        failing.emit(const EngineState(error: 'secondary shutdown diagnostic'));
+        throw StateError('native stop failed');
+      };
+      try {
+        failing.emit(
+          const EngineState(
+            playing: true,
+            buffering: true,
+            position: Duration(seconds: 1),
+            error: 'original local decoder failure',
+          ),
+        );
+        await player.flushSettings();
+        expect(saveAttempts, 2);
+        expect(events.single.listenedMs, 1000);
+        expect(
+          player.localPlaybackError,
+          contains('original local decoder failure'),
+        );
+        expect(player.error, player.localPlaybackError);
+        expect(player.error, isNot(contains('secondary')));
+        expect(player.error, isNot(contains('checkpoint unavailable')));
+        expect(player.error, isNot(contains('native stop failed')));
+        expect(player.currentTrack!.id, 'a');
+        expect(player.isPlaying, isFalse);
+        expect(player.isBuffering, isFalse);
+        expect(engine.opens, 1);
+      } finally {
+        failing.onStop = null;
+      }
+    },
+  );
+
+  test(
+    'failed remote open clears native playing and buffering flags',
+    () async {
+      final failing = OpenHookEngine();
+      failing.onOpen = () async {
+        failing.emit(const EngineState(playing: true, buffering: true));
+        throw StateError('remote open failed');
+      };
+      await usePlayer(
+        playbackEngine: failing,
+        resolveSource: (_, _) async =>
+            const AudioSource('https://yun.test/audio'),
+      );
+      await expectLater(player.playQueue(tracks), throwsStateError);
+      expect(player.isPlaying, isFalse);
+      expect(player.isBuffering, isFalse);
+      expect(player.error, contains('remote open failed'));
+    },
+  );
+  test(
+    'explicit repair releases local source and preserves queue for Play',
+    () async {
+      await player.playQueue(tracks);
+      await player.prepareLocalRepair('a');
+      expect(player.currentTrack, tracks.first);
+      expect(player.queue, tracks);
+      expect(player.isPlaying, isFalse);
+      expect(player.localPlaybackError, contains('being replaced'));
+      expect(engine.calls.last, 'stop');
+      expect(engine.opens, 1);
+      await player.play();
+      expect(engine.opens, 2);
+      expect(player.isPlaying, isTrue);
+      expect(player.localPlaybackError, isNull);
+    },
+  );
+
+  test('queued local repair never stops a newer selected track', () async {
+    await player.playQueue(tracks);
+    final next = player.next();
+    final repair = player.prepareLocalRepair('a');
+    await Future.wait([next, repair]);
+    expect(player.currentTrack, tracks[1]);
+    expect(player.isPlaying, isTrue);
+    expect(engine.calls.last, 'open');
+    expect(player.localPlaybackError, isNull);
+  });
+
+  test(
+    'explicit repair propagates stop failure before replacing audio',
+    () async {
+      final failing = StopHookEngine();
+      await usePlayer(
+        playbackEngine: failing,
+        resolveSource: (_, _) async =>
+            const AudioSource('/cache/a', local: true),
+      );
+      await player.playQueue(tracks);
+      failing.onStop = () async => throw StateError('could not close audio');
+      try {
+        await expectLater(player.prepareLocalRepair('a'), throwsStateError);
+        expect(player.currentTrack, tracks.first);
+        expect(player.isPlaying, isFalse);
+        expect(engine.opens, 1);
+      } finally {
+        failing.onStop = null;
+      }
+    },
+  );
+}
+
+class OpenHookEngine extends FakeEngine {
+  Future<void> Function()? onOpen;
+  int attempts = 0;
+
+  @override
+  Future<void> open(
+    String uri, {
+    Map<String, String>? headers,
+    bool play = true,
+    Duration start = Duration.zero,
+  }) async {
+    attempts++;
+    await onOpen?.call();
+    await super.open(uri, headers: headers, play: play, start: start);
+  }
 }
 
 class FlakyEngine extends FakeEngine {
   @override
   Future<void> initialize() async {
     if (++initializations == 1) throw StateError('Native init failed');
+  }
+}
+
+class StopHookEngine extends FakeEngine {
+  Future<void> Function()? onStop;
+
+  @override
+  Future<void> stop() async {
+    await super.stop();
+    await onStop?.call();
   }
 }

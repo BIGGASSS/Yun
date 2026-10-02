@@ -416,6 +416,197 @@ void main() {
   );
 
   test(
+    'retired relay failed-open errors do not stop a new local source',
+    () async {
+      final playback = PlaybackController(
+        engine: engine,
+        enableSystemControls: false,
+        resolveSource: (track, _) async => track.id == 'remote'
+            ? const AudioSource('https://yun.test/audio')
+            : const AudioSource('/cache/download.audio', local: true),
+      );
+      addTearDown(() async {
+        await playback.shutdown();
+        playback.dispose();
+      });
+      await playback.playQueue([
+        const yun.Track(id: 'remote', title: 'Remote'),
+      ]);
+      final retired = player.opened!;
+      final diagnostic = 'Failed to open $retired.';
+      player.onOpen = () => player.stream.errors.add(diagnostic);
+      await playback.playQueue([const yun.Track(id: 'local', title: 'Local')]);
+      final stops = player.stops;
+      player.stream.errors.add(diagnostic);
+      await Future<void>.delayed(Duration.zero);
+      expect(player.opens, 2);
+      expect(player.stops, stops);
+      expect(playback.currentTrack?.id, 'local');
+      expect(playback.isPlaying, isTrue);
+      expect(playback.error, isNull);
+    },
+  );
+
+  test('only the current relay owns explicit failed-open errors', () async {
+    final errors = <String>[];
+    final subscription = engine.states.listen((state) {
+      if (state.error != null) errors.add(state.error!);
+    });
+    addTearDown(subscription.cancel);
+    await engine.open('https://yun.test/old');
+    final retired = player.opened!;
+    await engine.open('https://yun.test/new');
+    for (final diagnostic in [
+      'Failed to open $retired.',
+      'cplayer: Failed to open "$retired".\n',
+    ]) {
+      player.stream.errors.add(diagnostic);
+    }
+    expect(errors, isEmpty);
+    final currentError = 'Failed to open ${player.opened}.';
+    player.stream.errors.add(currentError);
+    player.stream.errors.add('Failed to decode audio');
+    player.stream.errors.add('Failed to open audio output device');
+    expect(errors, [
+      currentError,
+      'Failed to decode audio',
+      'Failed to open audio output device',
+    ]);
+  });
+
+  for (final oldUri in [
+    '/cache/old.audio',
+    'file:///cache/old%20track.audio',
+    "/cache/old's track.audio.",
+  ]) {
+    test('known retired local path is isolated exactly: $oldUri', () async {
+      final errors = <String>[];
+      final subscription = engine.states.listen((state) {
+        if (state.error != null) errors.add(state.error!);
+      });
+      addTearDown(subscription.cancel);
+      await engine.open(oldUri);
+      final retired = player.opened!;
+      final oldErrors = [
+        'Failed to open $retired.',
+        "Cannot open file '$retired': No such file or directory",
+      ];
+      await engine.stop();
+      player.onOpen = () => oldErrors.forEach(player.stream.errors.add);
+      await engine.open('/cache/current.audio');
+      oldErrors.forEach(player.stream.errors.add);
+      expect(errors, isEmpty);
+
+      // Neither a current failure nor an unfamiliar dependency path may be
+      // hidden just because an earlier local source was retired.
+      final current = player.opened!;
+      final currentErrors = [
+        'Failed to open $current.',
+        "Cannot open file '$current': Permission denied",
+        'Failed to open /cache/unknown.audio.',
+        "Cannot open file '$retired': nested.audio': Permission denied",
+        'Failed to decode current audio',
+      ];
+      currentErrors.forEach(player.stream.errors.add);
+      expect(errors, currentErrors);
+
+      // Selecting the same path again makes its errors current, even if it
+      // also occurs in the retirement history.
+      player.onOpen = null;
+      await engine.open(oldUri);
+      await engine.stop();
+      await engine.open(oldUri);
+      errors.clear();
+      oldErrors.forEach(player.stream.errors.add);
+      expect(errors, oldErrors);
+    });
+  }
+
+  test('preparing a replacement does not own old native errors', () async {
+    final errors = <String>[];
+    final subscription = engine.states.listen((state) {
+      if (state.error != null) errors.add(state.error!);
+    });
+    addTearDown(subscription.cancel);
+    await engine.open('https://yun.test/old');
+    final retired = player.opened!;
+    session.activation = Completer<bool>();
+    final focused = Completer<void>();
+    session.onActivate = focused.complete;
+    final opening = engine.open('/cache/download.audio');
+    await focused.future;
+    player.stream.errors.add('tcp: Connection reset by peer');
+    player.stream.errors.add('Failed to open $retired.');
+    player.stream.errors.add('Failed to decode retired audio');
+    expect(errors, isEmpty);
+    session.activation!.complete(true);
+    await opening;
+    player.stream.errors.add('Failed to decode current audio');
+    expect(errors, ['Failed to decode current audio']);
+  });
+
+  for (final diagnostic in [
+    'Failed to open /cache/download.audio.',
+    'Failed to open file:///cache/download.audio.',
+    'Failed to decode audio',
+    'Audio output device failed',
+  ]) {
+    test(
+      'current local error is preserved before first tick: $diagnostic',
+      () async {
+        final errors = <String>[];
+        final subscription = engine.states.listen((state) {
+          if (state.error != null) errors.add(state.error!);
+        });
+        addTearDown(subscription.cancel);
+        player.onOpen = () => player.stream.errors.add(diagnostic);
+        await engine.open('/cache/download.audio');
+        expect(errors, [diagnostic]);
+        player.stream.errors.add(diagnostic);
+        expect(errors, [diagnostic, diagnostic]);
+      },
+    );
+  }
+
+  test('failed open releases native error ownership', () async {
+    final errors = <String>[];
+    final subscription = engine.states.listen((state) {
+      if (state.error != null) errors.add(state.error!);
+    });
+    addTearDown(subscription.cancel);
+    player.onOpen = () => throw StateError('Open failed');
+    await expectLater(engine.open('/cache/failed.audio'), throwsStateError);
+    player.stream.errors.add('Failed to decode retired audio');
+    expect(errors, isEmpty);
+    player.onOpen = null;
+    await engine.open('/cache/next.audio');
+    player.stream.errors.add('Failed to decode current audio');
+    expect(errors, ['Failed to decode current audio']);
+  });
+
+  test('pausing a pending local open preserves its error ownership', () async {
+    final errors = <String>[];
+    final subscription = engine.states.listen((state) {
+      if (state.error != null) errors.add(state.error!);
+    });
+    addTearDown(subscription.cancel);
+    final entered = Completer<void>();
+    final finish = Completer<void>();
+    player.onOpen = () {
+      entered.complete();
+      return finish.future;
+    };
+    final opening = engine.open('/cache/download.audio');
+    await entered.future;
+    await engine.pause();
+    finish.complete();
+    await opening;
+    await engine.play();
+    player.stream.errors.add('Failed to decode current audio');
+    expect(errors, ['Failed to decode current audio']);
+  });
+
+  test(
     'TCP diagnostics during local audio focus acquisition do not fail open',
     () async {
       var remoteResolutions = 0;
@@ -478,13 +669,18 @@ void main() {
     expect(playback.error, isNull);
   });
 
-  test('local file and decoder errors still reach playback recovery', () async {
+  test('local decoder failure is reported without a remote fallback', () async {
+    var remoteResolutions = 0;
     final playback = PlaybackController(
       engine: engine,
       enableSystemControls: false,
-      resolveSource: (_, localFirst) async => localFirst
-          ? const AudioSource('/cache/download.audio', local: true)
-          : const AudioSource('https://yun.test/audio'),
+      resolveSource: (_, localFirst) async {
+        if (!localFirst) {
+          remoteResolutions++;
+          return const AudioSource('https://yun.test/audio');
+        }
+        return const AudioSource('/cache/download.audio', local: true);
+      },
     );
     addTearDown(() async {
       await playback.shutdown();
@@ -493,25 +689,27 @@ void main() {
     await playback.playQueue([const yun.Track(id: 'local', title: 'Local')]);
     player.stream.errors.add('Failed to decode audio');
     await playback.flushSettings();
-    expect(player.opens, 2);
-    expect(Uri.parse(player.opened!).host, '127.0.0.1');
-    expect(player.media!.httpHeaders, isNull);
-    expect(playback.isPlaying, isTrue);
+    expect(player.opens, 1);
+    expect(remoteResolutions, 0);
+    expect(playback.isPlaying, isFalse);
+    expect(playback.error, contains('Failed to decode audio'));
   });
 
   test(
     'TCP diagnostics remain errors for remote audio after a local source',
     () async {
-      final states = <EngineState>[];
-      final subscription = engine.states.listen(states.add);
+      final errors = <String>[];
+      final subscription = engine.states.listen((state) {
+        if (state.error != null) errors.add(state.error!);
+      });
       addTearDown(subscription.cancel);
       await engine.open('/cache/download.audio');
       await engine.stop();
       player.stream.errors.add('tcp: Connection timed out after stop');
-      expect(states.last.error, 'tcp: Connection timed out after stop');
+      expect(errors, isEmpty);
       await engine.open('https://yun.test/audio');
       player.stream.errors.add('tcp: Connection timed out');
-      expect(states.last.error, 'tcp: Connection timed out');
+      expect(errors, ['tcp: Connection timed out']);
     },
   );
 

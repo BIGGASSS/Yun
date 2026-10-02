@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:yun/core/app_controller.dart';
@@ -85,20 +87,29 @@ class _DownloadsApp extends PlayerTestApp {
             : DownloadStatus.availableOnline,
       );
 
-  void setProgress(String id, DownloadStatus status, {int received = 0}) {
+  void setProgress(
+    String id,
+    DownloadStatus status, {
+    int received = 0,
+    bool repairRequired = false,
+  }) {
     final previous = progress[id];
     int group(DownloadStatus? status) => switch (status) {
       DownloadStatus.downloaded => 1,
       DownloadStatus.failed => 2,
       _ => 0,
     };
-    if (group(previous?.status) != group(status)) revision++;
+    if (group(previous?.status) != group(status) ||
+        (previous?.repairRequired ?? false) != repairRequired) {
+      revision++;
+    }
     progress[id] = DownloadProgress(
       trackId: id,
       totalBytes: 100,
       receivedBytes: received,
       status: status,
       error: status == DownloadStatus.failed ? 'Connection lost' : null,
+      repairRequired: repairRequired,
     );
     if (status == DownloadStatus.downloaded) {
       localIds = Set.unmodifiable({...localIds, id});
@@ -580,6 +591,88 @@ void main() {
       expect(tester.widget<OutlinedButton>(verifyButton()).onPressed, isNull);
       expect(find.text('Verification failed'), findsNothing);
       expect(tester.takeException(), isNull);
+    },
+  );
+
+  downloadsTest(
+    'unselected repair-held download has its own explicit repair action',
+    (tester) async {
+      final initial = _DownloadsApp(
+        library: const [
+          Track(id: 'legacy', title: 'Legacy download', sizeBytes: 100),
+        ],
+        selections: const [],
+      );
+      initial.setProgress(
+        'legacy',
+        DownloadStatus.failed,
+        repairRequired: true,
+      );
+      final completed = Completer<void>();
+      initial.onRedownloadTrack = (_) => completed.future;
+      final app = await open(tester, initialApp: initial);
+
+      expect(find.text('Legacy download'), findsOneWidget);
+      expect(find.text('Music for wherever you go'), findsNothing);
+      expect(find.widgetWithText(TextButton, 'Retry'), findsNothing);
+      final repair = find.widgetWithText(OutlinedButton, 'Redownload');
+      await tester.tap(repair);
+      await tester.pumpAndSettle();
+      final busy = find.widgetWithText(OutlinedButton, 'Redownloading…');
+      expect(tester.widget<OutlinedButton>(busy).onPressed, isNull);
+      await tester.tap(busy);
+      expect(app.redownloadedTrackIds, ['legacy']);
+      expect(app.retryCalls, 0);
+
+      completed.complete();
+      app.setProgress('legacy', DownloadStatus.downloaded, received: 100);
+      await tester.pumpAndSettle();
+      expect(find.text('Redownload'), findsNothing);
+      expect(find.text('No failed downloads'), findsOneWidget);
+      expect(find.text('Legacy download'), findsOneWidget);
+      expect(app.playback.currentTrack, isNull);
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  downloadsTest(
+    'repair-held rows fit narrow large text and disable redownload offline',
+    (tester) async {
+      final initial = _DownloadsApp(
+        library: const [
+          Track(id: 'legacy', title: 'Legacy download', sizeBytes: 100),
+        ],
+        selections: const [],
+      )..offline = true;
+      initial.setProgress(
+        'legacy',
+        DownloadStatus.failed,
+        repairRequired: true,
+      );
+      final app = await open(
+        tester,
+        initialApp: initial,
+        size: const Size(320, 1000),
+        textScale: 2,
+      );
+      final repair = find.widgetWithText(OutlinedButton, 'Redownload');
+      await tester.scrollUntilVisible(
+        repair,
+        100,
+        scrollable: activityScroll(),
+      );
+      await tester.pumpAndSettle();
+      expect(tester.widget<OutlinedButton>(repair).onPressed, isNull);
+      expect(find.text('Reconnect to redownload'), findsOneWidget);
+      await tester.tap(repair);
+      expect(app.redownloadedTrackIds, isEmpty);
+      expect(tester.takeException(), isNull);
+
+      app.offline = false;
+      app.notifyListeners();
+      await tester.pumpAndSettle();
+      expect(tester.widget<OutlinedButton>(repair).onPressed, isNotNull);
+      expect(find.text('Reconnect to redownload'), findsNothing);
     },
   );
 

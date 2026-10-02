@@ -196,12 +196,15 @@ void main() {
           expect(app.pins.single.id, 't');
           // Same-length corruption is intentionally deferred to manual verification.
           final valid = contents != 'truncated';
-          expect(app.verificationProgress, isNull);
+          expect(
+            app.verificationProgress?.invalidTrackIds,
+            valid ? isNull : ['t'],
+          );
           expect(app.localPath('t'), valid ? file.path : isNull);
           expect(app.downloadedTrackIds, valid ? {'t'} : isEmpty);
           expect(
             app.downloadProgress(app.tracks.single).status,
-            valid ? DownloadStatus.downloaded : DownloadStatus.queued,
+            valid ? DownloadStatus.downloaded : DownloadStatus.failed,
           );
           if (valid) {
             await app.play(app.tracks.single);
@@ -212,7 +215,9 @@ void main() {
             );
           } else {
             expect(publishedPaths, isEmpty);
-            expect(await file.exists(), isFalse);
+            // Keep bytes until an explicit repair; metadata failure is not a
+            // reason to silently redownload or destroy the existing copy.
+            expect(await file.exists(), isTrue);
           }
           expect(requests, 0);
         } finally {
@@ -226,7 +231,17 @@ void main() {
             contents != 'truncated' ? record : isNull,
           );
           expect(await persisted.get('pin', 'track:t'), isNotNull);
-          expect(await persisted.get('download', 't'), isNull);
+          final download = DownloadProgress.fromJson(
+            (await persisted.get('download', 't'))!,
+          );
+          expect(download.requiresOfflinePlayback, isTrue);
+          expect(
+            download.status,
+            contents == 'truncated'
+                ? DownloadStatus.failed
+                : DownloadStatus.downloaded,
+          );
+          expect(download.repairRequired, contents == 'truncated');
         } finally {
           await persisted.close();
         }
@@ -402,67 +417,72 @@ void main() {
   }
 
   for (final closingAction in ['logout', 'shutdown']) {
-    test(
-      '$closingAction drains explicit repair pin writes before database closure',
-      () async {
-        final directory = await seedAccount();
-        await File(p.join(directory.path, 'offline.audio'))
-            .writeAsBytes([3, 2, 1]);
-        late _GatedPinDatabase db;
-        var requests = 0;
-        final app = AppController(
-          api: ApiClient(
-            dio: Dio()
-              ..httpClientAdapter = FakeAdapter((options, _) {
-                if (options.path.endsWith('/auth/logout')) {
-                  return jsonResponse({});
-                }
-                if (options.path.endsWith('/auth/refresh')) {
-                  return jsonResponse({
-                    'access_token': 'fresh',
-                    'refresh_token': 'fresh-refresh',
-                    'expires_at':
-                        DateTime.now().millisecondsSinceEpoch + 3600000,
-                  });
-                }
-                requests++;
-                throw StateError('Closing must stop repair before download');
-              }),
-            credentials: credentials,
-          ),
-          storageDirectory: () async => root,
-          databaseFactory: (file) => db = _GatedPinDatabase(file),
-          playbackEngine: FakeEngine(),
-          enableSystemControls: false,
-          automaticRefresh: false,
-        );
-        try {
-          await app.initialize();
-          await app.verifyDownloads();
-          db.pinWriteStarted = Completer<void>();
-          db.allowPinWrite = Completer<void>();
-          final repair = app.redownloadCorruptedFiles();
-          await db.pinWriteStarted!.future;
-          final closing = closingAction == 'logout'
-              ? app.logout()
-              : app.shutdown();
-          expect(app.redownloadingCorruptedFiles, isFalse);
-          expect(db.closed, isFalse);
-          db.allowPinWrite!.complete();
-          await Future.wait([repair, closing]);
-          expect(db.closed, isTrue);
-          expect(app.isAuthenticated, isFalse);
-          expect(app.verificationProgress, isNull);
-          expect(requests, 0);
-        } finally {
-          if (db.allowPinWrite?.isCompleted == false) {
+    for (final repairKind in ['all', 'track']) {
+      test(
+        '$closingAction drains $repairKind repair pin writes before database closure',
+        () async {
+          final directory = await seedAccount();
+          await File(p.join(directory.path, 'offline.audio'))
+              .writeAsBytes([3, 2, 1]);
+          late _GatedPinDatabase db;
+          var requests = 0;
+          final app = AppController(
+            api: ApiClient(
+              dio: Dio()
+                ..httpClientAdapter = FakeAdapter((options, _) {
+                  if (options.path.endsWith('/auth/logout')) {
+                    return jsonResponse({});
+                  }
+                  if (options.path.endsWith('/auth/refresh')) {
+                    return jsonResponse({
+                      'access_token': 'fresh',
+                      'refresh_token': 'fresh-refresh',
+                      'expires_at':
+                          DateTime.now().millisecondsSinceEpoch + 3600000,
+                    });
+                  }
+                  requests++;
+                  throw StateError('Closing must stop repair before download');
+                }),
+              credentials: credentials,
+            ),
+            storageDirectory: () async => root,
+            databaseFactory: (file) => db = _GatedPinDatabase(file),
+            playbackEngine: FakeEngine(),
+            enableSystemControls: false,
+            automaticRefresh: false,
+          );
+          try {
+            await app.initialize();
+            await app.verifyDownloads();
+            db.pinWriteStarted = Completer<void>();
+            db.allowPinWrite = Completer<void>();
+            final repair = repairKind == 'all'
+                ? app.redownloadCorruptedFiles()
+                : app.redownloadTrack(app.tracks.single);
+            await db.pinWriteStarted!.future;
+            final closing = closingAction == 'logout'
+                ? app.logout()
+                : app.shutdown();
+            expect(app.redownloadingCorruptedFiles, isFalse);
+            expect(app.isRedownloadingTrack('t'), isFalse);
+            expect(db.closed, isFalse);
             db.allowPinWrite!.complete();
+            await Future.wait([repair, closing]);
+            expect(db.closed, isTrue);
+            expect(app.isAuthenticated, isFalse);
+            expect(app.verificationProgress, isNull);
+            expect(requests, 0);
+          } finally {
+            if (db.allowPinWrite?.isCompleted == false) {
+              db.allowPinWrite!.complete();
+            }
+            await app.shutdown();
+            app.dispose();
           }
-          await app.shutdown();
-          app.dispose();
-        }
-      },
-    );
+        },
+      );
+    }
   }
 
   for (final interrupted in [

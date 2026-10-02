@@ -131,8 +131,22 @@ The native adapters use media_kit, audio_session, audio_service on Android/macOS
 
 Offline availability does not imply a valid access token. Existing signed-in sessions can always play verified cached files. Metadata/playlist edits require the server and surface revision conflicts rather than silently overwriting. Logout retains cache/files/event segments but removes credentials and the active-account marker. Same-account login unlocks and retries them.
 
-The native adapter ignores media_kit's FFmpeg TCP diagnostics while opening or
-playing a local source. Its error stream includes network log messages that can
-arrive after an earlier stream has closed; treating those as a local file failure
-would stop downloaded audio and require the server for recovery. Actual local
-file/decoder failures and remote stream errors still use playback recovery.
+Downloaded playback is local-only, including explicit Play retries. Completed
+or repairing downloads retain this intent even when their file is missing or
+unreadable: source resolution reports a local error without requesting server
+audio or refreshing authentication. A queued first-time download may still
+stream until its verified local copy is ready.
+
+The controller ignores retired-source events during stop, checkpoint and source
+lookup. The native adapter suppresses diagnostics while no native source owns
+playback, FFmpeg TCP diagnostics for local files, and Failed-to-open messages
+naming a different private relay URL. Exact Failed-to-open/Cannot-open-file
+messages for the immediately retired local path are also ignored; current paths,
+same-path retries, unknown paths and untagged file/decoder/device errors remain
+visible. These filters do not claim every native diagnostic has source identity.
+
+A genuine local failure stops its decoder, retains the queue and first cause,
+and offers explicit Play retry/Redownload. Repair does not autoplay and replaces audio
+only after successful download/checksum verification. No local playback error
+silently resolves a network source. Remote stream failures retain one bounded
+local-first recovery attempt, preserving position and paused intent.

@@ -281,6 +281,109 @@ void main() {
   );
 
   test(
+    'REAL native abandoned HTTP load cannot fail replacement local playback',
+    () async {
+      native.MediaKit.ensureInitialized(
+        libmpv: Platform.environment['LIBMPV_PATH'],
+      );
+      final directory = await Directory.systemTemp.createTemp(
+        'yun-native-replacement-',
+      );
+      final wav = File('${directory.path}/tone.wav');
+      await wav.writeAsBytes(_tone());
+      final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      var requests = 0;
+      final serving = server.listen((request) {
+        // Leave the native load pending. Replacing it closes the production
+        // relay underneath mpv, which can emit delayed TCP/failed-open logs.
+        requests++;
+      });
+      final engine = MediaKitEngine(
+        createPlayer: () async {
+          final player = native.Player();
+          await (player.platform as native.NativePlayer).setProperty(
+            'ao',
+            'null',
+          );
+          return player;
+        },
+      );
+      var replacementStarted = false;
+      final replacementErrors = <String>[];
+      var position = Duration.zero;
+      final subscription = engine.states.listen((state) {
+        if (replacementStarted && state.error != null) {
+          replacementErrors.add(state.error!);
+        }
+        position = state.position;
+      });
+      try {
+        for (var attempt = 0; attempt < 3; attempt++) {
+          replacementStarted = false;
+          final before = requests;
+          await engine.open('http://127.0.0.1:${server.port}/pending.wav');
+          await _until(() => requests > before);
+          replacementStarted = true;
+          position = Duration.zero;
+          await engine.open(wav.path);
+          await _until(
+            () =>
+                position.inMilliseconds >= 300 || replacementErrors.isNotEmpty,
+          );
+          expect(replacementErrors, isEmpty);
+          expect(position.inMilliseconds, greaterThanOrEqualTo(300));
+          await engine.stop();
+        }
+      } finally {
+        await engine.dispose();
+        await subscription.cancel();
+        await server.close(force: true);
+        await serving.cancel();
+        await directory.delete(recursive: true);
+      }
+    },
+    skip: Platform.environment['RUN_NATIVE_PLAYBACK'] != '1',
+    timeout: const Timeout(Duration(seconds: 30)),
+  );
+
+  test(
+    'REAL native current local file failure still reports an error',
+    () async {
+      native.MediaKit.ensureInitialized(
+        libmpv: Platform.environment['LIBMPV_PATH'],
+      );
+      final directory = await Directory.systemTemp.createTemp(
+        'yun-native-missing-',
+      );
+      final engine = MediaKitEngine(
+        createPlayer: () async {
+          final player = native.Player();
+          await (player.platform as native.NativePlayer).setProperty(
+            'ao',
+            'null',
+          );
+          return player;
+        },
+      );
+      final errors = <String>[];
+      final subscription = engine.states.listen((state) {
+        if (state.error != null) errors.add(state.error!);
+      });
+      try {
+        await engine.open('${directory.path}/missing.wav');
+        await _until(() => errors.isNotEmpty);
+        expect(errors.join('\n'), contains('missing.wav'));
+      } finally {
+        await engine.dispose();
+        await subscription.cancel();
+        await directory.delete(recursive: true);
+      }
+    },
+    skip: Platform.environment['RUN_NATIVE_PLAYBACK'] != '1',
+    timeout: const Timeout(Duration(seconds: 30)),
+  );
+
+  test(
     'REAL native libmpv: volume, decode, pause, seek, queue completion, accounting (NULL audio)',
     () async {
       native.MediaKit.ensureInitialized(

@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:flutter/material.dart';
 
 import '../core/app_controller.dart';
+import 'download_repair.dart';
 import 'selected_builder.dart';
 import 'track_widgets.dart';
 import 'widgets.dart';
@@ -68,10 +69,14 @@ class DownloadsScreen extends StatelessWidget {
       )) {
         wanted.add(track.id);
       }
-      if (downloadedIds.contains(track.id)) {
-        if (!app.downloadProgress(track).historyCleared) done.add(track);
+      final progress = app.downloadProgress(track);
+      if (progress.repairRequired) {
+        // Legacy downloads can need repair without an active offline pin.
+        failed.add(track);
+      } else if (downloadedIds.contains(track.id)) {
+        if (!progress.historyCleared) done.add(track);
       } else if (wanted.contains(track.id)) {
-        if (app.downloadProgress(track).status == DownloadStatus.failed) {
+        if (progress.status == DownloadStatus.failed) {
           failed.add(track);
         } else {
           pending.add(track);
@@ -191,7 +196,11 @@ class DownloadsScreen extends StatelessWidget {
                         context,
                         'Failed',
                         failed.length,
-                        action: failed.isEmpty
+                        action:
+                            !failed.any(
+                              (track) =>
+                                  !app.downloadProgress(track).repairRequired,
+                            )
                             ? null
                             : TextButton.icon(
                                 onPressed: app.isAuthenticated && !app.busy
@@ -208,7 +217,9 @@ class DownloadsScreen extends StatelessWidget {
                         _emptySection('No failed downloads')
                       else
                         _downloadRows(failed),
-                      if (wanted.isEmpty && downloaded.isEmpty)
+                      if (wanted.isEmpty &&
+                          downloaded.isEmpty &&
+                          failed.isEmpty)
                         const SliverToBoxAdapter(
                           child: EmptyState(
                             icon: Icons.offline_pin_outlined,
@@ -320,6 +331,11 @@ class DownloadsScreen extends StatelessWidget {
                   maxLines: 3,
                   overflow: TextOverflow.ellipsis,
                   style: TextStyle(color: Theme.of(context).colorScheme.error),
+                ),
+              if (progress.repairRequired)
+                Padding(
+                  padding: const EdgeInsets.only(top: 8),
+                  child: RedownloadTrackButton(app: app, track: track),
                 ),
             ],
           ),

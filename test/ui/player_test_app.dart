@@ -13,14 +13,18 @@ import '../core/fakes.dart';
 /// A signed-in app snapshot with real playback over a local [FakeEngine]; no
 /// credential store, database, native player, or network is needed.
 class PlayerTestApp extends ChangeNotifier implements AppController {
-  PlayerTestApp(this.engine, {Random? random})
-    : playback = PlaybackController(
-        resolveSource: (_, _) async =>
-            const AudioSource('fake.audio', local: true),
-        engine: engine,
-        enableSystemControls: false,
-        random: random,
-      );
+  PlayerTestApp(
+    this.engine, {
+    Random? random,
+    Future<AudioSource> Function(Track, bool)? resolveSource,
+  }) : playback = PlaybackController(
+         resolveSource:
+             resolveSource ??
+             (_, _) async => const AudioSource('fake.audio', local: true),
+         engine: engine,
+         enableSystemControls: false,
+         random: random,
+       );
 
   @override
   final downloadChanges = ChangeNotifier();
@@ -36,6 +40,28 @@ class PlayerTestApp extends ChangeNotifier implements AppController {
   int get downloadSectionsRevision => 0;
 
   final FakeEngine engine;
+  bool disconnected = false;
+  final redownloadedTrackIds = <String>[];
+  final _repairingTracks = <String>{};
+  Future<void> Function(Track)? onRedownloadTrack;
+
+  @override
+  bool isRedownloadingTrack(String id) => _repairingTracks.contains(id);
+
+  @override
+  Future<void> redownloadTrack(Track track) async {
+    if (isOffline || !isAuthenticated || !_repairingTracks.add(track.id)) {
+      return;
+    }
+    redownloadedTrackIds.add(track.id);
+    downloadChanges.notifyListeners();
+    try {
+      await onRedownloadTrack?.call(track);
+    } finally {
+      _repairingTracks.remove(track.id);
+      downloadChanges.notifyListeners();
+    }
+  }
 
   @override
   final PlaybackController playback;
@@ -44,7 +70,7 @@ class PlayerTestApp extends ChangeNotifier implements AppController {
   @override
   bool get busy => false;
   @override
-  bool get isOffline => false;
+  bool get isOffline => disconnected;
   @override
   bool get isAuthenticated => true;
   @override

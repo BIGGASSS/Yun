@@ -126,7 +126,13 @@ Transfers run while the app process is available and resume later; the app does
 not promise OS-scheduled background transfers after process termination.
 
 Already signed-in accounts can browse/play cached music despite expired tokens or
-no network. Playlist/metadata edits require connectivity. Sign-out stops playback,
+no network. Completed downloads always play from the device, including repeated
+Play attempts and failed or interrupted repairs. A missing, unreadable, or
+undecodable local copy shows a playback error instead of silently streaming.
+Choose **Redownload** in the player or beside a failed download to explicitly
+replace it when connected; playback does not restart automatically. Decoder
+errors alone never delete downloaded bytes. Tracks whose first download is only
+queued can still stream normally. Playlist/metadata edits require connectivity. Sign-out stops playback,
 removes credentials and hides the account, but **retains its downloaded files and
 pending history**; signing back into the same server/account unlocks them. This is
 app-level isolation, not encryption/DRM against the device owner. Offline logout
