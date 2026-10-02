@@ -20,6 +20,17 @@ class AudioSource {
   final bool local;
 }
 
+/// A completed download is unavailable locally. Playback must not silently
+/// substitute a network source; the user can retry or explicitly repair it.
+class LocalAudioUnavailable implements Exception {
+  const LocalAudioUnavailable(this.message);
+
+  final String message;
+
+  @override
+  String toString() => message;
+}
+
 /// One occurrence in the effective play queue. Identity distinguishes duplicate
 /// tracks, including a queued copy of a track already in the collection.
 class PlaybackQueueEntry {
@@ -90,6 +101,9 @@ class PlaybackController extends ChangeNotifier {
   Duration position = Duration.zero, duration = Duration.zero;
   String? error;
   String? _playbackError;
+
+  /// The first local failure for the selected track, retained until retry/stop.
+  String? get localPlaybackError => _sourceLocal ? _playbackError : null;
   _Recording? _recording;
   ListeningTracker? get _tracker => _recording?.tracker;
   final _recordingBuffers = <Object, _RecordingBuffer>{};
@@ -108,6 +122,9 @@ class PlaybackController extends ChangeNotifier {
       _notifierDisposed = false;
   EngineState _lastState = const EngineState();
   bool _sourceLocal = false, _failedOver = false, _wantsPlayback = false;
+  // stop/checkpoint/source lookup can receive events from the retired source.
+  // Accept events only once the next native open has actually been requested.
+  bool _acceptSourceState = false;
   int _generation = 0;
   Future<void> _operations = Future.value();
   final List<int> _shuffleHistory = [];
@@ -204,7 +221,7 @@ class PlaybackController extends ChangeNotifier {
     try {
       await action();
     } catch (e) {
-      error = e.toString();
+      error = _playbackError ?? e.toString();
       _notify();
     }
   }
@@ -218,7 +235,7 @@ class PlaybackController extends ChangeNotifier {
       await action();
     });
     _operations = next.catchError((Object e) {
-      error = e.toString();
+      error = _playbackError ?? e.toString();
       _notify();
     });
     return next;
@@ -258,16 +275,19 @@ class PlaybackController extends ChangeNotifier {
   }
 
   void _onState(EngineState state) {
-    if (_disposed) return;
+    if (_disposed || !_acceptSourceState) return;
     _lastState = state;
-    if (state.error != null) _playbackError = error = state.error;
+    if (state.error != null) {
+      _playbackError ??= _describePlaybackError(state.error!);
+      error = _playbackError;
+    }
     // Error/end states may already report playing=false. Preserve the last
     // intent through recovery, while honoring native interruptions and pauses.
     if (!_opening && _playbackError == null && !state.completed) {
       _wantsPlayback = state.playing;
     }
     final wasActive = isPlaying && !isBuffering;
-    isPlaying = state.playing;
+    isPlaying = state.playing && _playbackError == null;
     isBuffering = state.buffering;
     position = state.position;
     duration = state.duration > Duration.zero
@@ -284,15 +304,22 @@ class PlaybackController extends ChangeNotifier {
     );
     if (wasActive && (!isPlaying || isBuffering)) unawaited(_safe(checkpoint));
     if (state.error != null) {
-      error = state.error;
       unawaited(_safe(checkpoint));
+      // A download stays local even when its decoder fails. Preserve the first
+      // cause and let explicit Play/Redownload retry, rather than contacting a
+      // server that may be unreachable (or concealing the local failure).
       if (!_opening && !_failedOver && currentTrack != null) {
         _failedOver = true;
         final generation = _generation;
         unawaited(
           _safe(
             () => _enqueue(() async {
-              if (generation == _generation) await _recoverPlayback();
+              if (generation != _generation) return;
+              if (_sourceLocal) {
+                await _haltFailedLocalSource();
+              } else {
+                await _recoverPlayback();
+              }
             }),
           ),
         );
@@ -496,7 +523,9 @@ class PlaybackController extends ChangeNotifier {
   Future<void> _haltForTransition() async {
     _generation++;
     _opening = true;
+    _acceptSourceState = false;
     _tracker?.setActive(false);
+    isPlaying = isBuffering = false;
     try {
       await _engine.stop();
       await checkpoint();
@@ -506,35 +535,42 @@ class PlaybackController extends ChangeNotifier {
     }
   }
 
+  String _describePlaybackError(Object failure) {
+    if (failure is LocalAudioUnavailable) return failure.message;
+    return _sourceLocal
+        ? 'Could not play the downloaded audio: $failure'
+        : failure.toString();
+  }
+
   Future<void> _openCurrent() async {
     final track = currentTrack;
     if (track == null) return;
     _opening = true;
+    _acceptSourceState = false;
+    _sourceLocal = false;
+    _lastState = const EngineState();
     _completedSeen = false;
     _failedOver = false;
     _wantsPlayback = true;
     _tracker?.start(track.id);
+    isPlaying = isBuffering = false;
     position = Duration.zero;
     duration = track.duration;
     _playbackError = error = null;
     try {
       final source = await resolveSource(track, true);
       _sourceLocal = source.local;
-      try {
-        await _engine.open(source.uri, headers: source.headers);
-        if (_playbackError != null) throw StateError(_playbackError!);
-      } catch (_) {
-        if (!source.local) rethrow;
-        _failedOver = true;
-        final fallback = await resolveSource(track, false);
-        _sourceLocal = fallback.local;
-        _playbackError = error = null;
-        await _engine.open(fallback.uri, headers: fallback.headers);
-        if (_playbackError != null) throw StateError(_playbackError!);
-      }
+      _acceptSourceState = true;
+      await _engine.open(source.uri, headers: source.headers);
+      if (_playbackError != null) throw StateError(_playbackError!);
     } catch (e) {
+      if (e is LocalAudioUnavailable) _sourceLocal = true;
       _tracker?.setActive(false);
-      _playbackError = error = e.toString();
+      _playbackError ??= _describePlaybackError(e);
+      error = _playbackError;
+      if (_sourceLocal) await _haltFailedLocalSource();
+      _acceptSourceState = false;
+      isPlaying = isBuffering = false;
       rethrow;
     } finally {
       _opening = false;
@@ -548,22 +584,57 @@ class PlaybackController extends ChangeNotifier {
     }
   }
 
+  Future<void> _haltFailedLocalSource({bool throwOnFailure = false}) async {
+    // Keep queue, position and diagnosis available for explicit retry/repair,
+    // but retire native events before stopping a failed decoder.
+    _acceptSourceState = false;
+    _tracker?.setActive(false);
+    isPlaying = isBuffering = false;
+    try {
+      try {
+        await _engine.stop();
+      } finally {
+        await checkpoint();
+      }
+    } catch (_) {
+      // Cleanup must not replace the file/decoder failure that triggered it.
+      // An explicit repair needs successful cleanup before replacing its file.
+      if (throwOnFailure) rethrow;
+    }
+    _notify();
+  }
+
+  /// Release a failed/downloaded file before explicit repair, preserving queue.
+  /// The guard runs in the audio operation queue, so it cannot stop a newer track.
+  Future<void> prepareLocalRepair(String trackId) => _enqueue(() async {
+    if (!_sourceLocal || currentTrack?.id != trackId) return;
+    _generation++;
+    _wantsPlayback = false;
+    _playbackError ??= 'Downloaded audio is being replaced. Try Play after redownload finishes.';
+    error = _playbackError;
+    await _haltFailedLocalSource(throwOnFailure: true);
+  });
+
   Future<void> _recoverPlayback() async {
     final track = currentTrack;
-    if (track == null) return;
+    if (track == null || _sourceLocal) return;
+    final firstError = _playbackError;
     final resumeAt = position;
     final resumePlaying = _wantsPlayback;
     _generation++;
     _opening = true;
+    _acceptSourceState = false;
     _tracker?.setActive(false);
+    isPlaying = isBuffering = false;
     try {
       await _engine.stop();
       await checkpoint();
-      // A failed local file falls back to the server; a failed stream can use
-      // an audio file downloaded meanwhile, otherwise refresh its auth headers.
-      final source = await resolveSource(track, !_sourceLocal);
+      // A failed stream can use audio downloaded meanwhile; otherwise refresh
+      // its auth headers. Resolution itself enforces completed-download intent.
+      final source = await resolveSource(track, true);
       _sourceLocal = source.local;
       _playbackError = error = null;
+      _acceptSourceState = true;
       await _engine.open(
         source.uri,
         headers: source.headers,
@@ -572,7 +643,19 @@ class PlaybackController extends ChangeNotifier {
       );
       if (_playbackError != null) throw StateError(_playbackError!);
     } catch (e) {
-      _playbackError = error = e.toString();
+      if (e is LocalAudioUnavailable) {
+        _sourceLocal = true;
+        _playbackError = e.message;
+      }
+      _playbackError ??= _describePlaybackError(e);
+      // If even recovery fails, retain the triggering cause rather than just
+      // the secondary relay/auth error. A newly selected local failure gets its
+      // own actionable diagnosis.
+      if (!_sourceLocal && firstError != null) _playbackError = firstError;
+      error = _playbackError;
+      if (_sourceLocal) await _haltFailedLocalSource();
+      _acceptSourceState = false;
+      isPlaying = isBuffering = false;
       rethrow;
     } finally {
       _opening = false;
@@ -591,7 +674,7 @@ class PlaybackController extends ChangeNotifier {
     await _initialize();
     if (_playbackError != null) {
       // A selected track can have no loaded media after resolution/open fails.
-      // Retry resolution (including local fallback), not play on an empty mpv.
+      // Retry local-first resolution, not play on an empty mpv.
       await _haltForTransition();
       await _openCurrent();
     } else {
@@ -801,6 +884,7 @@ class PlaybackController extends ChangeNotifier {
     _wantsPlayback = false;
     _generation++;
     _opening = true;
+    _acceptSourceState = false;
     _tracker?.setActive(false);
     try {
       // Stop audio even when saving listening events fails (e.g. sign-out).
@@ -813,7 +897,9 @@ class PlaybackController extends ChangeNotifier {
       _tracker?.clear();
       _opening = false;
       _lastState = const EngineState();
+      if (error == _playbackError) error = null;
       _playbackError = null;
+      _sourceLocal = false;
       isPlaying = false;
       isBuffering = false;
       position = duration = Duration.zero;

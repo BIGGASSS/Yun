@@ -104,6 +104,7 @@ class AppController extends ChangeNotifier {
   final Set<Future<void>> _downloadHistoryOperations = {};
   final Set<Future<void>> _downloadMaintenanceOperations = {};
   Future<void>? _redownloadingCorruptedFiles;
+  final Map<String, Future<void>> _redownloadingTracks = {};
   Future<void>? _reloadRunning;
   bool _reloadRequested = false,
       _uploadsRequested = false,
@@ -808,8 +809,8 @@ class AppController extends ChangeNotifier {
     }
     final selected = _wantedDownloads.contains(track.id);
     final progress = !_locking ? _transfers?.progressFor(track.id) : null;
-    if (selected &&
-        progress != null &&
+    if (progress != null &&
+        (selected || progress.requiresOfflinePlayback) &&
         progress.status != DownloadStatus.downloaded) {
       return progress;
     }
@@ -845,6 +846,88 @@ class AppController extends ChangeNotifier {
 
   void cancelVerification() {
     if (!_locking && !_shuttingDown) _transfers?.cancelVerification();
+  }
+
+  bool isRedownloadingTrack(String trackId) =>
+      !_locking && _redownloadingTracks.containsKey(trackId);
+
+  /// Explicit network repair, never an automatic consequence of decoding.
+  /// Coalesce repeated clicks and keep the operation bound to this account.
+  Future<void> redownloadTrack(Track track) {
+    final db = _requireDatabase();
+    if (isOffline) throw StateError('Connect to redownload this track');
+    final running = _redownloadingTracks[track.id];
+    if (running != null) return running;
+    final current = trackById(track.id);
+    if (current == null || current.sha256 != track.sha256) {
+      throw StateError('Track changed; choose it again from your library');
+    }
+    final transfers = _transfers!;
+    final generation = _generation;
+    final operation = () async {
+      await db.transaction(() async {
+        if (!_canPublish(db) || generation != _generation) return;
+        final currentTracks = (await db.list('track'))
+            .map(Track.fromJson)
+            .toList();
+        if (!currentTracks.any(
+          (current) =>
+              current.id == track.id &&
+              current.sha256 == track.sha256 &&
+              current.sizeBytes == track.sizeBytes,
+        )) {
+          throw StateError('Track changed; choose it again from your library');
+        }
+        final currentPlaylists = (await db.list('playlist'))
+            .map(Playlist.fromJson)
+            .toList();
+        final currentPins = (await db.list('pin'))
+            .map(PinSelection.fromJson)
+            .toList();
+        final references = pinReferences(
+          currentPins,
+          currentTracks,
+          currentPlaylists,
+        );
+        if (!references.containsKey(track.id)) {
+          await db.put(
+            'pin',
+            jsonEncode(['track', track.id]),
+            PinSelection('track', track.id).toJson(),
+          );
+        }
+      });
+      if (!_canPublish(db) || generation != _generation) return;
+      // Drain a queued failure-stop before replacing its file. Preserve the
+      // selected track/queue so the user can explicitly retry Play afterward.
+      await playback.flushSettings();
+      if (!_canPublish(db) || generation != _generation) return;
+      // Release native file handles without clearing the queue or touching a
+      // newer track. The next explicit Play must reopen the verified copy.
+      await playback.prepareLocalRepair(track.id);
+      if (!_canPublish(db) || generation != _generation) return;
+      await _reloadCache();
+      if (!_canPublish(db) || generation != _generation) return;
+      await transfers.redownloadTrack(track, tracks, playlists, pins);
+      if (!_canPublish(db) || generation != _generation) return;
+      await _reloadFiles();
+      final progress = transfers.progressFor(track.id);
+      if (progress?.status != DownloadStatus.downloaded) {
+        throw StateError(
+          progress?.error ?? 'Redownload did not finish. Try again.',
+        );
+      }
+    }();
+    _redownloadingTracks[track.id] = operation;
+    _downloadMaintenanceOperations.add(operation);
+    _notifyDownloads();
+    return operation.whenComplete(() {
+      _downloadMaintenanceOperations.remove(operation);
+      if (identical(_redownloadingTracks[track.id], operation)) {
+        _redownloadingTracks.remove(track.id);
+      }
+      if (generation == _generation) _notifyDownloads();
+    });
   }
 
   /// Repair is a separate, deliberate network action after local verification.
@@ -938,23 +1021,75 @@ class AppController extends ChangeNotifier {
 
   Future<AudioSource> _resolveSource(Track track, bool localFirst) async {
     final db = _requireDatabase();
-    if (localFirst) {
-      final local = localPath(track.id);
-      if (local != null) {
-        if (await File(local).exists()) return AudioSource(local, local: true);
-        _setFiles(Map.of(_files)..remove(track.id));
-        _notifyDownloads();
-        // Do not let an unrelated file-only refresh resurrect a record that
-        // failed validation. Recheck under the DB transaction in case a
-        // concurrent download has already replaced the missing file.
-        await db.transaction(() async {
-          final record = await db.get('file', track.id);
-          if (record?['path'] == local && !await File(local).exists()) {
-            await db.remove('file', track.id);
-          }
-        });
+    final generation = _generation;
+    final transfers = _transfers!;
+    void requireNotRepairing() {
+      if (_redownloadingTracks.containsKey(track.id)) {
+        throw const LocalAudioUnavailable(
+          'Redownload in progress. Finish the download before playing.',
+        );
       }
     }
+
+    requireNotRepairing();
+    // Resolve from durable download evidence, not just the visible file map.
+    // Queued first-time pins may stream; completed/repairing downloads may not.
+    final record = await db.get('file', track.id);
+    if (!_canPublish(db) || generation != _generation) {
+      throw StateError('Account changed during playback');
+    }
+    var progress = transfers.progressFor(track.id);
+    Future<AudioSource?> localSource(Map<String, dynamic>? candidate) async {
+      requireNotRepairing();
+      if (candidate == null ||
+          transfers.progressFor(track.id)?.repairRequired == true) {
+        return null;
+      }
+      final path = candidate['path'] as String;
+      try {
+        final stat = await File(path).stat();
+        if (!_canPublish(db) || generation != _generation) {
+          throw StateError('Account changed during playback');
+        }
+        requireNotRepairing();
+        if (candidate['sha256'] == track.sha256 &&
+            stat.type == FileSystemEntityType.file &&
+            stat.size == track.sizeBytes) {
+          return AudioSource(path, local: true);
+        }
+      } on FileSystemException catch (e) {
+        throw LocalAudioUnavailable('Downloaded audio could not be read: $e');
+      }
+      return null;
+    }
+
+    final source = await localSource(record);
+    if (source != null) return source;
+    if (record != null || progress?.requiresOfflinePlayback == true) {
+      final held = await transfers.holdUnavailableDownload(track);
+      if (!_canPublish(db) || generation != _generation) {
+        throw StateError('Account changed during playback');
+      }
+      if (!held) {
+        // The transactional hold may have observed a newer verified copy.
+        // Revalidate once rather than hiding it or reporting a stale failure.
+        final replacement = await localSource(await db.get('file', track.id));
+        if (replacement != null) return replacement;
+      }
+      if (held || record == null) {
+        _setFiles(Map.of(_files)..remove(track.id));
+        _notifyDownloads();
+      }
+      progress = transfers.progressFor(track.id);
+      throw LocalAudioUnavailable(
+        progress?.repairRequired == true
+            ? progress?.error ??
+                  'Downloaded audio is unavailable. Redownload to repair.'
+            : 'Downloaded audio is unavailable while its replacement is pending. '
+                  'Finish the download before playing.',
+      );
+    }
+    requireNotRepairing();
     return AudioSource(
       await audioUrl(track.id),
       headers: await authorizationHeaders(),

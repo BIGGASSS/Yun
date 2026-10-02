@@ -4,6 +4,7 @@ import 'dart:math' as math;
 
 import 'package:audio_session/audio_session.dart';
 import 'package:media_kit/media_kit.dart';
+import 'package:path/path.dart' as path;
 
 import 'playback_relay.dart';
 
@@ -68,7 +69,23 @@ class MediaKitEngine implements PlaybackEngine {
       _disposed = false;
   int _intent = 0;
   bool _wantsPlayback = false;
-  bool _localSource = false;
+  _NativeSource? _nativeSource;
+  String? _retiredLocalUri;
+
+  // Only our relay capability URLs have this shape. Native log events have no
+  // source ID, but a failed-open message naming a different capability cannot
+  // describe the current source. Do not discard unidentifiable decoder errors.
+  static final _relayUriPattern = RegExp(
+    r'http://127\.0\.0\.1:[0-9]+/[a-f0-9]{64}(?=[^a-zA-Z0-9/_?%#-]|$)',
+  );
+  static final _failedOpenPattern = RegExp(
+    r'^Failed to open (.+)\.$',
+    dotAll: true,
+  );
+  static final _cannotOpenFilePattern = RegExp(
+    r"^Cannot open file '(.+)': [^\r\n]+$",
+    dotAll: true,
+  );
 
   static Future<Player> _nativePlayer() async {
     MediaKit.ensureInitialized();
@@ -139,11 +156,7 @@ class MediaKitEngine implements PlaybackEngine {
         player.stream.duration.listen((_) => emit()),
         player.stream.completed.listen((_) => emit()),
         player.stream.error.listen((message) {
-          // media_kit forwards ffmpeg TCP log messages through its error stream,
-          // even when they do not end playback. A late stream diagnostic must
-          // not stop a local file and send the controller back to the network.
-          // Keep file/decoder errors so genuinely unreadable files can recover.
-          if (_localSource && message.startsWith('tcp:')) return;
+          if (_isStaleNativeError(message)) return;
           emit(message);
         }),
       ]);
@@ -193,6 +206,58 @@ class MediaKitEngine implements PlaybackEngine {
     }
   }
 
+  bool _isStaleNativeError(String message) {
+    final source = _nativeSource;
+    // stop/replacement invalidates the old source before closing its relay.
+    // A new source owns errors only once it is submitted to native open, not
+    // while binding a relay or waiting for audio focus.
+    if (source == null) return true;
+    // media_kit also forwards ffmpeg TCP logs through its error stream. A
+    // local file cannot produce a relay connection error; its own file/decoder
+    // failures must still be reported, including before the first audio tick.
+    if (source.local && message.startsWith('tcp:')) return true;
+    if (message.contains('Failed to open')) {
+      final relays = _relayUriPattern.allMatches(message).map((m) => m[0]!);
+      if (relays.isNotEmpty && !relays.contains(source.uri)) return true;
+    }
+    // media_kit forwards mpv's trimmed text verbatim. These two formats name
+    // the exact path passed to native open (including spaces and apostrophes).
+    // Match only the known retired file, never every path unlike the current
+    // file: an unknown path can be a genuine current-source dependency error.
+    final failedUri =
+        _failedOpenPattern.firstMatch(message.trim())?[1] ??
+        _cannotOpenFilePattern.firstMatch(message.trim())?[1];
+    final retired = _retiredLocalUri;
+    if (failedUri != null &&
+        retired != null &&
+        !_sameNativeFilePath(failedUri, source.uri) &&
+        _sameNativeFilePath(failedUri, retired)) {
+      return true;
+    }
+    return false;
+  }
+
+  static bool _sameNativeFilePath(String reported, String expected) {
+    if (reported == expected) return true;
+    // media_kit normalizes file paths before loading and adds the Windows
+    // long-path prefix. Do not normalize network/content URIs as file paths.
+    if (!path.isAbsolute(reported) || !path.isAbsolute(expected)) return false;
+    String normalize(String value) {
+      if (Platform.isWindows && value.startsWith('\\\\?\\')) {
+        value = value.substring(4);
+      }
+      return path.normalize(value);
+    }
+
+    return normalize(reported) == normalize(expected);
+  }
+
+  void _retireNativeSource() {
+    final source = _nativeSource;
+    if (source != null) _retiredLocalUri = source.local ? source.uri : null;
+    _nativeSource = null;
+  }
+
   Future<bool> _activate(int intent) async {
     final session = _session;
     final accepted = session == null || await session.setActive(true);
@@ -215,8 +280,9 @@ class MediaKitEngine implements PlaybackEngine {
     final intent = ++_intent;
     _wantsPlayback = play;
     _resumeAfterInterruption = false;
+    _retireNativeSource();
     final scheme = Uri.tryParse(uri)?.scheme.toLowerCase();
-    _localSource =
+    final local =
         scheme == '' ||
         scheme == 'file' ||
         scheme == 'content' ||
@@ -228,7 +294,8 @@ class MediaKitEngine implements PlaybackEngine {
     await initialize();
     if (intent != _intent || _disposed) return;
     _EngineRelay? source;
-    var opened = false;
+    _NativeSource? nativeSource;
+    var opened = false, nativeOpenCompleted = false;
     try {
       var nativeUri = uri;
       final network = scheme == 'http' || scheme == 'https';
@@ -268,16 +335,25 @@ class MediaKitEngine implements PlaybackEngine {
       }
       // Media.start is applied by mpv's load hook. An immediate seek after
       // open can run before the file is ready; zero resets a previous start.
-      await _player!.open(
-        Media(nativeUri, httpHeaders: network ? null : headers, start: start),
-        play: play,
+      final media = Media(
+        nativeUri,
+        httpHeaders: network ? null : headers,
+        start: start,
       );
+      _nativeSource = nativeSource = _NativeSource(media.uri, local, source);
+      await _player!.open(media, play: play);
+      nativeOpenCompleted = true;
       if (intent != _intent || _disposed) return;
       opened = true;
       source?.opening = false;
     } finally {
-      if (!opened && source != null) {
-        await _retireRelay(source);
+      if (!opened) {
+        // A pause can invalidate intent while a local open finishes. The file
+        // remains loaded and must still report its own errors on resume.
+        if (!nativeOpenCompleted && identical(_nativeSource, nativeSource)) {
+          _retireNativeSource();
+        }
+        if (source != null) await _retireRelay(source);
       }
     }
   }
@@ -296,6 +372,7 @@ class MediaKitEngine implements PlaybackEngine {
   Future<void> _retireRelay(_EngineRelay relay) async {
     // Detach before awaiting so cancellation errors cannot affect a new source.
     if (identical(_relay, relay)) _relay = null;
+    if (identical(_nativeSource?.relay, relay)) _retireNativeSource();
     try {
       await relay.close();
     } finally {
@@ -352,7 +429,7 @@ class MediaKitEngine implements PlaybackEngine {
   @override
   Future<void> stop() async {
     _wantsPlayback = false;
-    _localSource = false;
+    _retireNativeSource();
     _intent++;
     _resumeAfterInterruption = false;
     await _closeRelay();
@@ -365,7 +442,8 @@ class MediaKitEngine implements PlaybackEngine {
     if (_disposed) return;
     _disposed = true;
     _wantsPlayback = false;
-    _localSource = false;
+    _nativeSource = null;
+    _retiredLocalUri = null;
     _intent++;
     _resumeAfterInterruption = false;
     try {
@@ -387,6 +465,14 @@ class MediaKitEngine implements PlaybackEngine {
       await _states.close();
     }
   }
+}
+
+class _NativeSource {
+  const _NativeSource(this.uri, this.local, this.relay);
+
+  final String uri;
+  final bool local;
+  final _EngineRelay? relay;
 }
 
 /// Owns both an in-flight loopback bind and the established relay. Closing while

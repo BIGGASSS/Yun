@@ -67,6 +67,7 @@ class DownloadProgress {
     this.error,
     this.historyCleared = false,
     this.repairRequired = false,
+    this.previouslyDownloaded = false,
   });
   final String trackId;
   final int receivedBytes, totalBytes;
@@ -76,8 +77,16 @@ class DownloadProgress {
   /// Dismiss completed activity without removing its verified local audio.
   final bool historyCleared;
 
-  /// A manual check found corrupt bytes. Only an explicit repair clears this.
+  /// An existing download is unavailable. Only explicit repair clears this.
   final bool repairRequired;
+
+  /// Preserve offline playback intent while an explicit repair is in progress
+  /// or fails. A queued first download alone must not prevent online playback.
+  final bool previouslyDownloaded;
+  bool get requiresOfflinePlayback =>
+      previouslyDownloaded ||
+      repairRequired ||
+      status == DownloadStatus.downloaded;
   double get fraction =>
       totalBytes <= 0 ? 0 : (receivedBytes / totalBytes).clamp(0.0, 1.0);
   Map<String, dynamic> toJson() => {
@@ -88,6 +97,7 @@ class DownloadProgress {
     'error': error,
     'history_cleared': historyCleared,
     'repair_required': repairRequired,
+    'previously_downloaded': requiresOfflinePlayback,
   };
   factory DownloadProgress.fromJson(Map<String, dynamic> j) => DownloadProgress(
     trackId: j['id'] as String,
@@ -97,6 +107,7 @@ class DownloadProgress {
     error: j['error'] as String?,
     historyCleared: j['history_cleared'] as bool? ?? false,
     repairRequired: j['repair_required'] as bool? ?? false,
+    previouslyDownloaded: j['previously_downloaded'] as bool? ?? false,
   );
 }
 
@@ -297,6 +308,10 @@ class TransferService {
     // Restore cached identities with cheap metadata checks only. Full hashing
     // of existing audio belongs exclusively to the explicit Downloads action.
     // Keep the legacy-file path, but do not read its audio bytes at startup.
+    for (final record in await database.list('download')) {
+      final saved = DownloadProgress.fromJson(record);
+      _downloads[saved.trackId] = saved;
+    }
     final available = <String, Track>{};
     for (final record in await database.list('file')) {
       final id = record['id'] as String;
@@ -308,7 +323,11 @@ class TransferService {
           continue;
         }
       }
-      await _invalidateFile(id, record);
+      if (trackRecord != null) {
+        await holdUnavailableDownload(Track.fromJson(trackRecord));
+      } else {
+        await _invalidateFile(id, record);
+      }
     }
     for (final record in await database.list('download')) {
       final saved = DownloadProgress.fromJson(record);
@@ -316,7 +335,9 @@ class TransferService {
           saved.status == DownloadStatus.downloading ||
           saved.status == DownloadStatus.verifying;
       final needsVerification =
-          interrupted || saved.status == DownloadStatus.downloaded;
+          available.containsKey(saved.trackId) ||
+          interrupted ||
+          saved.status == DownloadStatus.downloaded;
       if (needsVerification) {
         final track = available[saved.trackId];
         if (track != null) {
@@ -330,6 +351,21 @@ class TransferService {
           await _saveDownload(saved.trackId);
           continue;
         }
+      }
+      if ((saved.repairRequired || saved.status == DownloadStatus.downloaded) &&
+          !available.containsKey(saved.trackId)) {
+        _downloads[saved.trackId] = DownloadProgress(
+          trackId: saved.trackId,
+          totalBytes: saved.totalBytes,
+          status: DownloadStatus.failed,
+          error: saved.repairRequired
+              ? saved.error
+              : _unavailableDownloadMessage,
+          repairRequired: true,
+          previouslyDownloaded: true,
+        );
+        await _saveDownload(saved.trackId);
+        continue;
       }
       final partial = File(
         p.join(
@@ -345,8 +381,31 @@ class TransferService {
         error: needsVerification ? null : saved.error,
         historyCleared: saved.historyCleared && !needsVerification,
         repairRequired: saved.repairRequired,
+        previouslyDownloaded: saved.requiresOfflinePlayback,
       );
       if (needsVerification) await _saveDownload(saved.trackId);
+    }
+    // Upgrade legacy file-only records in one commit, rather than fsync each
+    // cached track on the first startup. Publish memory only after acceptance.
+    final legacyCompletions = {
+      for (final track in available.values)
+        if (!_downloads.containsKey(track.id))
+          track.id: DownloadProgress(
+            trackId: track.id,
+            totalBytes: track.sizeBytes,
+            receivedBytes: track.sizeBytes,
+            status: DownloadStatus.downloaded,
+          ),
+    };
+    if (legacyCompletions.isNotEmpty) {
+      await database.transaction(() async {
+        for (final entry in legacyCompletions.entries) {
+          await database.put('download', entry.key, entry.value.toJson());
+        }
+      });
+      _downloads.addAll(legacyCompletions);
+      _downloadSectionsRevision++;
+      (onDownloadChanged ?? onChanged)();
     }
     final knownIds = {
       for (final track in await database.list('track')) track['id'],
@@ -363,10 +422,56 @@ class TransferService {
         checkedFiles: damaged.length,
         invalidFiles: damaged.length,
         invalidTrackIds: List.unmodifiable(damaged),
-        error: 'A previous check found files that still need repair.',
+        error: 'Downloaded files are unavailable and need repair.',
       );
       onVerificationChanged?.call();
     }
+  }
+
+  static const _unavailableDownloadMessage =
+      'Downloaded audio is missing or unavailable. Redownload to repair.';
+
+  /// Keep a failed existing copy offline until the user explicitly repairs it.
+  /// This never deletes bytes or contacts the server. Recheck under a transaction
+  /// so a concurrent replacement cannot be quarantined using stale evidence.
+  Future<bool> holdUnavailableDownload(Track track) async {
+    if (_closed) throw TransferCancelled();
+    DownloadProgress? failed;
+    await database.transaction(() async {
+      if (_closed) throw TransferCancelled();
+      final record = await database.get('file', track.id);
+      final currentTrack = await database.get('track', track.id);
+      if (currentTrack != null &&
+          (currentTrack['sha256'] != track.sha256 ||
+              currentTrack['size_bytes'] != track.sizeBytes)) {
+        return;
+      }
+      final previous = _downloads[track.id];
+      if (record == null && previous?.status != DownloadStatus.downloaded) {
+        return;
+      }
+      if (record != null && await _hasExpectedFileMetadata(track, record)) {
+        return;
+      }
+      failed = DownloadProgress(
+        trackId: track.id,
+        totalBytes: track.sizeBytes,
+        status: DownloadStatus.failed,
+        error: previous?.repairRequired == true
+            ? previous!.error
+            : _unavailableDownloadMessage,
+        repairRequired: true,
+        previouslyDownloaded: true,
+      );
+      await database.remove('file', track.id);
+      await database.put('download', track.id, failed!.toJson());
+    });
+    if (failed == null) return false;
+    _downloads[track.id] = failed!;
+    _downloadSectionsRevision++;
+    (onFilesChanged ?? onChanged)();
+    (onDownloadChanged ?? onChanged)();
+    return true;
   }
 
   Future<bool> _hasExpectedFileMetadata(
@@ -653,6 +758,22 @@ class TransferService {
     }
   }
 
+  final Set<String> _requestedRedownloads = {};
+
+  /// The explicit per-track repair action, serialized with downloads and scans.
+  /// Bytes are replaced only after this user action; successful replacement must
+  /// pass the same checksum validation as every other download.
+  Future<void> redownloadTrack(
+    Track track,
+    List<Track> tracks,
+    List<Playlist> playlists,
+    List<PinSelection> pins,
+  ) {
+    if (_closed) return Future.error(TransferCancelled());
+    _requestedRedownloads.add(track.id);
+    return reconcile(tracks, playlists, pins);
+  }
+
   bool _progress(
     Track track,
     DownloadStatus status,
@@ -674,6 +795,7 @@ class TransferService {
       receivedBytes: bytes,
       status: status,
       error: error,
+      previouslyDownloaded: previous?.requiresOfflinePlayback ?? false,
     );
     if (_downloadSection(previous?.status) != _downloadSection(status) ||
         previous?.historyCleared == true) {
@@ -1081,8 +1203,35 @@ class TransferService {
         _nextReconciliation ??= (tracks, playlists, pins);
         break;
       }
-      if (_downloads[track.id]?.repairRequired == true) continue;
+      final redownload = _requestedRedownloads.remove(track.id);
+      if (!redownload && _downloads[track.id]?.repairRequired == true) continue;
       try {
+        if (redownload) {
+          // A decoder error does not prove corruption. Keep the old bytes until
+          // the verified replacement is ready, but stop exposing its reference.
+          await database.transaction(() async {
+            final currentTrack = await database.get('track', track.id);
+            if (currentTrack != null &&
+                (currentTrack['sha256'] != track.sha256 ||
+                    currentTrack['size_bytes'] != track.sizeBytes)) {
+              throw StateError(
+                'Track changed; choose it again from your library',
+              );
+            }
+            await database.remove('file', track.id);
+          });
+          files.remove(track.id);
+          final partial = File(
+            p.join(
+              directory.path,
+              '${Uri.encodeComponent(track.id)}.audio.part',
+            ),
+          );
+          if (await partial.exists()) await partial.delete();
+          _progress(track, DownloadStatus.queued, 0);
+          await _saveDownload(track.id);
+          (onFilesChanged ?? onChanged)();
+        }
         final record = files[track.id];
         if (record != null && await _hasExpectedFileMetadata(track, record)) {
           if (_progress(track, DownloadStatus.downloaded, track.sizeBytes)) {
@@ -1091,8 +1240,13 @@ class TransferService {
           }
           continue;
         }
-        // A stale or corrupted file must not remain playable after a failure.
-        if (record != null) await _invalidateFile(track.id, record);
+        // Previously completed downloads stay offline even after a local copy
+        // disappears. Only the explicit repair path can authorize replacement.
+        if (record != null ||
+            _downloads[track.id]?.status == DownloadStatus.downloaded) {
+          await holdUnavailableDownload(track);
+          continue;
+        }
         final file = await _download(track);
         await database.put('file', track.id, {
           'id': track.id,

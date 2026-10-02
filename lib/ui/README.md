@@ -11,6 +11,11 @@ the specified major. Core dependencies must also be installed before running
 `flutter test test/ui` or analyzing UI.
 
 - Narrow windows: bottom destinations, mini-player, full now-playing sheet.
+- Downloaded playback failures stay visible in the mini-player, desktop player,
+  and now-playing sheet. **Redownload** is an explicit per-track network action,
+  disabled with an explanation while offline and disabled while repairing.
+  Repair-held files also have this action in Downloads, including older files
+  without an offline selection. Finishing a repair does not start playback.
 - Wide windows: NavigationRail (extended at 1320px), persistent player, optional
   300px queue at 1180px and above. Large text falls back to simpler layouts.
 - Linux/macOS/Windows: app-local 0–100% volume and mute in the player and

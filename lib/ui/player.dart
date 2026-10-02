@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart' hide RepeatMode;
 
 import '../core/app_controller.dart';
+import 'download_repair.dart';
 import 'player_icons.dart';
 import 'selected_builder.dart';
 import 'track_widgets.dart';
@@ -112,6 +113,7 @@ class _CompactPlayerBar extends StatelessWidget {
             ],
           ),
         ),
+        PlaybackErrorNotice(app: app, compact: true),
       ],
     );
   }
@@ -162,6 +164,7 @@ class _WideTouchPlayerBar extends StatelessWidget {
             ],
           ),
         ),
+        PlaybackErrorNotice(app: app, compact: true),
       ],
     );
   }
@@ -259,9 +262,86 @@ class DesktopPlayerBar extends StatelessWidget {
             },
           ),
         ),
+        PlaybackErrorNotice(app: app, compact: true),
       ],
     );
   }
+}
+
+/// The first local playback failure remains visible without opening a sheet.
+/// Compact strips show only downloaded failures and cap diagnostic text; the
+/// tooltip and scrollable now-playing sheet retain the full message. The sheet
+/// also keeps other playback errors. Actions wrap below the message at narrow
+/// widths or larger accessibility text sizes.
+class PlaybackErrorNotice extends StatelessWidget {
+  const PlaybackErrorNotice({
+    super.key,
+    required this.app,
+    this.compact = false,
+  });
+
+  final AppController app;
+  final bool compact;
+
+  @override
+  Widget build(BuildContext context) => SelectedBuilder(
+    listenable: app.playback,
+    select: () => (
+      app.playback.currentTrack,
+      app.playback.localPlaybackError,
+      app.playback.error,
+    ),
+    builder: (context, state, _) {
+      final message = state.$2 ?? (compact ? null : state.$3);
+      if (message == null) return const SizedBox.shrink();
+      final track = state.$1;
+      // Keep the decoder's cause visible at narrow widths and large text,
+      // rather than spending every available line on the explanatory prefix.
+      const localPrefix = 'Could not play the downloaded audio: ';
+      final displayMessage =
+          compact && state.$2 != null && message.startsWith(localPrefix)
+          ? message.substring(localPrefix.length)
+          : message;
+      return Padding(
+        padding: EdgeInsets.fromLTRB(compact ? 12 : 0, 4, compact ? 12 : 0, 8),
+        child: LayoutBuilder(
+          builder: (context, constraints) {
+            final detail = Semantics(
+              liveRegion: true,
+              child: Tooltip(
+                message: message,
+                child: Text(
+                  displayMessage,
+                  semanticsLabel: message,
+                  maxLines: compact ? 3 : null,
+                  overflow: compact ? TextOverflow.ellipsis : null,
+                  style: Theme.of(context).textTheme.bodySmall
+                      ?.copyWith(color: Theme.of(context).colorScheme.error),
+                ),
+              ),
+            );
+            if (track == null || state.$2 == null) return detail;
+            final action = RedownloadTrackButton(app: app, track: track);
+            if (constraints.maxWidth >= 700 &&
+                MediaQuery.textScalerOf(context).scale(14) <= 18) {
+              return Row(
+                children: [
+                  Expanded(child: detail),
+                  const SizedBox(width: 16),
+                  Flexible(child: action),
+                ],
+              );
+            }
+            return Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [detail, const SizedBox(height: 4), action],
+            );
+          },
+        ),
+      );
+    },
+  );
 }
 
 /// Artwork plus truncated title/artist that opens the now playing sheet.
@@ -681,19 +761,7 @@ void showNowPlaying(BuildContext context, AppController app) {
                         const SizedBox(height: 24),
                         if (app.playback.isBuffering)
                           const QuietProgress(label: 'Buffering audio'),
-                        if (app.playback.error != null)
-                          Padding(
-                            padding: const EdgeInsets.only(bottom: 12),
-                            child: Semantics(
-                              liveRegion: true,
-                              child: Text(
-                                app.playback.error!,
-                                style: TextStyle(
-                                  color: Theme.of(context).colorScheme.error,
-                                ),
-                              ),
-                            ),
-                          ),
+                        PlaybackErrorNotice(app: app),
                         PlaybackSeek(app: app),
                         const SizedBox(height: 8),
                         PlaybackButtons(app: app),

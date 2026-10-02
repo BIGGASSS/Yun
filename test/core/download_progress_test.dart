@@ -17,6 +17,7 @@ class _GatedDatabase extends CacheDatabase {
 
   Future<void> Function(String kind)? afterPut;
   Future<void> Function()? afterCommit;
+  int transactions = 0;
 
   @override
   Future<void> put(String kind, String id, Map<String, dynamic> value) async {
@@ -29,6 +30,7 @@ class _GatedDatabase extends CacheDatabase {
     Future<T> Function() action, {
     bool requireNew = false,
   }) async {
+    transactions++;
     final result = await super.transaction(action, requireNew: requireNew);
     await afterCommit?.call();
     return result;
@@ -86,6 +88,69 @@ void main() {
     await db.close();
     await root.delete(recursive: true);
   });
+
+  test(
+    'legacy completion migration commits once before publishing memory',
+    () async {
+      final file = await File('${root.path}/legacy.audio').writeAsBytes(bytes);
+      for (final id in ['t', 'second', 'third']) {
+        await db.put('track', id, {...track.toJson(), 'id': id});
+        await db.put('file', id, {
+          'id': id,
+          'path': file.path,
+          'sha256': track.sha256,
+        });
+      }
+      final committed = Completer<void>(), release = Completer<void>();
+      (db as _GatedDatabase).afterCommit = () async {
+        committed.complete();
+        await release.future;
+      };
+      final restoring = transfers.restoreDownloads();
+      try {
+        await committed.future;
+        expect((db as _GatedDatabase).transactions, 1);
+        expect(transfers.downloads, isEmpty);
+        expect(await db.list('download'), hasLength(3));
+      } finally {
+        release.complete();
+        await restoring;
+      }
+      expect(transfers.downloads, hasLength(3));
+      expect(
+        transfers.downloads.values.every(
+          (progress) =>
+              progress.requiresOfflinePlayback && !progress.historyCleared,
+        ),
+        isTrue,
+      );
+      expect(await file.readAsBytes(), bytes);
+    },
+  );
+
+  test(
+    'failed legacy migration publishes no partial download intent',
+    () async {
+      final file = await File('${root.path}/legacy.audio').writeAsBytes(bytes);
+      for (final id in ['t', 'second']) {
+        await db.put('track', id, {...track.toJson(), 'id': id});
+        await db.put('file', id, {
+          'id': id,
+          'path': file.path,
+          'sha256': track.sha256,
+        });
+      }
+      var writes = 0;
+      (db as _GatedDatabase).afterPut = (kind) async {
+        if (kind == 'download' && ++writes == 2) throw StateError('disk full');
+      };
+      await expectLater(transfers.restoreDownloads(), throwsStateError);
+      expect(transfers.downloads, isEmpty);
+      expect(await db.list('download'), isEmpty);
+      expect(await db.list('file'), hasLength(2));
+      expect(await file.readAsBytes(), bytes);
+    },
+  );
 
   test(
     'byte progress includes resumed offset before verified completion',
@@ -206,6 +271,40 @@ void main() {
     },
   );
 
+  test('an explicitly started repair resumes after restart while retaining offline intent', () async {
+    await db.put('track', track.id, track.toJson());
+    await db.put(
+      'download',
+      track.id,
+      DownloadProgress(
+        trackId: track.id,
+        totalBytes: track.sizeBytes,
+        status: DownloadStatus.downloading,
+        previouslyDownloaded: true,
+      ).toJson(),
+    );
+    await File('${root.path}/t.audio.part')
+        .writeAsBytes(bytes.take(40).toList());
+    await transfers.restoreDownloads();
+    final restored = transfers.progressFor(track.id)!;
+    expect(restored.status, DownloadStatus.queued);
+    expect(restored.requiresOfflinePlayback, isTrue);
+    expect(restored.repairRequired, isFalse);
+    api.dio.httpClientAdapter = FakeAdapter((options, _) {
+      expect(options.headers['Range'], 'bytes=40-');
+      return ResponseBody.fromBytes(
+        bytes.sublist(40),
+        206,
+        headers: {
+          'content-range': ['bytes 40-99/100'],
+        },
+      );
+    });
+    await transfers.reconcile([track], [], pins);
+    expect(transfers.progressFor(track.id)!.status, DownloadStatus.downloaded);
+    expect(await File('${root.path}/t.audio').readAsBytes(), bytes);
+  });
+
   for (final status in [
     DownloadStatus.downloading,
     DownloadStatus.verifying,
@@ -257,7 +356,7 @@ void main() {
       'not a file',
     ]) {
       test(
-        '$status stays queued with $invalid instead of valid audio',
+        '$status preserves download intent with $invalid instead of valid audio',
         () async {
           final file = File('${root.path}/t.audio');
           if (invalid != 'missing file') {
@@ -294,21 +393,26 @@ void main() {
               .writeAsBytes(bytes.take(40).toList());
           await transfers.restoreDownloads();
           final restored = transfers.progressFor(track.id)!;
-          expect(restored.status, DownloadStatus.queued);
-          expect(restored.receivedBytes, 40);
+          final held =
+              status == DownloadStatus.downloaded ||
+              (invalid != 'missing track' && invalid != 'missing record');
+          expect(
+            restored.status,
+            held ? DownloadStatus.failed : DownloadStatus.queued,
+          );
+          expect(restored.repairRequired, held);
+          expect(restored.receivedBytes, held ? 0 : 40);
           expect(restored.historyCleared, isFalse);
           expect(await db.get('file', track.id), isNull);
-          if (invalid != 'missing record' && invalid != 'not a file') {
-            expect(await file.exists(), isFalse);
-          }
-          expect((await db.get('download', track.id))!['status'], 'queued');
           await transfers.clearDoneDownloads([track]);
           expect(transfers.progressFor(track.id), same(restored));
-          expect(
-            (await db.get('download', track.id))!['history_cleared'],
-            isFalse,
-          );
+          var requests = 0;
           api.dio.httpClientAdapter = FakeAdapter((options, _) {
+            requests++;
+            if (held) {
+              expect(options.headers['Range'], isNull);
+              return ResponseBody.fromBytes(bytes, 200);
+            }
             expect(options.headers['Range'], 'bytes=40-');
             return ResponseBody.fromBytes(
               bytes.sublist(40),
@@ -319,6 +423,12 @@ void main() {
             );
           });
           await transfers.reconcile([track], [], pins);
+          if (held) {
+            expect(requests, 0);
+            expect(transfers.progressFor(track.id)!.repairRequired, isTrue);
+            await transfers.redownloadTrack(track, [track], [], pins);
+          }
+          expect(requests, 1);
           expect(
             transfers.progressFor(track.id)!.status,
             DownloadStatus.downloaded,
@@ -352,8 +462,10 @@ void main() {
         await transfers.restoreDownloads();
         expect(await db.get('file', track.id), isNotNull);
         expect(await file.exists(), isTrue);
-        expect(transfers.progressFor(track.id)!.toJson(), saved.toJson());
-        expect(await db.get('download', track.id), saved.toJson());
+        final restored = transfers.progressFor(track.id)!;
+        expect(restored.status, DownloadStatus.downloaded);
+        expect(restored.requiresOfflinePlayback, isTrue);
+        expect(await db.get('download', track.id), restored.toJson());
         await transfers.verifyDownloads();
         expect(await db.get('file', track.id), isNull);
         expect(await file.exists(), isFalse);
@@ -388,7 +500,7 @@ void main() {
           await release.future;
         }
       };
-      final running = transfers.reconcile([track], [], pins);
+      final running = transfers.redownloadTrack(track, [track], [], pins);
       try {
         await committed.future;
         expect(
@@ -427,6 +539,7 @@ void main() {
     await transfers.reconcile([track], [], pins);
     final committed = Completer<void>(), releaseClear = Completer<void>();
     (db as _GatedDatabase).afterCommit = () async {
+      (db as _GatedDatabase).afterCommit = null;
       committed.complete();
       await releaseClear.future;
     };
@@ -439,7 +552,7 @@ void main() {
       await releaseDownload.future;
       return ResponseBody.fromBytes(bytes, 200);
     });
-    final running = transfers.reconcile([track], [], pins);
+    final running = transfers.redownloadTrack(track, [track], [], pins);
     try {
       await started.future;
       releaseClear.complete();
@@ -501,6 +614,9 @@ void main() {
 
       await File('${root.path}/t.audio').delete();
       await transfers.reconcile([track], [], pins);
+      expect(requests, 1);
+      expect(transfers.progressFor(track.id)!.repairRequired, isTrue);
+      await transfers.redownloadTrack(track, [track], [], pins);
       expect(requests, 2);
       expect(
         transfers.progressFor(track.id)!.status,
@@ -555,11 +671,15 @@ void main() {
   );
 
   test('old download records default to visible completed activity', () {
-    final record = DownloadProgress(
-      trackId: track.id,
-      totalBytes: 100,
-      status: DownloadStatus.downloaded,
-    ).toJson()..remove('history_cleared');
+    final record =
+        DownloadProgress(
+            trackId: track.id,
+            totalBytes: 100,
+            status: DownloadStatus.downloaded,
+          ).toJson()
+          ..remove('history_cleared')
+          ..remove('previously_downloaded');
     expect(DownloadProgress.fromJson(record).historyCleared, isFalse);
+    expect(DownloadProgress.fromJson(record).requiresOfflinePlayback, isTrue);
   });
 }

@@ -207,6 +207,7 @@ class DownloadProgressBuilder extends StatelessWidget {
         progress.receivedBytes,
         progress.totalBytes,
         progress.error,
+        progress.repairRequired,
       );
     },
     builder: (context, _, child) =>

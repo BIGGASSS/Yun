@@ -7,6 +7,7 @@ import 'package:crypto/crypto.dart';
 import 'package:dio/dio.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:yun/core/app_controller.dart';
+import 'package:yun/core/playback_controller.dart' show LocalAudioUnavailable;
 import 'package:yun/services/api_client.dart';
 import 'package:yun/services/cache_database.dart';
 import 'package:yun/services/playback_engine.dart';
@@ -164,8 +165,15 @@ void main() {
       final value = await open();
       await file.delete();
       expect(value.localPath('t'), file.path);
-      await value.play(cachedTrack);
-      expect(engine.opened, endsWith('/tracks/t/audio'));
+      await expectLater(
+        value.play(cachedTrack),
+        throwsA(isA<LocalAudioUnavailable>()),
+      );
+      expect(engine.opened, isNull);
+      expect(
+        value.playback.localPlaybackError,
+        contains('missing or unavailable'),
+      );
       expect(value.localPath('t'), isNull);
       expect(value.downloadedTrackIds, isEmpty);
     },

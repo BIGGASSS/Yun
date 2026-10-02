@@ -226,21 +226,33 @@ void main() {
         await transfers.clearDoneDownloads([track]);
         final file = File(p.join(root.path, 't.audio'));
         await file.writeAsBytes(corrupt);
+        var repairRequests = 0;
         dio.httpClientAdapter = FakeAdapter((options, _) async {
+          repairRequests++;
           expect(await db.get('file', track.id), isNull);
-          expect(await file.exists(), isFalse);
+          // Preserve suspect bytes until a replacement has passed verification.
+          expect(await file.readAsBytes(), corrupt);
           throw DioException(requestOptions: options, error: 'offline');
         });
         await transfers.reconcile([track], [], pins);
-        expect(errors, hasLength(1));
+        expect(repairRequests, 0);
+        expect(errors, isEmpty);
         expect(await db.get('file', track.id), isNull);
-        expect(await file.exists(), isFalse);
+        expect(await file.exists(), isTrue);
         expect(transfers.progressFor(track.id)!.status, DownloadStatus.failed);
+        expect(transfers.progressFor(track.id)!.repairRequired, isTrue);
         expect(transfers.progressFor(track.id)!.historyCleared, isFalse);
+        await transfers.redownloadTrack(track, [track], [], pins);
+        expect(repairRequests, 1);
+        expect(errors, hasLength(1));
+        expect(
+          transfers.progressFor(track.id)!.requiresOfflinePlayback,
+          isTrue,
+        );
         dio.httpClientAdapter = FakeAdapter(
           (_, _) => ResponseBody.fromBytes(bytes, 200),
         );
-        await transfers.reconcile([track], [], pins);
+        await transfers.redownloadTrack(track, [track], [], pins);
         expect(errors, hasLength(1));
         expect(await file.readAsBytes(), bytes);
         expect(await db.get('file', track.id), isNotNull);

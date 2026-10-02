@@ -24,6 +24,10 @@ void main() {
     bool playing = true,
     bool shuffle = false,
     RepeatMode repeat = RepeatMode.off,
+    String? playbackFailure,
+    bool compact = false,
+    bool offline = false,
+    double textScale = 1,
   }) {
     return (tester) async {
       final engine = FakeEngine();
@@ -31,15 +35,18 @@ void main() {
       debugDefaultTargetPlatformOverride = TargetPlatform.linux;
       tester.view.physicalSize = size;
       tester.view.devicePixelRatio = 1;
+      tester.platformDispatcher.textScaleFactorTestValue = textScale;
+      app.disconnected = offline;
       try {
         await app.playback.playQueue(const [
           Track(id: 'one', title: 'Love in 561.3mb', artist: '5_Ya'),
         ]);
         engine.emit(
           EngineState(
-            playing: playing,
+            playing: playbackFailure == null && playing,
             position: const Duration(seconds: 73),
             duration: const Duration(seconds: 140),
+            error: playbackFailure,
           ),
         );
         await app.playback.setVolume(volume);
@@ -56,7 +63,7 @@ void main() {
                   child: ListenableBuilder(
                     listenable: app,
                     builder: (context, _) =>
-                        PlayerBar(app: app, compact: false, onQueue: () {}),
+                        PlayerBar(app: app, compact: compact, onQueue: () {}),
                   ),
                 ),
               ),
@@ -75,6 +82,7 @@ void main() {
         debugDefaultTargetPlatformOverride = null;
         tester.view.resetPhysicalSize();
         tester.view.resetDevicePixelRatio();
+        tester.platformDispatcher.clearTextScaleFactorTestValue();
       }
     };
   }
@@ -103,6 +111,37 @@ void main() {
       size: const Size(840, 120),
       volume: 0,
       playing: false,
+    ),
+  );
+
+  testWidgets(
+    'desktop downloaded playback error and explicit repair',
+    pumpBarForShot(
+      name: 'player_bar_download_error',
+      size: const Size(1280, 250),
+      playbackFailure: 'Decoder could not read downloaded file',
+    ),
+  );
+
+  testWidgets(
+    'compact downloaded playback error and explicit repair',
+    pumpBarForShot(
+      name: 'player_bar_compact_download_error',
+      size: const Size(390, 360),
+      playbackFailure: 'Decoder could not read downloaded file',
+      compact: true,
+    ),
+  );
+
+  testWidgets(
+    'large text offline downloaded playback error and explanation',
+    pumpBarForShot(
+      name: 'player_bar_offline_download_error_large_text',
+      size: const Size(320, 480),
+      playbackFailure: 'Decoder could not read downloaded file',
+      compact: true,
+      offline: true,
+      textScale: 2,
     ),
   );
 }
