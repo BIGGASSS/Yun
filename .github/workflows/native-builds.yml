@@ -152,6 +152,17 @@ jobs:
       - name: Build explicitly debug-signed evaluation APK
         if: inputs.android_signing == 'debug-signed'
         run: bash scripts/release/build-android.sh debug-signed
+      - name: Verify optimized release APK media resources without signing
+        if: inputs.android_signing == 'debug-signed'
+        run: bash scripts/release/build-android.sh release-validation
+      - name: Preserve verified unsigned release APK for inspection
+        if: inputs.android_signing == 'debug-signed'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: yun-android-arm64-release-validation-unsigned
+          path: build/release-validation/yun-android-arm64-release-validation-unsigned.apk
+          if-no-files-found: error
+          retention-days: 14
       - name: Build and verify release-signed APK (no fallback)
         if: inputs.android_signing == 'release-signed'
         env:
@@ -160,6 +171,8 @@ jobs:
           ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: bash scripts/release/build-android.sh release-signed
+      - name: Resource verifier regressions with installed Android SDK
+        run: python3 scripts/release/test-android-resources.py
       - name: Checksums
         run: python3 scripts/release/checksums.py
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

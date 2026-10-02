@@ -52,6 +52,10 @@ android {
 
     buildTypes {
         release {
+            // Keep release resource shrinking exercised in PR validation too.
+            // Dart-supplied media icon names have a narrow res/raw keep rule.
+            isMinifyEnabled = true
+            isShrinkResources = true
             signingConfig = if (releaseSigningRequested) {
                 signingConfigs.getByName("operatorRelease")
             } else {

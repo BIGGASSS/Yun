@@ -4,6 +4,25 @@ This document separates implemented automation from executed evidence. A green
 compiler/unit-test run does not certify audio playback, background behavior,
 secure storage, recovery, signing, or third-party redistribution rights.
 
+## Android media-control resource packaging regression
+
+The release APK from [run 36983693735](https://github.com/BIGGASSS/Yun/actions/runs/36983693735)
+(commit `7531d5f7ae4922b5b12d8f4fca5c9cbf245aa1df`, SHA-256
+`88269392c52ec8448edc76ac0cbd64065171b346e824a03e692363a5109e7cfb`)
+contains no `audio_service_*` resource names. The Stop control uses one of these
+icons; Android 13+ rejects its missing icon before foreground-service promotion.
+This packaging failure can therefore occur with Yun open, independently of
+background-start restrictions. The newer state acknowledgement exposes it as a
+service warning; successful Dart/JVM tests did not exercise the shrunken APK.
+
+Release packaging now retains those specific drawables, and both PR unsigned
+release builds and signed candidates audit the **finished APK** using SDK `aapt2`.
+The audit and its malformed/missing-resource fixtures are separate from the
+existing mocked platform/lifecycle tests. Before acceptance, confirm the release
+artifact audit passes and test first playback, notifications and lock-screen
+controls on Android 13+, including Android 16. Do not infer a physical-device pass
+from package verification or an unsigned release build.
+
 ## Playback TLS: Dart-owned streaming
 
 Finding 1 is implemented through a verifying Dart HTTP relay, not a native

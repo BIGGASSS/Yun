@@ -3,6 +3,7 @@
 # an owner-only temporary directory, never in Gradle properties or artifacts.
 set +x
 set -euo pipefail
+script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 mode=${1:-}
 case "$mode" in
   debug-signed)
@@ -13,8 +14,20 @@ case "$mode" in
     cp build/app/outputs/flutter-apk/app-debug.apk dist/yun-android-arm64-debug-signed.apk
     exit 0
     ;;
+  release-validation)
+    # Exercise the same optimized release packaging on pull requests without
+    # using any signing credentials. This APK is evidence, not an installable
+    # distribution candidate; preserve it separately from dist/.
+    unset YUN_ANDROID_RELEASE_SIGNING YUN_ANDROID_KEYSTORE_PATH
+    unset ANDROID_KEYSTORE_BASE64 ANDROID_KEYSTORE_PASSWORD ANDROID_KEY_ALIAS ANDROID_KEY_PASSWORD
+    fvm flutter build apk --release --target-platform android-arm64
+    python3 "$script_dir/verify-android-resources.py" build/app/outputs/flutter-apk/app-release.apk
+    mkdir -p build/release-validation
+    cp build/app/outputs/flutter-apk/app-release.apk build/release-validation/yun-android-arm64-release-validation-unsigned.apk
+    exit 0
+    ;;
   release-signed) ;;
-  *) echo 'Usage: build-android.sh {debug-signed|release-signed}' >&2; exit 1 ;;
+  *) echo 'Usage: build-android.sh {debug-signed|release-validation|release-signed}' >&2; exit 1 ;;
 esac
 
 for name in ANDROID_KEYSTORE_BASE64 ANDROID_KEYSTORE_PASSWORD ANDROID_KEY_ALIAS ANDROID_KEY_PASSWORD; do
@@ -57,6 +70,7 @@ unset ANDROID_KEYSTORE_BASE64
 fvm flutter build apk --release --target-platform android-arm64
 unset ANDROID_KEYSTORE_PASSWORD ANDROID_KEY_ALIAS ANDROID_KEY_PASSWORD
 unset YUN_ANDROID_RELEASE_SIGNING YUN_ANDROID_KEYSTORE_PATH
+python3 "$script_dir/verify-android-resources.py" build/app/outputs/flutter-apk/app-release.apk
 # Build-tools are installed by Flutter/Android setup. Select the newest installed
 # version, not an arbitrary filesystem glob result.
 sdk=${ANDROID_SDK_ROOT:-${ANDROID_HOME:-}}

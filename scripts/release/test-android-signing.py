@@ -4,6 +4,7 @@ import base64
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import textwrap
 import unittest
@@ -47,7 +48,7 @@ class AndroidSigningTests(unittest.TestCase):
                 )
                 self.assertEqual(result.returncode == 0, allowed, result.stderr)
 
-    def run_build(self, mode, secrets=None, fail_build=False, fail_verify=False):
+    def run_build(self, mode, secrets=None, fail_build=False, fail_verify=False, fail_resources=False):
         with tempfile.TemporaryDirectory(prefix="yun signing test ") as directory:
             root = Path(directory)
             (root / "bin").mkdir()
@@ -62,7 +63,7 @@ import sys
 assert sys.argv[1:4] == ['flutter', 'build', 'apk']
 assert sys.argv[5:] == ['--target-platform', 'android-arm64']
 mode = sys.argv[4]
-if mode == '--release':
+if mode == '--release' and os.environ.get('YUN_ANDROID_RELEASE_SIGNING') == 'true':
     key = Path(os.environ['YUN_ANDROID_KEYSTORE_PATH'])
     assert key.read_bytes() == b'fixture keystore'
     assert key.stat().st_mode & 0o777 == 0o600
@@ -71,8 +72,9 @@ if mode == '--release':
     assert 'ANDROID_KEYSTORE_BASE64' not in os.environ
     assert all(os.environ.get(k) for k in ('ANDROID_KEYSTORE_PASSWORD', 'ANDROID_KEY_ALIAS', 'ANDROID_KEY_PASSWORD'))
 else:
-    assert mode == '--debug'
+    assert mode in ('--debug', '--release')
     assert 'YUN_ANDROID_RELEASE_SIGNING' not in os.environ
+    assert not any(k in os.environ for k in ('YUN_ANDROID_KEYSTORE_PATH', 'ANDROID_KEYSTORE_BASE64', 'ANDROID_KEYSTORE_PASSWORD', 'ANDROID_KEY_ALIAS', 'ANDROID_KEY_PASSWORD'))
 Path('build-called').touch()
 if os.environ.get('FAIL_BUILD') == 'true':
     sys.exit(1)
@@ -81,8 +83,26 @@ out.mkdir(parents=True)
 (out / ('app' + mode[1:] + '.apk')).write_bytes(b'fake apk')
 """)
             flutter.chmod(0o755)
+            # The resource checker has its own APK fixture tests. Here, double
+            # only that subprocess to verify ordering and fail-closed packaging.
+            python = root / "bin/python3"
+            python.write_text(f"""#!{sys.executable}
+import os
+from pathlib import Path
+import sys
+if len(sys.argv) > 1 and Path(sys.argv[1]).name == 'verify-android-resources.py':
+    assert sys.argv[2:] == ['build/app/outputs/flutter-apk/app-release.apk']
+    assert Path(sys.argv[2]).read_bytes() == b'fake apk'
+    assert not any(k in os.environ for k in ('YUN_ANDROID_KEYSTORE_PATH', 'YUN_ANDROID_RELEASE_SIGNING', 'ANDROID_KEYSTORE_PASSWORD', 'ANDROID_KEY_ALIAS', 'ANDROID_KEY_PASSWORD'))
+    if os.environ.get('FAIL_RESOURCES') == 'true':
+        sys.exit(1)
+    Path('resources-verified').touch()
+else:
+    os.execv({sys.executable!r}, [{sys.executable!r}] + sys.argv[1:])
+""")
+            python.chmod(0o755)
             verifier = tools / "apksigner"
-            verifier.write_text("#!/bin/sh\n[ \"${FAIL_VERIFY:-}\" != true ]\n")
+            verifier.write_text("#!/bin/sh\n[ -f resources-verified ] || exit 1\n[ \"${FAIL_VERIFY:-}\" != true ]\n")
             verifier.chmod(0o755)
             environment = {k: v for k, v in os.environ.items() if k not in SECRETS}
             environment.update(
@@ -92,6 +112,7 @@ out.mkdir(parents=True)
                 GITHUB_ACTIONS="false",
                 FAIL_BUILD=str(fail_build).lower(),
                 FAIL_VERIFY=str(fail_verify).lower(),
+                FAIL_RESOURCES=str(fail_resources).lower(),
             )
             environment.update(secrets or {})
             result = subprocess.run(
@@ -102,7 +123,8 @@ out.mkdir(parents=True)
             for secret in SECRETS.values():
                 self.assertNotIn(secret, result.stdout + result.stderr)
             return result, (root / "build-called").exists(), sorted(
-                p.name for p in (root / "dist").glob("*")
+                p.name for directory in (root / "dist", root / "build/release-validation")
+                for p in directory.glob("*")
             )
 
     def test_explicit_debug_evaluation(self):
@@ -116,6 +138,20 @@ out.mkdir(parents=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertTrue(called)
         self.assertEqual(files, ["yun-android-arm64-release-signed.apk"])
+
+    def test_release_validation_without_credentials(self):
+        result, called, files = self.run_build("release-validation", SECRETS)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(called)
+        self.assertEqual(files, ["yun-android-arm64-release-validation-unsigned.apk"])
+
+    def test_failed_resource_audit_never_packages(self):
+        for mode in ("release-validation", "release-signed"):
+            with self.subTest(mode=mode):
+                result, called, files = self.run_build(mode, SECRETS, fail_resources=True)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertTrue(called)
+                self.assertEqual(files, [])
 
     def test_missing_each_secret_fails_before_build(self):
         for missing in SECRETS:
