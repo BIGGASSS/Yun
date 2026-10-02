@@ -985,6 +985,36 @@ class AudioService {
   /// A stream that broadcasts any exceptions that occur asynchronously.
   static Stream<Object> get asyncError => _asyncError;
 
+  static AudioHandler? _playbackStateHandler;
+  static final _stateAcknowledgements =
+      Map<PlaybackState, Completer<void>>.identity();
+
+  /// Publishes a state and waits until the registered service has applied it.
+  ///
+  /// Unlike adding to [BaseAudioHandler.playbackState], completion acknowledges
+  /// the platform's setState (and any resulting service stop). Its original
+  /// exception is returned to this caller as well as [asyncError]. Each call
+  /// uses a distinct snapshot so unrelated stream events cannot acknowledge it.
+  /// Unregistered, standalone handlers only update their local stream; this
+  /// supports handlers used without [init], including adapter unit tests.
+  static Future<void> publishPlaybackState(
+      BaseAudioHandler handler, PlaybackState state) {
+    if (!identical(handler, _playbackStateHandler)) {
+      handler.playbackState.add(state);
+      return Future<void>.value();
+    }
+    final snapshot = state.copyWith();
+    final acknowledgement = Completer<void>();
+    _stateAcknowledgements[snapshot] = acknowledgement;
+    try {
+      handler.playbackState.add(snapshot);
+    } catch (error, stack) {
+      _stateAcknowledgements.remove(snapshot);
+      acknowledgement.completeError(error, stack);
+    }
+    return acknowledgement.future;
+  }
+
   static final _compatibilitySwitcher = SwitchAudioHandler();
 
   /// Register the app's [AudioHandler] with configuration options. This must be
@@ -1165,6 +1195,7 @@ class AudioService {
   }
 
   static Future<void> _observePlaybackState() async {
+    _playbackStateHandler = _handler;
     var previousState = _handler.playbackState.nvalue;
     await for (var playbackState in _handler.playbackState) {
       try {
@@ -1175,10 +1206,15 @@ class AudioService {
           await AudioService._stop();
         }
         previousState = playbackState;
-      } catch (e) {
-        _asyncError.add(e);
+        _stateAcknowledgements.remove(playbackState)?.complete();
+      } catch (error, stack) {
+        _stateAcknowledgements
+            .remove(playbackState)
+            ?.completeError(error, stack);
+        _asyncError.add(error);
       }
     }
+    _playbackStateHandler = null;
   }
 
   /// A stream tracking the current position, suitable for animating a seek bar.

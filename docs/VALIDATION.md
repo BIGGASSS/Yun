@@ -267,6 +267,14 @@ do not publish credentials, listening history, personal library files, or tokens
   Also verify failed background-service binding followed by explicit Play retry,
   a durable service warning while foreground audio remains playable, successful
   metadata/control restoration, and Pause/Stop during a delayed initialization.
+  Exercise repeated natural EOF advancement through downloaded files with the
+  screen locked, including Android 16. Verify one retained focus registration
+  across continuous playback, full release at queue end, and no late audio after
+  Pause/Stop during checkpoint, lookup or native load. Inject a foreground-state
+  failure and confirm its warning survives passive ticks/cleanup until an
+  explicitly requested, acknowledged recovery. Distinct request/abandon/receiver
+  diagnostics are documented in the focus plugin; a mocked policy failure or
+  green build does not establish the cause of a particular device failure.
 - [ ] Secure storage on the actual OS: Linux Secret Service/keyring, macOS Keychain,
   Windows protected storage, Android Keystore; logout/account switching remove
   inappropriate credentials/cache and never expose another account's resources.

@@ -1,4 +1,4 @@
-# Yun audio_service initialization fix
+# Yun audio_service initialization and state acknowledgement fixes
 
 This is a minimal runtime fork of **audio_service 0.18.19**, published by Ryan
 Heise under the MIT license in `LICENSE`.
@@ -20,9 +20,10 @@ Android Gradle wrapper/settings files are omitted.
 
 ## Local changes
 
-`lib/audio_service.dart` and Android's `AudioServicePlugin.java` are patched.
-All other vendored upstream files are unchanged. The Android connection
-coordinator and regression tests are new fork-owned files.
+`lib/audio_service.dart`, Android's `AudioServicePlugin.java`, and
+`AudioService.java` are patched. All other vendored upstream files are unchanged.
+The Android connection/lifecycle coordinators and regression tests are new
+fork-owned files.
 
 Upstream Dart sets `_cacheManager` before
 awaiting platform configuration. If configuration fails, the next debug init
@@ -62,10 +63,45 @@ controlled `AudioServicePlatform` installed before the library's cached platform
 is first used. It covers early failure, repeated configure failures, concurrent
 calls, recovery, and one-time observer registration.
 
+### Playback-state acknowledgement and foreground lifecycle
+
+`AudioService.publishPlaybackState(handler, state)` publishes a distinct snapshot
+and completes only after that registered handler's real native `setState` (and
+any resulting service stop) succeeds. A native failure completes that call with
+the original error and remains available on upstream's `asyncError` stream.
+Unregistered standalone handlers update locally, preserving non-service tests.
+The existing serialized playback-state observer is reused; no second observer
+or direct competing platform writer is installed.
+
+Yun uses this acknowledgement to show a truthful service warning. After a failed
+playing state it suppresses passive retry attempts, still sends pause/stop
+cleanup, and retries the failed state only on an explicit playback command.
+Concurrent retries share one attempt, and success is reported only after native
+acknowledgement. A cleanup success cannot clear a failed promotion warning.
+Android returns fixed error categories rather than raw exception messages.
+
+`AudioServiceLifecycle` tracks actual foreground and play state, committing
+flags only after successful OS operations. A rejected promotion therefore stays
+retryable. Continuous track changes and resume while the service was retained
+in the foreground do not restart/promote the service. Configured demotion and
+stop reset the corresponding flags. A partly failed promotion releases newly
+acquired resources and cancels its started-service obligation. OS foreground
+start restrictions are unchanged; there are no retry timers or exemptions.
+
+`test/services/audio_service_state_acknowledgement_test.dart` uses the real
+vendored observer with a controlled platform. It verifies delayed completion,
+original native errors, 1,000 coalesced pending snapshots, no passive retries,
+cleanup warning persistence, concurrent explicit retry, repeated rejection and
+recovery, distinct acknowledgements for repeated inputs, and disposal cleanup.
+The host JVM suite also exercises the production lifecycle helper for rejection,
+explicit recovery, continuous play, retained-foreground pause/resume, demotion,
+stop, and failed demotion. These checks do not substitute for an Android build
+or locked-screen device testing.
+
 Run from the repository root:
 
 ```sh
-flutter test test/services/audio_service_initialization_test.dart
+flutter test test/services/audio_service_initialization_test.dart test/services/audio_service_state_acknowledgement_test.dart
 bash packages/audio_service/android/test-connection.sh
 ```
 

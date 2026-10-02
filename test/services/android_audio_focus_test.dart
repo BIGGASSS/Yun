@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:yun/services/android_audio_focus.dart';
@@ -11,6 +12,7 @@ void main() {
   late AndroidAudioFocus focus;
   late List<MethodCall> calls;
   late List<AndroidFocusChange> changes;
+  late List<AndroidAudioFocusDiagnostic> diagnostics;
   late StreamSubscription<AndroidFocusChange> subscription;
   late Future<Object?> Function(MethodCall) reply;
 
@@ -44,6 +46,7 @@ void main() {
   setUp(() {
     calls = [];
     changes = [];
+    diagnostics = [];
     reply = (call) async => call.method == 'request' ? 'granted' : true;
     binding.defaultBinaryMessenger.setMockMethodCallHandler(channel, (
       call,
@@ -51,7 +54,7 @@ void main() {
       calls.add(call);
       return reply(call);
     });
-    focus = AndroidAudioFocus(channel: channel);
+    focus = AndroidAudioFocus(channel: channel, onDiagnostic: diagnostics.add);
     subscription = focus.changes.listen(changes.add);
   });
 
@@ -364,5 +367,181 @@ void main() {
     await focus.dispose();
     pending.complete('granted');
     expect(await requested, AudioFocusRequestResult.failed);
+  });
+
+  test('channel denial and exception have distinct safe diagnostics', () async {
+    reply = (_) async => 'failed';
+    expect(await focus.request(), AudioFocusRequestResult.failed);
+    expect(diagnostics.single.toMap(), {
+      'category': 'channel_request',
+      'requestId': requestId(),
+      'result': 'failed',
+    });
+    reply = (_) async => throw PlatformException(
+      code: 'SECRET',
+      message: 'https://private/media?token=SECRET',
+      details: {'account': 'private-user'},
+      stacktrace: 'PRIVATE STACK',
+    );
+    await expectLater(focus.request(), throwsA(isA<PlatformException>()));
+    expect(diagnostics.last.toMap(), {
+      'category': 'channel_request',
+      'requestId': requestId(1),
+      'result': 'error',
+      'exceptionClass': 'PlatformException',
+    });
+    expect(diagnostics.join(), isNot(contains('SECRET')));
+    expect(diagnostics.join(), isNot(contains('private')));
+    expect(diagnostics.join(), isNot(contains('STACK')));
+  });
+
+  test('native diagnostics preserve origin without affecting focus', () async {
+    await focus.request();
+    for (final category in [
+      'native_request',
+      'bridge_prepare',
+      'bridge_channel',
+      'noisy_register',
+      'noisy_unregister',
+      'native_abandon',
+      'abandon',
+    ]) {
+      await event({
+        'category': category,
+        'requestId': requestId(),
+        'result': 'error',
+        'exceptionClass': 'java.lang.SecurityException',
+        'message': 'https://private/media?token=SECRET',
+        'details': {'account': 'SECRET'},
+      }, method: 'diagnostic');
+      expect(diagnostics.last.toMap(), {
+        'category': category,
+        'requestId': requestId(),
+        'result': 'error',
+        'exceptionClass': 'java.lang.SecurityException',
+      });
+    }
+    expect(await focus.request(), AudioFocusRequestResult.granted);
+    expect(calls, hasLength(1));
+    expect(changes, isEmpty);
+    expect(diagnostics.join(), isNot(contains('SECRET')));
+  });
+
+  test('retired request diagnostics cannot resume or replace focus', () async {
+    await focus.request();
+    await focus.abandon();
+    await focus.request();
+    await event({
+      'category': 'noisy_unregister',
+      'requestId': requestId(),
+      'result': 'error',
+      'exceptionClass': 'java.lang.IllegalStateException',
+    }, method: 'diagnostic');
+    expect(diagnostics.last.requestId, requestId());
+    expect(await focus.request(), AudioFocusRequestResult.granted);
+    await change('gain', requestId());
+    expect(changes, isEmpty);
+    expect(calls.where((call) => call.method == 'request'), hasLength(2));
+  });
+
+  test('malformed diagnostic fields are ignored or redacted', () async {
+    for (final payload in [
+      null,
+      'SECRET',
+      {'category': 'SECRET'},
+      {'category': 'SECRET', 'requestId': 1, 'result': 'error'},
+      {'category': 'native_request', 'requestId': 'SECRET', 'result': 'error'},
+      {'category': 'native_request', 'requestId': -1, 'result': 'error'},
+      {'category': 'native_request', 'requestId': 1, 'result': 'SECRET'},
+    ]) {
+      await event(payload, method: 'diagnostic');
+    }
+    expect(diagnostics, isEmpty);
+    for (final exceptionClass in [
+      'https://private/media?token=SECRET',
+      'SecurityException: SECRET',
+      'SecurityException\nSECRET',
+      List.filled(201, 'S').join(),
+      7,
+    ]) {
+      await event({
+        'category': 'native_request',
+        'requestId': 1,
+        'result': 'error',
+        'exceptionClass': exceptionClass,
+      }, method: 'diagnostic');
+      expect(diagnostics.last.exceptionClass, isNull);
+    }
+    expect(diagnostics.join(), isNot(contains('SECRET')));
+  });
+
+  test('unknown native response is diagnosed without printing it', () async {
+    reply = (_) async => 'https://private/media?token=SECRET';
+    expect(await focus.request(), AudioFocusRequestResult.failed);
+    expect(diagnostics.single.result, 'invalid_response');
+    expect(diagnostics.join(), isNot(contains('SECRET')));
+  });
+
+  test(
+    'abandon diagnostics retain identity after synchronous invalidation',
+    () async {
+      await focus.request();
+      reply = (_) async => throw PlatformException(
+        code: 'SECRET',
+        message: 'SECRET',
+        details: {'token': 'SECRET'},
+      );
+      await expectLater(focus.abandon(), throwsA(isA<PlatformException>()));
+      expect(diagnostics.last.toMap(), {
+        'category': 'channel_abandon',
+        'requestId': requestId(),
+        'result': 'error',
+        'exceptionClass': 'PlatformException',
+      });
+      expect(diagnostics.join(), isNot(contains('SECRET')));
+    },
+  );
+
+  test('default release logger prints only sanitized diagnostics', () async {
+    await subscription.cancel();
+    await focus.dispose();
+    final logs = <String?>[];
+    final previous = debugPrint;
+    debugPrint = (message, {wrapWidth}) => logs.add(message);
+    try {
+      focus = AndroidAudioFocus(channel: channel);
+      subscription = focus.changes.listen(changes.add);
+      reply = (_) async => throw PlatformException(
+        code: 'SECRET',
+        message: 'https://private?token=SECRET',
+        details: 'SECRET',
+        stacktrace: 'SECRET',
+      );
+      await expectLater(focus.request(), throwsA(isA<PlatformException>()));
+      expect(logs.single, startsWith('YunAudioFocus '));
+      expect(logs.single, contains('"category":"channel_request"'));
+      expect(logs.single, contains('"exceptionClass":"PlatformException"'));
+      expect(logs.join(), isNot(contains('SECRET')));
+      expect(logs.join(), isNot(contains('private')));
+    } finally {
+      debugPrint = previous;
+    }
+  });
+
+  test('throwing diagnostic consumer cannot change focus results', () async {
+    await subscription.cancel();
+    await focus.dispose();
+    focus = AndroidAudioFocus(
+      channel: channel,
+      onDiagnostic: (_) => throw StateError('consumer error'),
+    );
+    subscription = focus.changes.listen(changes.add);
+    expect(await focus.request(), AudioFocusRequestResult.granted);
+    await event({
+      'category': 'native_request',
+      'requestId': requestId(),
+      'result': 'granted',
+    }, method: 'diagnostic');
+    expect(await focus.abandon(), isTrue);
   });
 }
