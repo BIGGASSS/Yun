@@ -277,7 +277,7 @@ public class AudioService extends MediaBrowserServiceCompat {
     private Bitmap artBitmap;
     private String notificationChannelId;
     private LruCache<String, Bitmap> artBitmapCache;
-    private boolean playing = false;
+    private final AudioServiceLifecycle lifecycle = new AudioServiceLifecycle();
     private AudioProcessingState processingState = AudioProcessingState.idle;
     private int repeatMode;
     private int shuffleMode;
@@ -290,7 +290,7 @@ public class AudioService extends MediaBrowserServiceCompat {
     }
 
     public boolean isPlaying() {
-        return playing;
+        return lifecycle.isPlaying();
     }
 
     public int getRepeatMode() {
@@ -308,7 +308,7 @@ public class AudioService extends MediaBrowserServiceCompat {
         repeatMode = 0;
         shuffleMode = 0;
         notificationCreated = false;
-        playing = false;
+        lifecycle.reset();
         processingState = AudioProcessingState.idle;
         mediaSession = new MediaSessionCompat(this, "media-session");
 
@@ -353,6 +353,7 @@ public class AudioService extends MediaBrowserServiceCompat {
     }
 
     public void stop() {
+        lifecycle.stop(this::exitForegroundState);
         deactivateMediaSession();
         stopSelf();
     }
@@ -379,6 +380,7 @@ public class AudioService extends MediaBrowserServiceCompat {
         //     notificationManager.cancel(NOTIFICATION_ID);
         // }
         releaseWakeLock();
+        lifecycle.reset();
         instance = null;
         notificationCreated = false;
     }
@@ -520,16 +522,15 @@ public class AudioService extends MediaBrowserServiceCompat {
             }
         }
         this.compactActionIndices = compactActionIndices;
-        boolean wasPlaying = this.playing;
+        PlaybackStateCompat previousPlaybackState = mediaSession.getController().getPlaybackState();
         AudioProcessingState oldProcessingState = this.processingState;
         this.processingState = processingState;
-        this.playing = playing;
         this.repeatMode = repeatMode;
         this.shuffleMode = shuffleMode;
 
         PlaybackStateCompat.Builder stateBuilder = new PlaybackStateCompat.Builder()
                 .setActions(AUTO_ENABLED_ACTIONS | actionBits)
-                .setState(getPlaybackState(), position, speed, updateTime)
+                .setState(getPlaybackState(playing), position, speed, updateTime)
                 .setBufferedPosition(bufferedPosition);
 
         for (PlaybackStateCompat.CustomAction action : this.customActions) {
@@ -556,10 +557,20 @@ public class AudioService extends MediaBrowserServiceCompat {
         mediaSession.setShuffleMode(shuffleMode);
         mediaSession.setCaptioningEnabled(captioningEnabled);
 
-        if (!wasPlaying && playing) {
-            enterPlayingState();
-        } else if (wasPlaying && !playing) {
-            exitPlayingState();
+        try {
+            lifecycle.update(playing, config.androidStopForegroundOnPause,
+                    this::enterPlayingState, this::exitForegroundState);
+        } catch (RuntimeException error) {
+            // Publishing play intent must not make a rejected promotion sticky.
+            // Restore the session's previous state and propagate the real failure
+            // to Dart; its explicit-command recovery owns whether to try again.
+            this.processingState = oldProcessingState;
+            try {
+                mediaSession.setPlaybackState(previousPlaybackState);
+            } catch (RuntimeException ignored) {
+                // Preserve the promotion failure rather than a rollback error.
+            }
+            throw error;
         }
 
         if (oldProcessingState != AudioProcessingState.idle && processingState == AudioProcessingState.idle) {
@@ -599,6 +610,10 @@ public class AudioService extends MediaBrowserServiceCompat {
     }
 
     public int getPlaybackState() {
+        return getPlaybackState(lifecycle.isPlaying());
+    }
+
+    private int getPlaybackState(boolean playing) {
         switch (processingState) {
         case idle: return PlaybackStateCompat.STATE_NONE;
         case loading: return PlaybackStateCompat.STATE_CONNECTING;
@@ -703,18 +718,23 @@ public class AudioService extends MediaBrowserServiceCompat {
     }
 
     private void enterPlayingState() {
-        ContextCompat.startForegroundService(this, new Intent(AudioService.this, AudioService.class));
-        if (!mediaSession.isActive())
-            mediaSession.setActive(true);
-
-        acquireWakeLock();
-        mediaSession.setSessionActivity(contentIntent);
-        internalStartForeground();
-    }
-
-    private void exitPlayingState() {
-        if (config.androidStopForegroundOnPause) {
-            exitForegroundState();
+        boolean wasActive = mediaSession.isActive();
+        boolean hadWakeLock = wakeLock.isHeld();
+        boolean serviceStarted = false;
+        try {
+            ContextCompat.startForegroundService(this, new Intent(AudioService.this, AudioService.class));
+            serviceStarted = true;
+            if (!wasActive) mediaSession.setActive(true);
+            acquireWakeLock();
+            mediaSession.setSessionActivity(contentIntent);
+            internalStartForeground();
+        } catch (RuntimeException error) {
+            if (!hadWakeLock) releaseWakeLock();
+            if (!wasActive) mediaSession.setActive(false);
+            // If startForeground itself failed, cancel the started-service
+            // obligation instead of leaving a timed-out foreground start behind.
+            if (serviceStarted) stopSelf();
+            throw error;
         }
     }
 

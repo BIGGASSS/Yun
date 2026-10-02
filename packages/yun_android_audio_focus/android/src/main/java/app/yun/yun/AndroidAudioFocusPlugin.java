@@ -10,6 +10,7 @@ import android.media.AudioManager;
 import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
+import android.util.Log;
 
 import java.util.HashMap;
 import java.util.Map;
@@ -20,6 +21,7 @@ import io.flutter.plugin.common.MethodChannel;
 
 /** Engine-owned bridge; never holds an Activity or releases focus on its detach. */
 public final class AndroidAudioFocusPlugin implements FlutterPlugin, MethodChannel.MethodCallHandler {
+    private static final String LOG_TAG = "YunAudioFocus";
     private MethodChannel channel;
     private AudioFocusCoordinator coordinator;
 
@@ -36,31 +38,66 @@ public final class AndroidAudioFocusPlugin implements FlutterPlugin, MethodChann
                     Map<String, Object> event = new HashMap<>();
                     event.put("requestId", requestId);
                     event.put("change", changeName(change));
-                    channel.invokeMethod("focusChanged", event);
-                });
+                    try {
+                        channel.invokeMethod("focusChanged", event);
+                    } catch (RuntimeException error) {
+                        reportDiagnostic(new AudioFocusCoordinator.Diagnostic(requestId,
+                                AudioFocusCoordinator.Category.BRIDGE_CHANNEL,
+                                AudioFocusCoordinator.Outcome.ERROR, error));
+                    }
+                }, this::reportDiagnostic);
         channel.setMethodCallHandler(this);
     }
 
     @Override
     public void onMethodCall(MethodCall call, MethodChannel.Result result) {
+        Object id = call.arguments instanceof Map ? ((Map<?, ?>) call.arguments).get("requestId") : null;
+        long requestId = id instanceof Number ? ((Number) id).longValue() : 0;
         if (coordinator == null) {
+            reportDiagnostic(new AudioFocusCoordinator.Diagnostic(requestId,
+                    AudioFocusCoordinator.Category.BRIDGE_CHANNEL,
+                    AudioFocusCoordinator.Outcome.DISPOSED, null));
             result.error("audio_focus_unavailable", "Audio focus bridge is detached", null);
             return;
         }
-        switch (call.method) {
-            case "request":
-                Object id = call.argument("requestId");
-                if (!(id instanceof Number)) {
-                    result.error("invalid_request", "requestId must be an integer", null);
-                    return;
-                }
-                result.success(resultName(coordinator.request(((Number) id).longValue())));
-                break;
-            case "abandon":
-                result.success(coordinator.abandon());
-                break;
-            default:
-                result.notImplemented();
+        try {
+            switch (call.method) {
+                case "request":
+                    if (!(id instanceof Long || id instanceof Integer) || requestId <= 0) {
+                        reportDiagnostic(new AudioFocusCoordinator.Diagnostic(0,
+                                AudioFocusCoordinator.Category.BRIDGE_CHANNEL,
+                                AudioFocusCoordinator.Outcome.FAILED, null));
+                        result.error("invalid_request", "requestId must be a positive integer", null);
+                        return;
+                    }
+                    result.success(resultName(coordinator.request(requestId)));
+                    break;
+                case "abandon":
+                    result.success(coordinator.abandon());
+                    break;
+                default:
+                    result.notImplemented();
+            }
+        } catch (RuntimeException error) {
+            reportDiagnostic(new AudioFocusCoordinator.Diagnostic(requestId,
+                    AudioFocusCoordinator.Category.BRIDGE_CHANNEL,
+                    AudioFocusCoordinator.Outcome.ERROR, error));
+            result.error("audio_focus_bridge_error", "Audio focus bridge failed", null);
+        }
+    }
+
+    private void reportDiagnostic(AudioFocusCoordinator.Diagnostic diagnostic) {
+        // Available in release logcat as well as Dart; never pass Throwable to
+        // Log because its stack/cause/message can expose media URLs or tokens.
+        Log.i(LOG_TAG, diagnostic.logLine());
+        if (channel == null) return;
+        try {
+            channel.invokeMethod("diagnostic", diagnostic.toMap());
+        } catch (RuntimeException error) {
+            // A failed diagnostic delivery must not affect focus or recurse.
+            Log.i(LOG_TAG, new AudioFocusCoordinator.Diagnostic(diagnostic.requestId,
+                    AudioFocusCoordinator.Category.BRIDGE_CHANNEL,
+                    AudioFocusCoordinator.Outcome.ERROR, error).logLine());
         }
     }
 
@@ -161,12 +198,7 @@ public final class AndroidAudioFocusPlugin implements FlutterPlugin, MethodChann
 
             @Override
             public void unregister() {
-                try {
-                    context.unregisterReceiver(receiver);
-                } catch (IllegalArgumentException alreadyUnregistered) {
-                    // registerReceiver can fail before installing the receiver.
-                    // That case has no remaining receiver resource to release.
-                }
+                context.unregisterReceiver(receiver);
             }
         });
     }

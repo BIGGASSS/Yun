@@ -145,6 +145,17 @@ messages for the immediately retired local path are also ignored; current paths,
 same-path retries, unknown paths and untagged file/decoder/device errors remain
 visible. These filters do not claim every native diagnostic has source identity.
 
+Automatic EOF advancement uses `TransitionPlaybackEngine.stopForTransition`:
+the decoder and old relay are still stopped/retired before checkpoint and source
+lookup, while an existing valid audio-focus grant remains owned. Transient loss
+continues waiting for real GAIN; gain during lookup cannot restart retired media.
+Explicit selection/retry uses full stop, and Pause, Stop, noisy output, permanent
+loss, queue end, failed lookup/open and teardown cancel or release the session.
+Controller cancellation spans queued EOF events, native stop, checkpoint, lookup
+and native open so a late operation cannot play after Pause/Stop/shutdown. A failed
+stop/release leaves the selection reloadable, rather than calling Play on an
+empty native playlist.
+
 A genuine local failure stops its decoder, retains the queue and first cause,
 and offers explicit Play retry/Redownload. Repair does not autoplay and replaces audio
 only after successful download/checksum verification. No local playback error
@@ -200,6 +211,15 @@ automatic track advancement, settings and timers do not retry it. Successful set
 replays the current metadata/state without recreating the engine, subscriptions,
 or recording timer. Pause, Stop and shutdown cancel stale initialization intents;
 retired native control owners cannot clear a newer owner's handler.
+
+Playback-state updates additionally wait for the vendored service observer's
+actual native acknowledgement. A foreground-promotion failure latches a sanitized
+warning and makes availability false; passive ticks and successful pause/stop
+cleanup cannot erase it. A new explicit playback command retries the failed
+snapshot once, before focus acquisition, and clears the warning only after native
+success. Native foreground/playing flags commit only after OS success; retaining
+foreground across pause/EOF does not call startForegroundService again. These
+changes do not permit a background start that Android denies.
 
 The pinned `packages/audio_service` runtime patch makes failed pre-handler
 configuration retryable without re-registering global observers. Its exact

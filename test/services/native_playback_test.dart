@@ -3,6 +3,7 @@
 // RUN_NATIVE_PLAYBACK=1 LD_LIBRARY_PATH=/path/to/extracted/usr/lib \
 //   .fvm/flutter_sdk/bin/flutter test test/services/native_playback_test.dart
 // Optional: LIBMPV_PATH=/absolute/path/to/libmpv.so
+import 'dart:async';
 import 'dart:io';
 import 'dart:math';
 import 'dart:typed_data';
@@ -12,11 +13,179 @@ import 'package:media_kit/media_kit.dart' as native;
 import 'package:yun/core/playback_controller.dart';
 import 'package:yun/models/models.dart';
 import 'package:yun/services/playback_engine.dart';
+import 'package:yun/services/android_audio_focus.dart';
 
 void main() {
   // Unlike widget tests, these opt-in integration tests need real Dart HTTP
   // as well as native sockets: the production relay owns the upstream client.
   _NativePlaybackBinding();
+  // mpv otherwise probes PulseAudio during initialization before ao=null can
+  // be set. Test mode selects the null backend before Player construction.
+  setUp(() => native.NativePlayer.test = true);
+  for (final interruption in [
+    'none',
+    'transient loss',
+    'gain during lookup',
+    'permanent loss',
+    'noisy',
+    'resolution failure',
+    'native file failure',
+  ]) {
+    test(
+      'REAL native EOF retains focus through slow lookup: $interruption',
+      () async {
+        native.MediaKit.ensureInitialized(
+          libmpv: Platform.environment['LIBMPV_PATH'],
+        );
+        final directory = await Directory.systemTemp.createTemp(
+          'yun-native-focus-',
+        );
+        final wav = File('${directory.path}/short.wav');
+        await wav.writeAsBytes(_tone(milliseconds: 300));
+        final focus = _NativeTransitionFocus();
+        late native.Player player;
+        final engine = MediaKitEngine(
+          androidAudioFocus: true,
+          focus: focus,
+          loadSession: () async => null,
+          createPlayer: () async {
+            native.NativePlayer.test = true;
+            player = native.Player();
+            await (player.platform as native.NativePlayer).setProperty(
+              'ao',
+              'null',
+            );
+            return player;
+          },
+        );
+        final nextLookup = Completer<void>();
+        final finishLookup = Completer<void>();
+        final visited = <String>[];
+        final nativeSources = <String>[];
+        final errors = <String>[];
+        final subscription = engine.states.listen((state) {
+          if (state.error != null) errors.add(state.error!);
+        });
+        final controller = PlaybackController(
+          engine: engine,
+          enableSystemControls: false,
+          resolveSource: (track, _) async {
+            visited.add(track.id);
+            if (track.id == 'next') {
+              nextLookup.complete();
+              await finishLookup.future;
+              if (interruption == 'resolution failure') {
+                throw const LocalAudioUnavailable('Fixture unavailable');
+              }
+              if (interruption == 'native file failure') {
+                return AudioSource(
+                  '${directory.path}/missing.wav',
+                  local: true,
+                );
+              }
+            }
+            return AudioSource(wav.path, local: true);
+          },
+        );
+        StreamSubscription<native.Playlist>? playlists;
+        try {
+          await engine.initialize();
+          playlists = player.stream.playlist.listen((playlist) {
+            if (playlist.medias.isNotEmpty) {
+              nativeSources.add(playlist.medias.single.uri);
+            }
+          });
+          await controller.playQueue(const [
+            Track(id: 'first', title: 'First', durationMs: 300),
+            Track(id: 'next', title: 'Next', durationMs: 300),
+          ]);
+          await nextLookup.future.timeout(const Duration(seconds: 8));
+          // This runs inside source resolution, after stopForTransition returns.
+          // Retaining focus must never mean retaining an old active decoder.
+          await _until(() => player.state.playlist.medias.isEmpty);
+          expect(player.state.playing, isFalse);
+          expect(
+            await (player.platform as native.NativePlayer).getProperty(
+              'idle-active',
+            ),
+            'yes',
+          );
+          expect(focus.requests, 1);
+          expect(focus.releasedRegistrations, 0);
+          final sourcesBefore = nativeSources.length;
+          if (interruption == 'transient loss' ||
+              interruption == 'gain during lookup') {
+            focus.events.add(AndroidFocusChange.transientLoss);
+            if (interruption == 'gain during lookup') {
+              focus.events.add(AndroidFocusChange.gain);
+              await Future<void>.delayed(const Duration(milliseconds: 30));
+              expect(player.state.playlist.medias, isEmpty);
+              expect(nativeSources.length, sourcesBefore);
+              expect(player.state.playing, isFalse);
+            }
+          } else if (interruption == 'permanent loss' ||
+              interruption == 'noisy') {
+            focus.events.add(
+              interruption == 'noisy'
+                  ? AndroidFocusChange.noisy
+                  : AndroidFocusChange.loss,
+            );
+          }
+          finishLookup.complete();
+          if (interruption == 'transient loss') {
+            await _until(() => controller.isWaitingForAudio);
+            expect(player.state.playlist.medias, isEmpty);
+            expect(player.state.playing, isFalse);
+            expect(focus.releasedRegistrations, 0);
+            focus.events.add(AndroidFocusChange.gain);
+          }
+          final failed = [
+            'permanent loss',
+            'noisy',
+            'resolution failure',
+            'native file failure',
+          ].contains(interruption);
+          await _until(
+            () => failed
+                ? controller.error != null
+                : controller.currentTrack == null,
+          );
+          // Full cleanup can be queued after a decoder error state.
+          await _until(() => focus.releasedRegistrations == 1);
+          expect(visited, ['first', 'next']);
+          expect(
+            focus.requests,
+            1,
+            reason: 'Backgrounded continuation must never reacquire focus',
+          );
+          expect(focus.releasedRegistrations, 1);
+          expect(player.state.playing, isFalse);
+          if (failed) {
+            expect(controller.currentTrack?.id, 'next');
+            if (interruption == 'permanent loss' || interruption == 'noisy') {
+              expect(controller.audioFocusError, isNotNull);
+              expect(controller.localPlaybackError, isNull);
+              expect(nativeSources.length, sourcesBefore);
+            }
+          } else {
+            expect(controller.error, isNull);
+            expect(errors, isEmpty);
+            expect(nativeSources.length, greaterThan(sourcesBefore));
+          }
+        } finally {
+          if (!finishLookup.isCompleted) finishLookup.complete();
+          await controller.shutdown();
+          controller.dispose();
+          await playlists?.cancel();
+          await subscription.cancel();
+          await directory.delete(recursive: true);
+        }
+      },
+      skip: Platform.environment['RUN_NATIVE_PLAYBACK'] != '1',
+      timeout: const Timeout(Duration(seconds: 20)),
+    );
+  }
+
   // Exercise the production relay and real decoder, injecting a private CA
   // only into Dart's HttpClient. mpv never connects to the TLS peer or receives
   // credentials. These fixtures test identity checks, not platform trust-root
@@ -541,8 +710,9 @@ Future<void> _until(bool Function() condition) async {
   }
 }
 
-Uint8List _tone() {
-  const rate = 44100, frames = rate * 6;
+Uint8List _tone({int milliseconds = 6000}) {
+  const rate = 44100;
+  final frames = rate * milliseconds ~/ 1000;
   final bytes = Uint8List(44 + frames * 2);
   final data = ByteData.sublistView(bytes);
   void text(int offset, String value) =>
@@ -567,4 +737,30 @@ Uint8List _tone() {
     );
   }
   return bytes;
+}
+
+/// Models Android background focus eligibility: the foreground user start gets
+/// one grant, and any later request is refused. Real decoding stays in libmpv.
+class _NativeTransitionFocus implements AndroidAudioFocus {
+  final events = StreamController<AndroidFocusChange>.broadcast(sync: true);
+  int requests = 0, releasedRegistrations = 0;
+  bool registered = false;
+  @override
+  Stream<AndroidFocusChange> get changes => events.stream;
+  @override
+  Future<AudioFocusRequestResult> request() async {
+    if (++requests != 1) return AudioFocusRequestResult.failed;
+    registered = true;
+    return AudioFocusRequestResult.granted;
+  }
+
+  @override
+  Future<bool> abandon() async {
+    if (registered) releasedRegistrations++;
+    registered = false;
+    return true;
+  }
+
+  @override
+  Future<void> dispose() => events.close();
 }

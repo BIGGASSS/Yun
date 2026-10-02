@@ -50,6 +50,41 @@ class _Controls implements SystemMediaControls {
   }
 }
 
+class _RecoverableControls extends _Controls
+    implements RecoverableSystemMediaControls {
+  final statuses = StreamController<SystemMediaControlsStatus>.broadcast(
+    sync: true,
+  );
+  int retries = 0;
+  Future<void> Function()? onRetry;
+
+  @override
+  Stream<SystemMediaControlsStatus> get statusChanges => statuses.stream;
+
+  void fail() => statuses.add(
+    const SystemMediaControlsStatus(
+      available: false,
+      error: 'Background playback service unavailable. Try Play again.',
+      errorCode: 'native_state_failed',
+    ),
+  );
+
+  void recover() =>
+      statuses.add(const SystemMediaControlsStatus(available: true));
+
+  @override
+  Future<void> retryPlaybackState() async {
+    retries++;
+    await onRetry?.call();
+  }
+
+  @override
+  Future<void> dispose() async {
+    await statuses.close();
+    await super.dispose();
+  }
+}
+
 void main() {
   const tracks = [Track(id: 'a', title: 'A'), Track(id: 'b', title: 'B')];
   late FakeEngine engine;
@@ -74,6 +109,112 @@ void main() {
   tearDown(() async {
     await player.shutdown();
     player.dispose();
+  });
+
+  Future<_RecoverableControls> useRecoverable() async {
+    await player.shutdown();
+    player.dispose();
+    engine = FakeEngine();
+    final recovery = _RecoverableControls();
+    controls = recovery;
+    player = PlaybackController(
+      engine: engine,
+      controls: recovery,
+      resolveSource: (track, _) async =>
+          AudioSource('/cache/${track.id}', local: true),
+    );
+    return recovery;
+  }
+
+  test('native service status is truthful and passive snapshots cannot clear failure', () async {
+    final recovery = await useRecoverable();
+    await player.playQueue(tracks);
+    recovery.fail();
+    expect(player.systemMediaControlsAvailable, isFalse);
+    expect(player.systemMediaControlsError, contains('Background playback'));
+    for (var i = 0; i < 10; i++) {
+      engine.emit(EngineState(playing: true, position: Duration(seconds: i)));
+    }
+    await Future<void>.delayed(Duration.zero);
+    engine.emit(const EngineState(completed: true));
+    await player.flushSettings();
+    expect(recovery.retries, 0);
+    expect(player.systemMediaControlsAvailable, isFalse);
+    expect(player.systemMediaControlsError, isNotNull);
+  });
+
+  test(
+    'explicit Play waits for native recovery before asking engine to play',
+    () async {
+      final recovery = await useRecoverable();
+      await player.playQueue(tracks);
+      await player.pause();
+      recovery.fail();
+      final started = Completer<void>();
+      final gate = Completer<void>();
+      recovery.onRetry = () async {
+        started.complete();
+        await gate.future;
+        recovery.recover();
+      };
+      final playing = player.play();
+      await started.future;
+      expect(engine.state.playing, isFalse);
+      expect(player.systemMediaControlsAvailable, isFalse);
+      gate.complete();
+      await playing;
+      expect(engine.state.playing, isTrue);
+      expect(recovery.retries, 1);
+      expect(player.systemMediaControlsAvailable, isTrue);
+      expect(player.systemMediaControlsError, isNull);
+    },
+  );
+
+  test(
+    'queued explicit commands share failed native recovery without retry storm',
+    () async {
+      final recovery = await useRecoverable();
+      await player.playQueue(tracks);
+      recovery.fail();
+      final started = Completer<void>();
+      final gate = Completer<void>();
+      recovery.onRetry = () async {
+        if (!started.isCompleted) started.complete();
+        await gate.future;
+        throw StateError('untrusted native detail');
+      };
+      final first = player.play();
+      await started.future;
+      final more = List.generate(20, (_) => player.play());
+      gate.complete();
+      await Future.wait([first, ...more]);
+      expect(recovery.retries, 1);
+      expect(player.systemMediaControlsAvailable, isFalse);
+      expect(player.systemMediaControlsError, isNot(contains('untrusted')));
+      await player.play();
+      expect(recovery.retries, 2);
+    },
+  );
+
+  test('Stop while native recovery is pending prevents a late Play', () async {
+    final recovery = await useRecoverable();
+    await player.playQueue(tracks);
+    await player.pause();
+    recovery.fail();
+    final started = Completer<void>();
+    final gate = Completer<void>();
+    recovery.onRetry = () async {
+      started.complete();
+      await gate.future;
+      recovery.recover();
+    };
+    final playing = player.play();
+    await started.future;
+    final stopping = player.stop();
+    gate.complete();
+    await Future.wait([playing, stopping]);
+    expect(player.currentTrack, isNull);
+    expect(engine.state.playing, isFalse);
   });
 
   test(

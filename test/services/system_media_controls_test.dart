@@ -237,16 +237,24 @@ void main() {
       handler: handler,
       windows: windows,
     );
+    final statuses = <SystemMediaControlsStatus>[];
+    final subscription = controls.statusChanges.listen(statuses.add);
     const a = [Track(id: 'a', title: 'A')];
     const b = [Track(id: 'b', title: 'B')];
     await _update(controls, a, 0);
     windows.onMetadata = () async => throw StateError('partial bridge write');
     await expectLater(_update(controls, b, 0), throwsStateError);
+    expect(statuses.last.available, isFalse);
+    expect(statuses.last.errorCode, 'native_state_failed');
+    expect(statuses.last.error, isNot(contains('partial bridge write')));
     windows.onMetadata = null;
     await _update(controls, a, 0);
+    expect(statuses.last.available, isTrue);
+    expect(statuses.last.error, isNull);
     expect(windows.titles, ['A', 'B', 'A']);
     expect(handler.mediaItem.value!.title, 'A');
     expect(handler.queue.value.single.id, 'a');
+    await subscription.cancel();
     await controls.dispose();
   });
 

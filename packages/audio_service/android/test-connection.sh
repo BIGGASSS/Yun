@@ -11,5 +11,8 @@ else
 fi
 "${compiler[@]}" -Xlint:all -Werror -d "$classes" \
   "$root/src/main/java/com/ryanheise/audioservice/AudioServiceConnection.java" \
-  "$root/src/test/java/com/ryanheise/audioservice/AudioServiceConnectionTest.java"
+  "$root/src/test/java/com/ryanheise/audioservice/AudioServiceConnectionTest.java" \
+  "$root/src/main/java/com/ryanheise/audioservice/AudioServiceLifecycle.java" \
+  "$root/src/test/java/com/ryanheise/audioservice/AudioServiceLifecycleTest.java"
 java -ea -cp "$classes" com.ryanheise.audioservice.AudioServiceConnectionTest
+java -ea -cp "$classes" com.ryanheise.audioservice.AudioServiceLifecycleTest

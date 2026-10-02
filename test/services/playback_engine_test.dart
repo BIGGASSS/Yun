@@ -3,12 +3,13 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:math' as math;
 
-import 'package:audio_session/audio_session.dart';
+import 'package:audio_session/audio_session.dart' hide AndroidAudioFocus;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:yun/core/playback_controller.dart';
 import 'package:yun/models/models.dart' as yun;
 import 'package:yun/services/playback_engine.dart';
+import 'package:yun/services/android_audio_focus.dart';
 
 void main() {
   late TestPlayer player;
@@ -28,6 +29,364 @@ void main() {
     await session.interruptions.close();
     await session.noisy.close();
   });
+
+  Future<TransitionTestFocus> useTransitionFocus() async {
+    await engine.dispose();
+    player = TestPlayer();
+    final focus = TransitionTestFocus();
+    engine = MediaKitEngine(
+      createPlayer: () async => player,
+      loadSession: () async => null,
+      androidAudioFocus: true,
+      focus: focus,
+    );
+    return focus;
+  }
+
+  test('transition retires decoder and relay before returning but retains focus', () async {
+    final focus = await useTransitionFocus();
+    await engine.open('https://yun.test/old.audio');
+    final oldRelay = player.opened!;
+    final stopped = Completer<void>();
+    player.onStop = () => stopped.future;
+    final states = <EngineState>[];
+    final subscription = engine.states.listen(states.add);
+    addTearDown(subscription.cancel);
+    var retired = false;
+    final retiring = engine.stopForTransition().then((_) => retired = true);
+    await Future<void>.delayed(Duration.zero);
+    expect(retired, isFalse);
+    await expectLater(readNative(oldRelay), throwsA(isA<SocketException>()));
+    player.state = player.state.copyWith(
+      completed: true,
+      position: const Duration(seconds: 120),
+    );
+    player.stream.playingEvents.add(true);
+    player.stream.errors.add('Failed to open $oldRelay.');
+    expect(states.last.playing, isFalse);
+    expect(states.last.completed, isFalse);
+    expect(states.last.position, Duration.zero);
+    expect(states.where((state) => state.error != null), isEmpty);
+    stopped.complete();
+    await retiring;
+    expect(player.stops, 1);
+    expect(player.state.playing, isFalse);
+    expect(focus.requests, 1);
+    expect(focus.abandons, 0);
+    // A new request would now fail under Android background eligibility rules.
+    focus.allowRequest = false;
+    await engine.open('/cache/next.audio');
+    expect(player.opens, 2);
+    expect(player.state.playing, isTrue);
+    expect(focus.requests, 1);
+    expect(focus.abandons, 0);
+    await engine.stop();
+    expect(focus.abandons, 1);
+  });
+
+  test(
+    'transition waits for canceled staged native open before retiring decoder',
+    () async {
+      final focus = await useTransitionFocus();
+      final entered = Completer<void>();
+      final loaded = Completer<void>();
+      player.onOpen = () {
+        entered.complete();
+        return loaded.future;
+      };
+      final opening = engine.open('/cache/old.audio');
+      await entered.future;
+      var retired = false;
+      final retiring = engine.stopForTransition().then((_) => retired = true);
+      await Future<void>.delayed(Duration.zero);
+      expect(retired, isFalse);
+      expect(player.stops, 0);
+      loaded.complete();
+      await Future.wait([opening, retiring]);
+      expect(player.stops, 1);
+      expect(player.state.playing, isFalse);
+      expect(player.plays, 0);
+      expect(focus.abandons, 0);
+      player.onOpen = null;
+      await engine.open('/cache/next.audio');
+      expect(player.plays, 1);
+      expect(focus.requests, 1);
+    },
+  );
+
+  test('failed output start after staging retires decoder and releases retained focus', () async {
+    final focus = await useTransitionFocus();
+    await engine.open('/cache/old.audio');
+    await engine.stopForTransition();
+    player.onPlay = () => throw StateError('output start failed');
+    await expectLater(engine.open('/cache/next.audio'), throwsStateError);
+    expect(player.stops, 2);
+    expect(focus.abandons, 1);
+    expect(player.state.playing, isFalse);
+    player.onPlay = null;
+    await engine.stop();
+    await engine.open('/cache/next.audio');
+    expect(player.state.playing, isTrue);
+    expect(focus.requests, 2);
+  });
+
+  for (final lossBeforeStop in [true, false]) {
+    test(
+      'transition preserves transient loss before stop=$lossBeforeStop until actual gain',
+      () async {
+        final focus = await useTransitionFocus();
+        await engine.open('/cache/old.audio');
+        if (lossBeforeStop) focus.events.add(AndroidFocusChange.transientLoss);
+        await engine.stopForTransition();
+        if (!lossBeforeStop) focus.events.add(AndroidFocusChange.transientLoss);
+        final states = <EngineState>[];
+        final subscription = engine.states.listen(states.add);
+        addTearDown(subscription.cancel);
+        await engine.open(
+          '/cache/next.audio',
+          start: const Duration(seconds: 9),
+        );
+        expect(player.opens, 1);
+        expect(player.state.playing, isFalse);
+        expect(states.last.waitingForAudio, isTrue);
+        expect(states.last.position, const Duration(seconds: 9));
+        expect(focus.requests, 1);
+        expect(focus.abandons, 0);
+        focus.allowRequest = false;
+        focus.events.add(AndroidFocusChange.gain);
+        await Future<void>.delayed(Duration.zero);
+        expect(player.opens, 2);
+        expect(player.opened, '/cache/next.audio');
+        expect(player.media!.start, const Duration(seconds: 9));
+        expect(player.state.playing, isTrue);
+        expect(focus.requests, 1);
+        expect(focus.abandons, 0);
+        expect(states.last.waitingForAudio, isFalse);
+      },
+    );
+  }
+
+  test('gain racing next-source submission is consumed once without reopening or reacquiring', () async {
+    final focus = await useTransitionFocus();
+    await engine.open('/cache/old.audio');
+    await engine.stopForTransition();
+    focus.events.add(AndroidFocusChange.transientLoss);
+    focus.allowRequest = false;
+    final opening = engine.open('/cache/next.audio');
+    focus.events.add(AndroidFocusChange.gain);
+    await opening;
+    await Future<void>.delayed(Duration.zero);
+    expect(player.opens, 2);
+    expect(player.plays, 2);
+    expect(player.state.playing, isTrue);
+    expect(focus.requests, 1);
+    expect(focus.abandons, 0);
+  });
+
+  test(
+    'gain during slow next-source lookup never resumes the retired decoder',
+    () async {
+      final focus = await useTransitionFocus();
+      await engine.open('/cache/old.audio');
+      await engine.stopForTransition();
+      focus.events.add(AndroidFocusChange.transientLoss);
+      focus.events.add(AndroidFocusChange.gain);
+      await Future<void>.delayed(Duration.zero);
+      expect(player.plays, 1);
+      expect(player.state.playing, isFalse);
+      expect(focus.requests, 1);
+      expect(focus.abandons, 0);
+      focus.allowRequest = false;
+      await engine.open('/cache/next.audio');
+      expect(player.state.playing, isTrue);
+      expect(player.plays, 2);
+      expect(focus.requests, 1);
+    },
+  );
+
+  test('transient loss while native transition stop is pending still retires source', () async {
+    final focus = await useTransitionFocus();
+    await engine.open('/cache/old.audio');
+    final stopped = Completer<void>();
+    player.onStop = () => stopped.future;
+    final retiring = engine.stopForTransition();
+    focus.events.add(AndroidFocusChange.transientLoss);
+    stopped.complete();
+    await retiring;
+    expect(player.stops, 1);
+    expect(player.state.playing, isFalse);
+    await engine.open('/cache/next.audio');
+    expect(player.opens, 1);
+    expect(focus.abandons, 0);
+    focus.events.add(AndroidFocusChange.gain);
+    await Future<void>.delayed(Duration.zero);
+    expect(player.opens, 2);
+    expect(player.state.playing, isTrue);
+    expect(focus.requests, 1);
+  });
+
+  for (final cancellation in ['pause', 'noisy', 'permanent loss']) {
+    test(
+      '$cancellation during slow lookup releases focus and vetoes continuation',
+      () async {
+        final focus = await useTransitionFocus();
+        await engine.open('/cache/old.audio');
+        await engine.stopForTransition();
+        if (cancellation == 'pause') {
+          await engine.pause();
+        } else {
+          focus.events.add(
+            cancellation == 'noisy'
+                ? AndroidFocusChange.noisy
+                : AndroidFocusChange.loss,
+          );
+          await Future<void>.delayed(Duration.zero);
+        }
+        expect(focus.abandons, 1);
+        focus.events.add(AndroidFocusChange.gain);
+        await Future<void>.delayed(Duration.zero);
+        expect(player.plays, 1);
+        await expectLater(
+          engine.open('/cache/next.audio'),
+          throwsA(
+            isA<AudioFocusUnavailable>().having(
+              (e) => e.phase,
+              'phase',
+              AudioFocusFailurePhase.interruption,
+            ),
+          ),
+        );
+        expect(player.opens, 1);
+        expect(player.state.playing, isFalse);
+        expect(focus.requests, 1);
+        await engine.stop();
+        await engine.open('/cache/next.audio');
+        expect(player.opens, 2);
+        expect(player.state.playing, isTrue);
+        expect(focus.requests, 2);
+      },
+    );
+  }
+
+  for (final cancellation in ['stop', 'dispose']) {
+    test(
+      '$cancellation during transition releases the retained registration',
+      () async {
+        final focus = await useTransitionFocus();
+        await engine.open('/cache/old.audio');
+        await engine.stopForTransition();
+        focus.events.add(AndroidFocusChange.transientLoss);
+        await Future<void>.delayed(Duration.zero);
+        if (cancellation == 'stop') {
+          await engine.stop();
+          focus.events.add(AndroidFocusChange.gain);
+        } else {
+          await engine.dispose();
+        }
+        await Future<void>.delayed(Duration.zero);
+        expect(focus.abandons, 1);
+        expect(player.plays, 1);
+        expect(player.state.playing, isFalse);
+      },
+    );
+  }
+
+  for (final failure in ['native stop', 'native open', 'resolution']) {
+    test(
+      'failed transition $failure releases focus and permits explicit retry',
+      () async {
+        final focus = await useTransitionFocus();
+        await engine.open('/cache/old.audio');
+        if (failure == 'native stop') {
+          player.onStop = () => throw StateError('stop failed');
+          await expectLater(engine.stopForTransition(), throwsStateError);
+          player.onStop = null;
+        } else {
+          await engine.stopForTransition();
+          if (failure == 'native open') {
+            player.onOpen = () => throw StateError('open failed');
+            await expectLater(
+              engine.open('/cache/broken.audio'),
+              throwsStateError,
+            );
+            player.onOpen = null;
+          } else {
+            // A resolver lives above the engine; its failure must fully stop.
+            await engine.stop();
+          }
+        }
+        expect(focus.abandons, 1);
+        await engine.stop();
+        await engine.open('/cache/retry.audio');
+        expect(player.state.playing, isTrue);
+        expect(focus.requests, 2);
+      },
+    );
+  }
+
+  for (final platformError in [false, true]) {
+    test(
+      'request diagnostics distinguish channel error=$platformError from denial',
+      () async {
+        session.onSetActive = (active) {
+          if (!active) return true;
+          if (platformError) throw StateError('secret upstream token');
+          return false;
+        };
+        await expectLater(
+          engine.open('/cache/valid.audio'),
+          throwsA(
+            isA<AudioFocusUnavailable>()
+                .having((e) => e.phase, 'phase', AudioFocusFailurePhase.request)
+                .having(
+                  (e) => e.reason,
+                  'reason',
+                  platformError
+                      ? AudioFocusFailureReason.platformError
+                      : AudioFocusFailureReason.denied,
+                )
+                .having(
+                  (e) => e.toString(),
+                  'human message',
+                  'Audio is unavailable. Try Play again.',
+                ),
+          ),
+        );
+      },
+    );
+
+    test(
+      'release diagnostics distinguish channel error=$platformError from rejection',
+      () async {
+        await engine.open('/cache/valid.audio');
+        session.onSetActive = (active) {
+          if (active) return true;
+          if (platformError) throw StateError('secret upstream token');
+          return false;
+        };
+        await expectLater(
+          engine.pause(),
+          throwsA(
+            isA<AudioFocusUnavailable>()
+                .having((e) => e.phase, 'phase', AudioFocusFailurePhase.abandon)
+                .having(
+                  (e) => e.reason,
+                  'reason',
+                  platformError
+                      ? AudioFocusFailureReason.platformError
+                      : AudioFocusFailureReason.rejected,
+                )
+                .having(
+                  (e) => e.toString(),
+                  'human message',
+                  'Audio is unavailable. Try Play again.',
+                ),
+          ),
+        );
+        session.onSetActive = null;
+      },
+    );
+  }
 
   for (final scheme in ['http', 'https']) {
     test(
@@ -1533,7 +1892,7 @@ class TestPlayer implements Player {
   final TestPlayerStream stream = TestPlayerStream();
   int plays = 0, opens = 0, stops = 0;
   String? opened;
-  FutureOr<void> Function()? onOpen, onPause, onStop;
+  FutureOr<void> Function()? onOpen, onPause, onStop, onPlay;
   bool disposed = false, failVolume = false;
   final volumeCalls = <double>[];
   @override
@@ -1560,6 +1919,7 @@ class TestPlayer implements Player {
   @override
   Future<void> play() async {
     plays++;
+    if (onPlay != null) await onPlay!();
     state = state.copyWith(playing: true);
     stream.playingEvents.add(true);
   }
@@ -1687,4 +2047,30 @@ class TestSession implements AudioSession {
 
   @override
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
+
+/// Counts every request rather than caching, so continuation must reuse the
+/// engine's verified grant instead of relying on Android adapter caching.
+class TransitionTestFocus implements AndroidAudioFocus {
+  final events = StreamController<AndroidFocusChange>.broadcast(sync: true);
+  int requests = 0, abandons = 0;
+  bool allowRequest = true;
+  @override
+  Stream<AndroidFocusChange> get changes => events.stream;
+  @override
+  Future<AudioFocusRequestResult> request() async {
+    requests++;
+    return allowRequest
+        ? AudioFocusRequestResult.granted
+        : AudioFocusRequestResult.failed;
+  }
+
+  @override
+  Future<bool> abandon() async {
+    abandons++;
+    return true;
+  }
+
+  @override
+  Future<void> dispose() => events.close();
 }

@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:audio_service/audio_service.dart';
 import 'package:audio_service_mpris/audio_service_mpris.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import 'package:smtc_windows/smtc_windows.dart' as win;
 
 import '../models/models.dart';
@@ -41,7 +42,27 @@ abstract interface class SystemMediaControls {
   Future<void> dispose();
 }
 
-class NativeSystemMediaControls implements SystemMediaControls {
+/// Optional recovery contract. Ordinary progress events never authorize a
+/// failed foreground-service promotion to be retried.
+abstract interface class RecoverableSystemMediaControls {
+  Stream<SystemMediaControlsStatus> get statusChanges;
+  Future<void> retryPlaybackState();
+}
+
+class SystemMediaControlsStatus {
+  const SystemMediaControlsStatus({
+    required this.available,
+    this.error,
+    this.errorCode,
+  });
+
+  final bool available;
+  final String? error;
+  final String? errorCode;
+}
+
+class NativeSystemMediaControls
+    implements SystemMediaControls, RecoverableSystemMediaControls {
   NativeSystemMediaControls({
     @visibleForTesting this._handler,
     @visibleForTesting this._windows,
@@ -91,7 +112,87 @@ class NativeSystemMediaControls implements SystemMediaControls {
   Track? _lastTrack;
   List<Track> _lastQueue = [];
   Future<void> _updates = Future.value();
-  Future<void> Function()? _pendingUpdate;
+  Future<void> Function()? _pendingUpdate, _pendingRecovery;
+  final _statusChanges = StreamController<SystemMediaControlsStatus>.broadcast(
+    sync: true,
+  );
+  SystemMediaControlsStatus? _status;
+  PlaybackState? _failedPlaybackState;
+  Future<void>? _recovery;
+
+  @override
+  Stream<SystemMediaControlsStatus> get statusChanges => _statusChanges.stream;
+
+  void _reportStatus({required bool available, Object? error}) {
+    if (_disposed || _statusChanges.isClosed) return;
+    // The upstream Android error code historically contained an exception's
+    // full message. Only expose stable, allowlisted categories to UI/logging.
+    final code = error == null
+        ? null
+        : error is PlatformException &&
+              error.code == 'foreground_service_start_denied'
+        ? 'foreground_service_start_denied'
+        : 'native_state_failed';
+    if (_status?.available == available && _status?.errorCode == code) return;
+    _status = SystemMediaControlsStatus(
+      available: available,
+      error: error == null ? null : 'Background playback is unavailable. Try Play again while Yun is open.',
+      errorCode: code,
+    );
+    _statusChanges.add(_status!);
+  }
+
+  @override
+  Future<void> retryPlaybackState() {
+    if (_disposed || _failedPlaybackState == null) return Future.value();
+    final pending = _recovery;
+    if (pending != null) return pending;
+    final completion = Completer<void>();
+    _recovery = completion.future;
+    _pendingRecovery = () async {
+      try {
+        final failed = _failedPlaybackState;
+        final handler = _handler;
+        if (!_disposed &&
+            failed != null &&
+            handler != null &&
+            identical(_handlerOwners[handler], this)) {
+          await _publishPlaybackState(handler, failed, retry: true);
+        }
+        completion.complete();
+      } catch (error, stack) {
+        completion.completeError(error, stack);
+      } finally {
+        _recovery = null;
+      }
+    };
+    _ensureDrain();
+    return completion.future;
+  }
+
+  Future<void> _publishPlaybackState(
+    BaseAudioHandler handler,
+    PlaybackState state, {
+    bool retry = false,
+  }) async {
+    // Pausing/stopping must still reach native cleanup. A successful cleanup
+    // does not prove a previously rejected foreground promotion has recovered.
+    if (_failedPlaybackState != null && state.playing && !retry) return;
+    try {
+      await AudioService.publishPlaybackState(handler, state);
+      if (retry) {
+        _failedPlaybackState = null;
+        _reportStatus(available: true);
+      }
+    } catch (error) {
+      if (state.playing || _failedPlaybackState == null) {
+        _failedPlaybackState = state;
+      }
+      _reportStatus(available: false, error: error);
+      rethrow;
+    }
+  }
+
   Completer<void>? _drain;
   Future<void>? _disposal;
   bool _disposed = false, _forceUpdate = false;
@@ -238,25 +339,33 @@ class NativeSystemMediaControls implements SystemMediaControls {
       shuffle: shuffle,
       repeat: repeat,
     );
-    if (_drain == null) {
-      final drain = _drain = Completer<void>();
-      _updates = drain.future.catchError((Object _) {});
-      scheduleMicrotask(() => _drainUpdates(drain));
-    }
+    _ensureDrain();
     return _drain!.future;
+  }
+
+  void _ensureDrain() {
+    if (_drain != null) return;
+    final drain = _drain = Completer<void>();
+    _updates = drain.future.catchError((Object _) {});
+    scheduleMicrotask(() => _drainUpdates(drain));
   }
 
   Future<void> _drainUpdates(Completer<void> drain) async {
     Object? failure;
     StackTrace? failureStack;
-    while (_pendingUpdate != null) {
-      final update = _pendingUpdate!;
-      _pendingUpdate = null;
+    while (_pendingUpdate != null || _pendingRecovery != null) {
+      final update = _pendingRecovery ?? _pendingUpdate!;
+      if (_pendingRecovery != null) {
+        _pendingRecovery = null;
+      } else {
+        _pendingUpdate = null;
+      }
       try {
         await update();
       } catch (error, stack) {
         failure ??= error;
         failureStack ??= stack;
+        _reportStatus(available: false, error: error);
         // A failed call may already have changed some native properties.
         // Replay all fields of the next snapshot instead of trusting old diffs.
         _forceUpdate = true;
@@ -305,7 +414,8 @@ class NativeSystemMediaControls implements SystemMediaControls {
       if (_forceUpdate || !listEquals(_lastQueue, queue)) {
         handler.queue.add(queue.map(item).toList());
       }
-      handler.playbackState.add(
+      await _publishPlaybackState(
+        handler,
         PlaybackState(
           controls: [
             MediaControl.skipToPrevious,
@@ -395,6 +505,7 @@ class NativeSystemMediaControls implements SystemMediaControls {
     _lastPosition = position;
     _lastShuffle = shuffle;
     _lastRepeat = repeat;
+    if (_failedPlaybackState == null) _reportStatus(available: true);
   }
 
   @override
@@ -418,13 +529,23 @@ class NativeSystemMediaControls implements SystemMediaControls {
             identical(_handlerOwners[handler], this))) {
       _handlerOwners[handler] = null;
       if (handler is _YunAudioHandler) handler.commands = null;
-      handler.playbackState.add(
-        PlaybackState(processingState: AudioProcessingState.idle),
-      );
-      handler.mediaItem.add(null);
-      handler.queue.add([]);
+      // Finish native cleanup before the owner is considered disposed. Keep
+      // teardown best-effort; playback failures were already reported above.
+      try {
+        await AudioService.publishPlaybackState(
+          handler,
+          PlaybackState(processingState: AudioProcessingState.idle),
+        );
+      } catch (_) {}
+      // A successor may take ownership while native stop acknowledgement is
+      // pending. Never clear the new controller's metadata after that await.
+      if (_handlerOwners[handler] == null) {
+        handler.mediaItem.add(null);
+        handler.queue.add([]);
+      }
     }
     await _windows?.dispose();
+    await _statusChanges.close();
   }
 }
 

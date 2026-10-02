@@ -67,8 +67,9 @@ public final class AudioFocusCoordinatorTest {
     private static final class Fixture {
         final FakePlatform platform = new FakePlatform();
         final List<String> events = new ArrayList<>();
+        final List<AudioFocusCoordinator.Diagnostic> diagnostics = new ArrayList<>();
         final AudioFocusCoordinator focus = new AudioFocusCoordinator(
-                platform, (id, change) -> events.add(id + ":" + change));
+                platform, (id, change) -> events.add(id + ":" + change), diagnostics::add);
     }
 
     private static void equal(Object expected, Object actual) {
@@ -332,6 +333,46 @@ public final class AudioFocusCoordinatorTest {
             equal(0, f.events.size());
             equal(AudioFocusCoordinator.Result.FAILED, f.focus.request(2));
             equal(1, f.platform.registrations.size());
+        });
+        test("bridge prepare exception is distinct from an OS denial", () -> {
+            Fixture failed = new Fixture();
+            failed.platform.failPrepare = true;
+            equal(AudioFocusCoordinator.Result.FAILED, failed.focus.request(41));
+            equal("category=bridge_prepare requestId=41 result=error exceptionClass=java.lang.IllegalStateException",
+                    failed.diagnostics.get(0).logLine());
+            Fixture denied = new Fixture();
+            denied.platform.next = AudioFocusCoordinator.Result.FAILED;
+            equal(AudioFocusCoordinator.Result.FAILED, denied.focus.request(42));
+            equal("category=request requestId=42 result=failed", denied.diagnostics.get(0).logLine());
+        });
+        test("cleanup reports old identity and blocks the new request explicitly", () -> {
+            Fixture f = new Fixture();
+            f.focus.request(41);
+            f.platform.failAbandon = true;
+            equal(AudioFocusCoordinator.Result.FAILED, f.focus.request(42));
+            equal("category=abandon requestId=41 result=error exceptionClass=java.lang.IllegalStateException",
+                    f.diagnostics.get(1).logLine());
+            equal("category=request requestId=42 result=cleanup_blocked", f.diagnostics.get(2).logLine());
+            equal(1, f.platform.registrations.size());
+        });
+        test("diagnostics contain only category identity result and exception class", () -> {
+            RuntimeException error = new SecurityException("https://private/media?token=SECRET account=user");
+            error.addSuppressed(new IllegalStateException("SECRET"));
+            AudioFocusCoordinator.Diagnostic diagnostic = new AudioFocusCoordinator.Diagnostic(7,
+                    AudioFocusCoordinator.Category.NATIVE_REQUEST, AudioFocusCoordinator.Outcome.ERROR, error);
+            equal(Arrays.asList("requestId", "category", "result", "exceptionClass"),
+                    new ArrayList<>(diagnostic.toMap().keySet()));
+            equal("java.lang.SecurityException", diagnostic.toMap().get("exceptionClass"));
+            equal(false, diagnostic.toMap().toString().contains("SECRET"));
+            equal(false, diagnostic.logLine().contains("private"));
+        });
+        test("diagnostic failures cannot change focus ownership or results", () -> {
+            FakePlatform platform = new FakePlatform();
+            AudioFocusCoordinator owner = new AudioFocusCoordinator(platform, (id, change) -> {},
+                    diagnostic -> { throw new IllegalStateException("diagnostic consumer failed"); });
+            equal(AudioFocusCoordinator.Result.GRANTED, owner.request(1));
+            equal(true, owner.abandon());
+            equal(1, platform.latest().abandons);
         });
         System.out.println(passed + " audio focus JVM tests passed");
     }

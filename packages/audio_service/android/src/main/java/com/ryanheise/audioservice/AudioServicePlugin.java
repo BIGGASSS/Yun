@@ -922,22 +922,31 @@ public class AudioServicePlugin implements FlutterPlugin, ActivityAware {
                         for (int i = 0; i < compactActionIndices.length; i++)
                             compactActionIndices[i] = (Integer)compactActionIndexList.get(i);
                     }
-                    AudioService.instance.setState(
-                            actions,
-                            actionBits,
-                            compactActionIndices,
-                            processingState,
-                            playing,
-                            position,
-                            bufferedPosition,
-                            speed,
-                            updateTimeSinceBoot,
-                            errorCode,
-                            errorMessage,
-                            repeatMode,
-                            shuffleMode,
-                            captioningEnabled,
-                            queueIndex);
+                    try {
+                        AudioService.instance.setState(
+                                actions,
+                                actionBits,
+                                compactActionIndices,
+                                processingState,
+                                playing,
+                                position,
+                                bufferedPosition,
+                                speed,
+                                updateTimeSinceBoot,
+                                errorCode,
+                                errorMessage,
+                                repeatMode,
+                                shuffleMode,
+                                captioningEnabled,
+                                queueIndex);
+                    } catch (RuntimeException error) {
+                        // Stable public categories; do not use exception messages
+                        // as error codes or expose native paths/other raw details.
+                        String code = error.getClass().getSimpleName().equals("ForegroundServiceStartNotAllowedException")
+                                ? "foreground_service_start_denied" : "native_state_failed";
+                        result.error(code, "Native playback state update failed.", null);
+                        break;
+                    }
                     result.success(null);
                     break;
                 }
