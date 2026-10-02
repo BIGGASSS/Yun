@@ -198,6 +198,16 @@ eligible foreground service; delayed focus support does not bypass that rule.
 
 ### Background media initialization recovery
 
+AppController supplies account-scoped artwork to the native audio_service
+adapter through `SystemMediaArtwork`. Only the current track's latest library
+revision is retained and loaded; playback/foreground state never waits for cover
+I/O. Media items use local file URIs, including offline cache hits, without remote
+URLs or authentication headers. Cache/library/account notifications refresh or
+clear the cover without changing the playback state. Misses and errors keep the
+placeholder and do not refetch on progress ticks. Track changes, logout and
+disposal release demand and invalidate pending results. Android downsamples
+artwork with a 512-pixel target; system UI styling is controlled by the OS.
+
 Engine initialization and system-media initialization have independent success
 states. A failed service attempt remains visible as `systemMediaControlsError`,
 including in compact player strips after foreground audio starts; it never

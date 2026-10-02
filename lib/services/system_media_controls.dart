@@ -26,6 +26,16 @@ class MediaCommands {
   final void Function(int) repeat;
 }
 
+/// Account-scoped artwork for the current system media item. Implementations
+/// resolve the latest library revision and return only resident local files.
+abstract interface class SystemMediaArtwork {
+  Listenable get mediaArtworkChanges;
+  Track? mediaArtworkTrack(Track track);
+  String? artworkPath(Track track);
+  Future<String?> getArtwork(Track track);
+  VoidCallback? retainArtwork(Track track);
+}
+
 abstract interface class SystemMediaControls {
   Future<void> initialize(MediaCommands commands);
   Future<void> update({
@@ -64,6 +74,7 @@ class SystemMediaControlsStatus {
 class NativeSystemMediaControls
     implements SystemMediaControls, RecoverableSystemMediaControls {
   NativeSystemMediaControls({
+    this.artwork,
     @visibleForTesting this._handler,
     @visibleForTesting this._windows,
     @visibleForTesting this._initializeHandler,
@@ -71,8 +82,10 @@ class NativeSystemMediaControls
   }) : _initialized = _handler != null || _windows != null {
     final handler = _handler;
     if (handler != null) _handlerOwners[handler] = this;
+    artwork?.mediaArtworkChanges.addListener(_refreshArtwork);
   }
 
+  final SystemMediaArtwork? artwork;
   static final _handlerOwners = Expando<NativeSystemMediaControls>();
 
   final Future<BaseAudioHandler> Function()? _initializeHandler;
@@ -102,6 +115,8 @@ class NativeSystemMediaControls
         // Keep paused sessions eligible for headset/lock-screen resume on
         // Android 12+. Stop still releases foreground service/notification.
         androidStopForegroundOnPause: false,
+        artDownscaleWidth: 512,
+        artDownscaleHeight: 512,
       ),
     );
   }
@@ -110,6 +125,9 @@ class NativeSystemMediaControls
   win.SMTCWindows? _windows;
   final List<StreamSubscription<dynamic>> _subscriptions = [];
   Track? _lastTrack;
+  Track? _selectedTrack, _artworkTrack;
+  VoidCallback? _releaseArtwork;
+  int _artworkGeneration = 0;
   List<Track> _lastQueue = [];
   Future<void> _updates = Future.value();
   Future<void> Function()? _pendingUpdate, _pendingRecovery;
@@ -325,6 +343,7 @@ class NativeSystemMediaControls
     required int repeat,
   }) {
     if (_disposed || !_initialized) return Future.value();
+    _selectArtwork(track);
     // At most one bridge call and one latest snapshot are retained. All callers
     // in a burst wait for the same drain, including its final/latest state.
     // PlaybackController supplies an immutable, stable queue snapshot.
@@ -341,6 +360,63 @@ class NativeSystemMediaControls
     );
     _ensureDrain();
     return _drain!.future;
+  }
+
+  void _refreshArtwork() => _selectArtwork(_selectedTrack);
+
+  void _selectArtwork(Track? track) {
+    final handler = _handler;
+    if (_disposed ||
+        handler == null ||
+        !identical(_handlerOwners[handler], this)) {
+      return;
+    }
+    _selectedTrack = track;
+    final resolved = track == null ? null : artwork?.mediaArtworkTrack(track);
+    final changed =
+        resolved?.id != _artworkTrack?.id ||
+        resolved?.revision != _artworkTrack?.revision ||
+        resolved?.hasArtwork != _artworkTrack?.hasArtwork;
+    if (changed) {
+      final generation = ++_artworkGeneration;
+      _releaseArtwork?.call();
+      _releaseArtwork = null;
+      _artworkTrack = resolved;
+      if (resolved != null && resolved.hasArtwork) {
+        _releaseArtwork = artwork?.retainArtwork(resolved);
+        // Loading a cover must never delay playback state/foreground promotion.
+        unawaited(_loadArtwork(resolved, generation));
+      }
+    }
+    _publishArtwork();
+  }
+
+  Future<void> _loadArtwork(Track track, int generation) async {
+    try {
+      await artwork?.getArtwork(track);
+    } catch (_) {
+      // Artwork is optional; a miss must not disable system transport controls.
+    }
+    if (!_disposed && generation == _artworkGeneration) _publishArtwork();
+  }
+
+  Uri? get _artworkUri {
+    final track = _artworkTrack;
+    final path = track == null ? null : artwork?.artworkPath(track);
+    return path == null ? null : Uri.file(path);
+  }
+
+  void _publishArtwork() {
+    final handler = _handler;
+    if (_disposed ||
+        handler == null ||
+        !identical(_handlerOwners[handler], this)) {
+      return;
+    }
+    final item = handler.mediaItem.value;
+    if (item == null || item.id != _selectedTrack?.id) return;
+    final uri = _artworkUri;
+    if (item.artUri != uri) handler.mediaItem.add(item.copyWith(artUri: uri));
   }
 
   void _ensureDrain() {
@@ -406,7 +482,13 @@ class NativeSystemMediaControls
     );
     if (handler != null) {
       if (metadataChanged) {
-        handler.mediaItem.add(track == null ? null : item(track));
+        handler.mediaItem.add(
+          track == null
+              ? null
+              : item(track).copyWith(
+                  artUri: track.id == _selectedTrack?.id ? _artworkUri : null,
+                ),
+        );
       }
       // Queue identity is independent of the current song: replacing [A, B]
       // with [A, C], or visiting duplicate A entries, must not leave stale data.
@@ -514,6 +596,10 @@ class NativeSystemMediaControls
   Future<void> _dispose() async {
     // Refuse new snapshots immediately, but drain the accepted latest state.
     _disposed = true;
+    artwork?.mediaArtworkChanges.removeListener(_refreshArtwork);
+    _artworkGeneration++;
+    _releaseArtwork?.call();
+    _releaseArtwork = null;
     try {
       await _initialization;
     } catch (_) {}
