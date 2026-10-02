@@ -293,6 +293,38 @@ void main() {
     },
   );
 
+  test(
+    'focus failure never changes downloaded bytes or starts a network repair',
+    () async {
+      await seed();
+      await openApp();
+      await app.play(track);
+      engine.emit(
+        const EngineState(
+          error: 'Audio is unavailable. Try Play again.',
+          audioFocusFailure: true,
+          position: Duration(seconds: 12),
+        ),
+      );
+      await app.playback.flushSettings();
+      expect(app.playback.audioFocusError, isNotNull);
+      expect(app.playback.localPlaybackError, isNull);
+      expect(app.downloadProgress(track).status, DownloadStatus.downloaded);
+      expect(app.downloadProgress(track).repairRequired, isFalse);
+      expect(app.localPath(track.id), audio.path);
+      expect(await audio.readAsBytes(), bytes);
+      expect(requests, 0);
+      await app.playback.play();
+      expect(engine.opens, 2);
+      expect(engine.opened, audio.path);
+      expect(app.playback.position, const Duration(seconds: 12));
+      expect(app.playback.audioFocusError, isNull);
+      expect(app.playback.isPlaying, isTrue);
+      expect(await audio.readAsBytes(), bytes);
+      expect(requests, 0);
+    },
+  );
+
   test('repair completion cannot interrupt a newer online track', () async {
     await seed(file: false);
     await openApp();

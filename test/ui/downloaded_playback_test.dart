@@ -18,6 +18,68 @@ void main() {
   Finder repairButton() => find.widgetWithText(OutlinedButton, 'Redownload');
 
   for (final layout in [
+    (TargetPlatform.android, const Size(390, 844), 1.0),
+    (TargetPlatform.android, const Size(320, 800), 2.0),
+    (TargetPlatform.linux, const Size(1280, 800), 1.0),
+  ]) {
+    playerTest(
+      'focus failure offers Play without Redownload in ${layout.$1.name} '
+      '${layout.$2.width} player at ${layout.$3}x text',
+      platform: layout.$1,
+      size: layout.$2,
+      textScale: layout.$3,
+      (tester, app, engine) async {
+        const message = 'Audio is unavailable. Try Play again.';
+        engine.emit(
+          const EngineState(
+            error: message,
+            audioFocusFailure: true,
+            position: Duration(seconds: 12),
+          ),
+        );
+        await tester.pumpAndSettle();
+        expect(find.text(message), findsOneWidget);
+        expect(repairButton(), findsNothing);
+        expect(find.textContaining('downloaded audio'), findsNothing);
+        expect(app.playback.localPlaybackError, isNull);
+        expect(app.redownloadedTrackIds, isEmpty);
+        await tester.tap(find.byTooltip('Play'));
+        await tester.pumpAndSettle();
+        expect(find.text(message), findsNothing);
+        expect(repairButton(), findsNothing);
+        expect(app.playback.position, const Duration(seconds: 12));
+        expect(app.playback.isPlaying, isTrue);
+        expect(engine.opens, 2);
+        expect(tester.takeException(), isNull);
+      },
+    );
+  }
+
+  playerTest(
+    'now playing shows focus failure without a file repair action',
+    platform: TargetPlatform.android,
+    size: const Size(320, 800),
+    textScale: 2,
+    (tester, app, engine) async {
+      const message = 'Audio is unavailable. Try Play again.';
+      engine.emit(const EngineState(error: message, audioFocusFailure: true));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Test track'));
+      await tester.pumpAndSettle();
+      final fullNotice = find.byWidgetPredicate(
+        (widget) => widget is PlaybackErrorNotice && !widget.compact,
+      );
+      expect(
+        find.descendant(of: fullNotice, matching: find.text(message)),
+        findsOneWidget,
+      );
+      expect(repairButton(), findsNothing);
+      expect(app.redownloadedTrackIds, isEmpty);
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  for (final layout in [
     (TargetPlatform.linux, const Size(1280, 800), 1.0),
     (TargetPlatform.android, const Size(390, 844), 1.0),
     (TargetPlatform.android, const Size(1200, 800), 1.0),

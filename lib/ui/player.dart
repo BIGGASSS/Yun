@@ -269,7 +269,7 @@ class DesktopPlayerBar extends StatelessWidget {
 }
 
 /// The first local playback failure remains visible without opening a sheet.
-/// Compact strips show only downloaded failures and cap diagnostic text; the
+/// Compact strips show downloaded and audio-focus failures and cap text; the
 /// tooltip and scrollable now-playing sheet retain the full message. The sheet
 /// also keeps other playback errors. Actions wrap below the message at narrow
 /// widths or larger accessibility text sizes.
@@ -290,9 +290,10 @@ class PlaybackErrorNotice extends StatelessWidget {
       app.playback.currentTrack,
       app.playback.localPlaybackError,
       app.playback.error,
+      app.playback.audioFocusError,
     ),
     builder: (context, state, _) {
-      final message = state.$2 ?? (compact ? null : state.$3);
+      final message = state.$2 ?? state.$4 ?? (compact ? null : state.$3);
       if (message == null) return const SizedBox.shrink();
       final track = state.$1;
       // Keep the decoder's cause visible at narrow widths and large text,

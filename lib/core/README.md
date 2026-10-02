@@ -150,3 +150,13 @@ and offers explicit Play retry/Redownload. Repair does not autoplay and replaces
 only after successful download/checksum verification. No local playback error
 silently resolves a network source. Remote stream failures retain one bounded
 local-first recovery attempt, preserving position and paused intent.
+
+Audio-focus denial and interruption before native open are session failures,
+not evidence of a damaged download. They expose `audioFocusError` instead of
+`localPlaybackError`, show a Play retry message without Redownload, and never
+trigger automatic streaming/recovery. Explicit Play reopens the same local-first
+source and preserves the paused position. Native interruption pauses retain the
+OS focus registration while waiting for gain; explicit pause/stop release it.
+Old pause/release completion cannot abandon a newer playback command's focus.
+Deterministic tests cover these ordering rules with fake native/session APIs;
+Android hardware focus, routing and background policy still require device QA.
