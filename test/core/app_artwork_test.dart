@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
+import 'package:audio_service/audio_service.dart';
 import 'package:crypto/crypto.dart';
 import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
@@ -10,6 +11,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:yun/core/app_controller.dart';
 import 'package:yun/services/api_client.dart';
 import 'package:yun/services/artwork_cache.dart';
+import 'package:yun/services/system_media_controls.dart';
 import 'package:yun/ui/track_widgets.dart';
 
 import 'fakes.dart';
@@ -151,6 +153,106 @@ void main() {
     app.dispose();
     await root.delete(recursive: true);
   });
+
+  Future<void> publishArtwork(NativeSystemMediaControls controls) =>
+      controls.update(
+        track: track,
+        queue: [track],
+        index: 0,
+        playing: true,
+        buffering: false,
+        position: Duration.zero,
+        shuffle: false,
+        repeat: 0,
+      );
+
+  test('system media cover loads without a mounted artwork widget', () async {
+    final handler = BaseAudioHandler();
+    final controls = NativeSystemMediaControls(handler: handler, artwork: app);
+    try {
+      await publishArtwork(controls);
+      final path = await app.getArtwork(track);
+      expect(path, isNotNull);
+      expect(handler.mediaItem.value!.artUri, Uri.file(path!));
+      expect(handler.mediaItem.value!.artHeaders, isNull);
+      expect(artworkRequests, 1);
+      // Library changes invalidate the cover even while the queue is unchanged.
+      libraryTracks = [];
+      await app.refresh();
+      expect(handler.mediaItem.value!.artUri, isNull);
+      expect(artworkRequests, 1);
+    } finally {
+      await controls.dispose();
+    }
+  });
+
+  test(
+    'system media restores cached artwork offline and clears it on logout',
+    () async {
+      final path = await app.getArtwork(track);
+      expect(path, isNotNull);
+      await app.shutdown();
+      app.dispose();
+      app = create();
+      await app.initialize();
+      app.isOffline = true;
+      api.dio.httpClientAdapter = FakeAdapter((options, _) {
+        if (options.path.endsWith('/auth/logout')) return jsonResponse({});
+        throw StateError('Offline media must not fetch ${options.path}');
+      });
+      final handler = BaseAudioHandler();
+      final controls = NativeSystemMediaControls(
+        handler: handler,
+        artwork: app,
+      );
+      try {
+        await publishArtwork(controls);
+        await app.getArtwork(track);
+        expect(handler.mediaItem.value!.artUri, Uri.file(path!));
+        expect(artworkRequests, 1);
+        await app.logout();
+        expect(handler.mediaItem.value!.artUri, isNull);
+        expect(app.mediaArtworkTrack(track), isNull);
+      } finally {
+        await controls.dispose();
+      }
+    },
+  );
+
+  test(
+    'current system cover stays resident until controls release it',
+    () async {
+      await reopenWithBudget(image.length);
+      final other = sibling('other');
+      libraryTracks = [track, other];
+      await app.refresh();
+      final handler = BaseAudioHandler();
+      final controls = NativeSystemMediaControls(
+        handler: handler,
+        artwork: app,
+      );
+      try {
+        await publishArtwork(controls);
+        final path = await app.getArtwork(track);
+        expect(path, isNotNull);
+        expect(await app.getArtwork(other), isNull);
+        expect(app.artworkPath(track), path);
+        expect(handler.mediaItem.value!.artUri, Uri.file(path!));
+        expect(artworkRequests, 1);
+        await controls.dispose();
+        final release = app.retainArtwork(other);
+        try {
+          expect(await app.getArtwork(other), isNotNull);
+          expect(app.artworkPath(track), isNull);
+          expect(artworkRequests, 2);
+        } finally {
+          release?.call();
+        }
+      } finally {
+        await controls.dispose();
+      }
+    },
+  );
 
   test(
     'pinning proactively caches art, then restart uses it with no network',

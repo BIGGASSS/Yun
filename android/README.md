@@ -25,6 +25,16 @@ Dart `AudioServiceConfig` must choose a deliberate pause/resume policy (see the
 installed audio_service README's `androidStopForegroundOnPause` guidance); native
 manifest configuration alone cannot guarantee background resume.
 
+The current track's cover is published to the media session and notification
+from Yun's account-scoped artwork cache as a local file URI. Cached covers work
+offline; online covers load asynchronously without delaying playback or audio
+focus. Only the current cover is retained, including while paused or waiting for
+audio. Track/revision changes, deletion, logout and disposal release that demand
+and discard late results. Missing or failed artwork leaves the system placeholder
+and transport controls available. Native artwork decoding uses a 512-pixel target
+to bound bitmap memory. The OS chooses the notification/lock-screen layout and
+whether to use the artwork for the card background.
+
 Audio focus is owned by the local `yun_android_audio_focus` Flutter plugin. Its
 generated registration also covers the audio_service cold background engine.
 Android 8+ can return a real delayed grant; Yun displays **Waiting for audio** and

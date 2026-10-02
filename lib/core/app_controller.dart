@@ -31,7 +31,7 @@ class _AccountRefreshCancelled implements Exception {}
 
 /// UI-facing, account-scoped application state. All writes except listening
 /// segments, upload jobs and offline pins are online-only. See README.md.
-class AppController extends ChangeNotifier {
+class AppController extends ChangeNotifier implements SystemMediaArtwork {
   AppController({
     ApiClient? api,
     Future<Directory> Function()? storageDirectory,
@@ -51,7 +51,11 @@ class AppController extends ChangeNotifier {
     playback = PlaybackController(
       resolveSource: _resolveSource,
       engine: playbackEngine,
-      controls: systemControls,
+      controls:
+          systemControls ??
+          (enableSystemControls
+              ? NativeSystemMediaControls(artwork: this)
+              : null),
       enableSystemControls: enableSystemControls,
       initialSettings: playbackSettings,
       saveSettings: savePlaybackSettings,
@@ -92,6 +96,11 @@ class AppController extends ChangeNotifier {
   // Verification ticks must not rebuild the full download inventory.
   final ChangeNotifier verificationChanges = ChangeNotifier();
   final ChangeNotifier artworkChanges = ChangeNotifier();
+  @override
+  late final Listenable mediaArtworkChanges = Listenable.merge([
+    this,
+    artworkChanges,
+  ]);
   int pendingEventCount = 0;
   ServerStats? stats;
   Timer? _retryTimer, _downloadRetryTimer;
@@ -771,6 +780,11 @@ class AppController extends ChangeNotifier {
     return _files[trackId];
   }
 
+  @override
+  Track? mediaArtworkTrack(Track track) =>
+      isAuthenticated && !_locking ? trackById(track.id) : null;
+
+  @override
   String? artworkPath(Track track) {
     if (!isAuthenticated || _locking) return null;
     return _artwork?.path(track);
@@ -778,11 +792,13 @@ class AppController extends ChangeNotifier {
 
   /// Keep artwork resident for a mounted foreground consumer. Release on
   /// account/track/revision change or disposal; callbacks capture their cache.
+  @override
   VoidCallback? retainArtwork(Track track) {
     if (!isAuthenticated || _locking) return null;
     return _artwork?.retain(track);
   }
 
+  @override
   Future<String?> getArtwork(Track track) => _getArtwork(track);
 
   /// Deliberate user retry, independent of polling and cache notifications.
