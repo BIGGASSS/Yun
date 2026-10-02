@@ -101,9 +101,13 @@ class PlaybackController extends ChangeNotifier {
   Duration position = Duration.zero, duration = Duration.zero;
   String? error;
   String? _playbackError;
+  bool _audioFocusFailure = false;
 
   /// The first local failure for the selected track, retained until retry/stop.
-  String? get localPlaybackError => _sourceLocal ? _playbackError : null;
+  /// Audio-focus failures describe the session, not the downloaded bytes.
+  String? get localPlaybackError =>
+      _sourceLocal && !_audioFocusFailure ? _playbackError : null;
+  String? get audioFocusError => _audioFocusFailure ? _playbackError : null;
   _Recording? _recording;
   ListeningTracker? get _tracker => _recording?.tracker;
   final _recordingBuffers = <Object, _RecordingBuffer>{};
@@ -278,8 +282,7 @@ class PlaybackController extends ChangeNotifier {
     if (_disposed || !_acceptSourceState) return;
     _lastState = state;
     if (state.error != null) {
-      _playbackError ??= _describePlaybackError(state.error!);
-      error = _playbackError;
+      _recordPlaybackFailure(state.error!, audioFocus: state.audioFocusFailure);
     }
     // Error/end states may already report playing=false. Preserve the last
     // intent through recovery, while honoring native interruptions and pauses.
@@ -315,8 +318,8 @@ class PlaybackController extends ChangeNotifier {
           _safe(
             () => _enqueue(() async {
               if (generation != _generation) return;
-              if (_sourceLocal) {
-                await _haltFailedLocalSource();
+              if (_sourceLocal || _audioFocusFailure) {
+                await _haltFailedSource();
               } else {
                 await _recoverPlayback();
               }
@@ -535,14 +538,28 @@ class PlaybackController extends ChangeNotifier {
     }
   }
 
-  String _describePlaybackError(Object failure) {
+  String _describePlaybackError(Object failure, {bool audioFocus = false}) {
+    if (audioFocus || failure is AudioFocusUnavailable) {
+      return failure.toString();
+    }
     if (failure is LocalAudioUnavailable) return failure.message;
     return _sourceLocal
         ? 'Could not play the downloaded audio: $failure'
         : failure.toString();
   }
 
-  Future<void> _openCurrent() async {
+  void _recordPlaybackFailure(Object failure, {bool audioFocus = false}) {
+    if (_playbackError == null) {
+      _audioFocusFailure = audioFocus || failure is AudioFocusUnavailable;
+      _playbackError = _describePlaybackError(
+        failure,
+        audioFocus: _audioFocusFailure,
+      );
+    }
+    error = _playbackError;
+  }
+
+  Future<void> _openCurrent({Duration start = Duration.zero}) async {
     final track = currentTrack;
     if (track == null) return;
     _opening = true;
@@ -554,21 +571,24 @@ class PlaybackController extends ChangeNotifier {
     _wantsPlayback = true;
     _tracker?.start(track.id);
     isPlaying = isBuffering = false;
-    position = Duration.zero;
+    position = start;
     duration = track.duration;
     _playbackError = error = null;
+    _audioFocusFailure = false;
     try {
       final source = await resolveSource(track, true);
       _sourceLocal = source.local;
       _acceptSourceState = true;
-      await _engine.open(source.uri, headers: source.headers);
-      if (_playbackError != null) throw StateError(_playbackError!);
+      await _engine.open(source.uri, headers: source.headers, start: start);
+      if (_playbackError != null) {
+        if (_audioFocusFailure) throw AudioFocusUnavailable(_playbackError!);
+        throw StateError(_playbackError!);
+      }
     } catch (e) {
       if (e is LocalAudioUnavailable) _sourceLocal = true;
       _tracker?.setActive(false);
-      _playbackError ??= _describePlaybackError(e);
-      error = _playbackError;
-      if (_sourceLocal) await _haltFailedLocalSource();
+      _recordPlaybackFailure(e);
+      if (_sourceLocal || _audioFocusFailure) await _haltFailedSource();
       _acceptSourceState = false;
       isPlaying = isBuffering = false;
       rethrow;
@@ -584,7 +604,7 @@ class PlaybackController extends ChangeNotifier {
     }
   }
 
-  Future<void> _haltFailedLocalSource({bool throwOnFailure = false}) async {
+  Future<void> _haltFailedSource({bool throwOnFailure = false}) async {
     // Keep queue, position and diagnosis available for explicit retry/repair,
     // but retire native events before stopping a failed decoder.
     _acceptSourceState = false;
@@ -610,9 +630,12 @@ class PlaybackController extends ChangeNotifier {
     if (!_sourceLocal || currentTrack?.id != trackId) return;
     _generation++;
     _wantsPlayback = false;
-    _playbackError ??= 'Downloaded audio is being replaced. Try Play after redownload finishes.';
+    if (_playbackError == null || _audioFocusFailure) {
+      _audioFocusFailure = false;
+      _playbackError = 'Downloaded audio is being replaced. Try Play after redownload finishes.';
+    }
     error = _playbackError;
-    await _haltFailedLocalSource(throwOnFailure: true);
+    await _haltFailedSource(throwOnFailure: true);
   });
 
   Future<void> _recoverPlayback() async {
@@ -634,6 +657,7 @@ class PlaybackController extends ChangeNotifier {
       final source = await resolveSource(track, true);
       _sourceLocal = source.local;
       _playbackError = error = null;
+      _audioFocusFailure = false;
       _acceptSourceState = true;
       await _engine.open(
         source.uri,
@@ -641,19 +665,25 @@ class PlaybackController extends ChangeNotifier {
         play: resumePlaying,
         start: resumeAt,
       );
-      if (_playbackError != null) throw StateError(_playbackError!);
+      if (_playbackError != null) {
+        if (_audioFocusFailure) throw AudioFocusUnavailable(_playbackError!);
+        throw StateError(_playbackError!);
+      }
     } catch (e) {
       if (e is LocalAudioUnavailable) {
         _sourceLocal = true;
         _playbackError = e.message;
+        _audioFocusFailure = false;
       }
-      _playbackError ??= _describePlaybackError(e);
+      _recordPlaybackFailure(e);
       // If even recovery fails, retain the triggering cause rather than just
       // the secondary relay/auth error. A newly selected local failure gets its
       // own actionable diagnosis.
-      if (!_sourceLocal && firstError != null) _playbackError = firstError;
+      if (!_sourceLocal && !_audioFocusFailure && firstError != null) {
+        _playbackError = firstError;
+      }
       error = _playbackError;
-      if (_sourceLocal) await _haltFailedLocalSource();
+      if (_sourceLocal || _audioFocusFailure) await _haltFailedSource();
       _acceptSourceState = false;
       isPlaying = isBuffering = false;
       rethrow;
@@ -674,12 +704,20 @@ class PlaybackController extends ChangeNotifier {
     await _initialize();
     if (_playbackError != null) {
       // A selected track can have no loaded media after resolution/open fails.
-      // Retry local-first resolution, not play on an empty mpv.
+      // Retry local-first resolution, not play on an empty mpv. A focus denial
+      // doesn't invalidate the audio or the position where it was paused.
+      final start = _audioFocusFailure ? position : Duration.zero;
       await _haltForTransition();
-      await _openCurrent();
+      await _openCurrent(start: start);
     } else {
       _wantsPlayback = true;
-      await _engine.play();
+      try {
+        await _engine.play();
+      } on AudioFocusUnavailable catch (e) {
+        _recordPlaybackFailure(e);
+        await _haltFailedSource();
+        rethrow;
+      }
     }
   });
   Future<void> pause() => _enqueue(() async {
@@ -899,6 +937,7 @@ class PlaybackController extends ChangeNotifier {
       _lastState = const EngineState();
       if (error == _playbackError) error = null;
       _playbackError = null;
+      _audioFocusFailure = false;
       _sourceLocal = false;
       isPlaying = false;
       isBuffering = false;

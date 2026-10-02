@@ -774,6 +774,209 @@ void main() {
     expect(player.isPlaying, isTrue);
   });
 
+  for (final local in [true, false]) {
+    test(
+      'focus-denied ${local ? 'download' : 'stream'} waits for explicit retry',
+      () async {
+        final resolutions = <bool>[];
+        final focused = FocusHookEngine()
+          ..openFailure = const AudioFocusUnavailable();
+        await usePlayer(
+          playbackEngine: focused,
+          resolveSource: (_, localFirst) async {
+            resolutions.add(localFirst);
+            return AudioSource(
+              local ? '/cache/a' : 'https://yun.test/audio',
+              local: local,
+            );
+          },
+        );
+        await expectLater(
+          player.playQueue(tracks),
+          throwsA(isA<AudioFocusUnavailable>()),
+        );
+        expect(focused.opens, 0);
+        expect(player.localPlaybackError, isNull);
+        expect(player.audioFocusError, isNotNull);
+        expect(player.error, player.audioFocusError);
+        expect(player.error, isNot(contains('Bad state')));
+        expect(player.error, isNot(contains('downloaded audio')));
+        expect(player.isPlaying, isFalse);
+        expect(resolutions, [true]);
+        await player.flushSettings();
+        expect(resolutions, [
+          true,
+        ], reason: 'Focus denial must not trigger an automatic retry');
+        focused.openFailure = null;
+        await player.play();
+        expect(resolutions, [true, true]);
+        expect(focused.opens, 1);
+        expect(player.error, isNull);
+        expect(player.audioFocusError, isNull);
+        expect(player.isPlaying, isTrue);
+      },
+    );
+  }
+
+  test(
+    'focus-denied resume and repeated retries preserve local position',
+    () async {
+      final focused = FocusHookEngine();
+      final resolutions = <bool>[];
+      await usePlayer(
+        playbackEngine: focused,
+        resolveSource: (_, localFirst) async {
+          resolutions.add(localFirst);
+          return const AudioSource('/cache/a', local: true);
+        },
+      );
+      await player.playQueue(tracks);
+      focused.emit(
+        const EngineState(playing: true, position: Duration(seconds: 12)),
+      );
+      await player.pause();
+      focused.playFailure = const AudioFocusUnavailable();
+      await expectLater(player.play(), throwsA(isA<AudioFocusUnavailable>()));
+      expect(player.position, const Duration(seconds: 12));
+      expect(player.audioFocusError, isNotNull);
+      expect(player.localPlaybackError, isNull);
+      expect(player.isPlaying, isFalse);
+      focused.openFailure = const AudioFocusUnavailable();
+      await expectLater(player.play(), throwsA(isA<AudioFocusUnavailable>()));
+      expect(player.position, const Duration(seconds: 12));
+      focused.openFailure = focused.playFailure = null;
+      await player.play();
+      expect(focused.starts, [
+        Duration.zero,
+        const Duration(seconds: 12),
+        const Duration(seconds: 12),
+      ]);
+      expect(focused.calls, isNot(contains('seek')));
+      expect(resolutions, [true, true, true]);
+      expect(player.position, const Duration(seconds: 12));
+      expect(player.error, isNull);
+      expect(player.isPlaying, isTrue);
+    },
+  );
+
+  test(
+    'focus state emitted during open preserves typed error for the UI action',
+    () async {
+      final focused = OpenHookEngine();
+      focused.onOpen = () async => focused.emit(
+        const EngineState(
+          error: 'Audio is unavailable. Try Play again.',
+          audioFocusFailure: true,
+        ),
+      );
+      await usePlayer(
+        playbackEngine: focused,
+        resolveSource: (_, _) async =>
+            const AudioSource('/cache/a', local: true),
+      );
+      await expectLater(
+        player.playQueue(tracks),
+        throwsA(isA<AudioFocusUnavailable>()),
+      );
+      expect(player.audioFocusError, 'Audio is unavailable. Try Play again.');
+      expect(player.localPlaybackError, isNull);
+      expect(player.error, isNot(contains('Bad state')));
+      focused.onOpen = null;
+      await player.play();
+      expect(player.audioFocusError, isNull);
+      expect(player.isPlaying, isTrue);
+    },
+  );
+
+  test('asynchronous focus error stays retryable without local repair or network recovery', () async {
+    final focused = FocusHookEngine();
+    var resolutions = 0;
+    await usePlayer(
+      playbackEngine: focused,
+      resolveSource: (_, _) async {
+        resolutions++;
+        return const AudioSource('/cache/a', local: true);
+      },
+    );
+    await player.playQueue(tracks);
+    focused.emit(
+      const EngineState(
+        error: 'Audio is unavailable. Try Play again.',
+        audioFocusFailure: true,
+        position: Duration(seconds: 9),
+      ),
+    );
+    await player.flushSettings();
+    expect(resolutions, 1);
+    expect(player.localPlaybackError, isNull);
+    expect(player.audioFocusError, 'Audio is unavailable. Try Play again.');
+    expect(player.isPlaying, isFalse);
+    await player.play();
+    expect(resolutions, 2);
+    expect(focused.starts.last, const Duration(seconds: 9));
+    expect(player.audioFocusError, isNull);
+    expect(player.isPlaying, isTrue);
+  });
+
+  test(
+    'focus denial during stream recovery keeps the actionable focus cause',
+    () async {
+      final focused = FocusHookEngine();
+      await usePlayer(
+        playbackEngine: focused,
+        resolveSource: (_, _) async =>
+            const AudioSource('https://yun.test/audio'),
+      );
+      await player.playQueue(tracks);
+      focused.openFailure = const AudioFocusUnavailable();
+      focused.emit(
+        const EngineState(
+          error: 'stream interrupted',
+          position: Duration(seconds: 11),
+        ),
+      );
+      await player.flushSettings();
+      expect(player.audioFocusError, isNotNull);
+      expect(player.error, player.audioFocusError);
+      expect(player.error, isNot(contains('stream interrupted')));
+      expect(focused.starts, [Duration.zero, const Duration(seconds: 11)]);
+      focused.openFailure = null;
+      await player.play();
+      expect(focused.starts.last, const Duration(seconds: 11));
+      expect(player.error, isNull);
+    },
+  );
+
+  test(
+    'Next and Stop clear focus error without marking the next download',
+    () async {
+      final focused = FocusHookEngine()
+        ..openFailure = const AudioFocusUnavailable();
+      await usePlayer(
+        playbackEngine: focused,
+        resolveSource: (track, _) async =>
+            AudioSource('/cache/${track.id}', local: true),
+      );
+      await expectLater(
+        player.playQueue(tracks),
+        throwsA(isA<AudioFocusUnavailable>()),
+      );
+      focused.openFailure = null;
+      await player.next();
+      expect(player.currentTrack?.id, 'b');
+      expect(player.audioFocusError, isNull);
+      expect(player.localPlaybackError, isNull);
+      focused.emit(
+        const EngineState(error: 'Focus lost', audioFocusFailure: true),
+      );
+      await player.flushSettings();
+      await player.stop();
+      expect(player.audioFocusError, isNull);
+      expect(player.localPlaybackError, isNull);
+      expect(player.error, isNull);
+    },
+  );
+
   test(
     'asynchronous local failures stay local and preserve their first cause',
     () async {
@@ -1137,6 +1340,31 @@ class OpenHookEngine extends FakeEngine {
     attempts++;
     await onOpen?.call();
     await super.open(uri, headers: headers, play: play, start: start);
+  }
+}
+
+class FocusHookEngine extends FakeEngine {
+  Object? openFailure, playFailure;
+  final starts = <Duration>[];
+
+  @override
+  Future<void> open(
+    String uri, {
+    Map<String, String>? headers,
+    bool play = true,
+    Duration start = Duration.zero,
+  }) async {
+    starts.add(start);
+    final failure = openFailure;
+    if (failure != null) throw failure;
+    await super.open(uri, headers: headers, play: play, start: start);
+  }
+
+  @override
+  Future<void> play() async {
+    final failure = playFailure;
+    if (failure != null) throw failure;
+    await super.play();
   }
 }
 

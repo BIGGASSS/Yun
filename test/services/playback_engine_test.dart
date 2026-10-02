@@ -20,6 +20,7 @@ void main() {
     engine = MediaKitEngine(
       createPlayer: () async => player,
       loadSession: () async => session,
+      androidAudioFocus: true,
     );
   });
   tearDown(() async {
@@ -216,7 +217,10 @@ void main() {
 
   test('focus denial closes pending relay and allows another open', () async {
     session.activation = Completer<bool>()..complete(false);
-    await expectLater(engine.open('https://yun.test/audio'), throwsStateError);
+    await expectLater(
+      engine.open('https://yun.test/audio'),
+      throwsA(isA<AudioFocusUnavailable>()),
+    );
     expect(player.opens, 0);
     session.activation = null;
     await engine.open('/cache/new.audio');
@@ -855,6 +859,585 @@ void main() {
     expect(player.plays, 2);
   });
 
+  test('transient interruption keeps registration and waits for delayed pause before resume', () async {
+    await engine.open('/cache/valid.audio');
+    final paused = Completer<void>();
+    player.onPause = () => paused.future;
+    session.interruptions.add(
+      AudioInterruptionEvent(true, AudioInterruptionType.pause),
+    );
+    session.interruptions.add(
+      AudioInterruptionEvent(false, AudioInterruptionType.pause),
+    );
+    await Future<void>.delayed(Duration.zero);
+    expect(session.activations, [true]);
+    expect(player.plays, 0);
+    paused.complete();
+    await Future<void>.delayed(Duration.zero);
+    expect(player.plays, 1);
+    expect(player.state.playing, isTrue);
+    expect(session.active, isTrue);
+    expect(session.activations, [true, true]);
+  });
+
+  test(
+    'explicit Play cannot use cached focus during a transient interruption',
+    () async {
+      await engine.open('/cache/valid.audio');
+      session.interruptions.add(
+        AudioInterruptionEvent(true, AudioInterruptionType.pause),
+      );
+      await Future<void>.delayed(Duration.zero);
+      await expectLater(engine.play(), throwsA(isA<AudioFocusUnavailable>()));
+      expect(player.plays, 0);
+      expect(player.state.playing, isFalse);
+      expect(session.activations, [true]);
+    },
+  );
+
+  for (final action in ['pause', 'stop']) {
+    test(
+      'new Play waits for delayed $action and obsolete cleanup cannot release its focus',
+      () async {
+        await engine.open('/cache/valid.audio');
+        final halted = Completer<void>();
+        player.onPause = () => halted.future;
+        final halting = action == 'pause' ? engine.pause() : engine.stop();
+        // Let Stop submit its native command before the new user intent.
+        await Future<void>.delayed(Duration.zero);
+        final playing = engine.play();
+        await Future<void>.delayed(Duration.zero);
+        expect(player.plays, 0);
+        halted.complete();
+        await Future.wait([halting, playing]);
+        expect(player.state.playing, isTrue);
+        expect(session.active, isTrue);
+        expect(session.activations.last, isTrue);
+      },
+    );
+  }
+
+  test('new Play waits for focus release already in flight', () async {
+    await engine.open('/cache/valid.audio');
+    final releasing = Completer<void>();
+    final released = Completer<void>();
+    session.onSetActive = (active) async {
+      if (!active) {
+        if (!releasing.isCompleted) releasing.complete();
+        await released.future;
+      }
+      return true;
+    };
+    final pausing = engine.pause();
+    await releasing.future;
+    final playing = engine.play();
+    await Future<void>.delayed(Duration.zero);
+    expect(session.activations, [true, false]);
+    expect(player.plays, 0);
+    released.complete();
+    await Future.wait([pausing, playing]);
+    expect(session.activations, [true, false, true]);
+    expect(session.active, isTrue);
+    expect(player.state.playing, isTrue);
+  });
+
+  test(
+    'denied Android-style cached focus request is cleared before retry',
+    () async {
+      var cached = false, requests = 0;
+      session.onSetActive = (active) {
+        if (!active) {
+          cached = false;
+          return true;
+        }
+        if (cached) return true;
+        cached = true;
+        requests++;
+        return requests > 1;
+      };
+      await expectLater(
+        engine.open('/cache/valid.audio'),
+        throwsA(isA<AudioFocusUnavailable>()),
+      );
+      expect(player.opens, 0);
+      expect(cached, isFalse);
+      expect(session.active, isFalse);
+      await engine.open('/cache/valid.audio');
+      expect(requests, 2);
+      expect(player.opens, 1);
+      expect(player.state.playing, isTrue);
+      expect(session.active, isTrue);
+    },
+  );
+
+  for (final path in ['/cache/valid.audio', 'https://yun.test/audio']) {
+    test(
+      'interruption before native submission fails explicitly and retry opens $path',
+      () async {
+        session.activation = Completer<bool>();
+        final activating = Completer<void>();
+        session.onActivate = () {
+          if (!activating.isCompleted) activating.complete();
+        };
+        final opening = engine.open(path);
+        final failed = expectLater(
+          opening,
+          throwsA(
+            isA<AudioFocusUnavailable>().having(
+              (e) => e.message,
+              'message',
+              contains('interrupted'),
+            ),
+          ),
+        );
+        await activating.future;
+        session.interruptions.add(
+          AudioInterruptionEvent(true, AudioInterruptionType.pause),
+        );
+        session.activation!.complete(true);
+        await failed;
+        expect(player.opens, 0);
+        expect(session.active, isFalse);
+        session.activation = null;
+        session.interruptions.add(
+          AudioInterruptionEvent(false, AudioInterruptionType.pause),
+        );
+        await Future<void>.delayed(Duration.zero);
+        expect(player.plays, 0);
+        await engine.open(path);
+        expect(player.opens, 1);
+        expect(player.state.playing, isTrue);
+      },
+    );
+  }
+
+  test(
+    'automatic resume denial keeps typed focus metadata in engine state',
+    () async {
+      await engine.open('/cache/valid.audio');
+      final states = <EngineState>[];
+      final subscription = engine.states.listen(states.add);
+      addTearDown(subscription.cancel);
+      session.interruptions.add(
+        AudioInterruptionEvent(true, AudioInterruptionType.pause),
+      );
+      await Future<void>.delayed(Duration.zero);
+      session.activation = Completer<bool>()..complete(false);
+      session.interruptions.add(
+        AudioInterruptionEvent(false, AudioInterruptionType.pause),
+      );
+      await Future<void>.delayed(Duration.zero);
+      final failure = states.singleWhere((state) => state.audioFocusFailure);
+      expect(failure.error, const AudioFocusUnavailable().message);
+      expect(failure.error, isNot(contains('Bad state')));
+      expect(player.plays, 0);
+      expect(session.active, isFalse);
+    },
+  );
+
+  for (final action in ['pause', 'stop']) {
+    test('failed native $action still releases focus', () async {
+      await engine.open('/cache/valid.audio');
+      player.onPause = () => throw StateError('Native pause failed');
+      await expectLater(
+        action == 'pause' ? engine.pause() : engine.stop(),
+        throwsStateError,
+      );
+      expect(session.active, isFalse);
+      expect(session.activations.last, isFalse);
+      player.onPause = null;
+      await engine.play();
+      expect(session.active, isTrue);
+      expect(player.state.playing, isTrue);
+    });
+  }
+
+  test(
+    'failed native open releases acquired focus before a later retry',
+    () async {
+      player.onOpen = () => throw StateError('Native open failed');
+      await expectLater(engine.open('/cache/valid.audio'), throwsStateError);
+      expect(session.active, isFalse);
+      expect(session.activations.last, isFalse);
+      player.onOpen = null;
+      await engine.open('/cache/valid.audio');
+      expect(session.active, isTrue);
+      expect(player.state.playing, isTrue);
+    },
+  );
+
+  test('controller retries the selected local source after interrupted initial focus', () async {
+    final controller = PlaybackController(
+      engine: engine,
+      enableSystemControls: false,
+      resolveSource: (_, _) async =>
+          const AudioSource('/cache/valid.audio', local: true),
+    );
+    addTearDown(() async {
+      await controller.shutdown();
+      controller.dispose();
+    });
+    session.activation = Completer<bool>();
+    final activating = Completer<void>();
+    session.onActivate = () {
+      if (!activating.isCompleted) activating.complete();
+    };
+    final opening = controller.playQueue([
+      const yun.Track(id: 'valid', title: 'Valid'),
+    ]);
+    final failed = expectLater(opening, throwsA(isA<AudioFocusUnavailable>()));
+    await activating.future;
+    session.interruptions.add(
+      AudioInterruptionEvent(true, AudioInterruptionType.pause),
+    );
+    session.activation!.complete(true);
+    await failed;
+    expect(player.opens, 0);
+    expect(controller.audioFocusError, contains('interrupted'));
+    expect(controller.localPlaybackError, isNull);
+    session.activation = null;
+    session.interruptions.add(
+      AudioInterruptionEvent(false, AudioInterruptionType.pause),
+    );
+    await controller.play();
+    expect(player.opens, 1);
+    expect(player.opened, '/cache/valid.audio');
+    expect(controller.isPlaying, isTrue);
+    expect(controller.error, isNull);
+  });
+
+  test(
+    'permanent loss releases the request and explicit Play asks the OS again',
+    () async {
+      var cached = false, requests = 0;
+      session.onSetActive = (active) {
+        if (!active) {
+          cached = false;
+          return true;
+        }
+        if (cached) return true;
+        cached = true;
+        requests++;
+        return requests == 1;
+      };
+      await engine.open('/cache/valid.audio');
+      final paused = Completer<void>();
+      player.onPause = () => paused.future;
+      session.interruptions.add(
+        AudioInterruptionEvent(true, AudioInterruptionType.unknown),
+      );
+      // Even an explicit retry before native pause settles must make a fresh
+      // request, not rely on audio_session's stale registration cache.
+      final retry = engine.play();
+      final denied = expectLater(retry, throwsA(isA<AudioFocusUnavailable>()));
+      paused.complete();
+      await denied;
+      expect(requests, 2);
+      expect(player.plays, 0);
+      expect(player.state.playing, isFalse);
+      expect(cached, isFalse);
+      session.interruptions.add(
+        AudioInterruptionEvent(false, AudioInterruptionType.pause),
+      );
+      await Future<void>.delayed(Duration.zero);
+      expect(player.plays, 0);
+    },
+  );
+
+  test(
+    'focus release failure preserves typed denial and must clear before retry',
+    () async {
+      var rejectRelease = true, cached = false, requests = 0;
+      session.onSetActive = (active) {
+        if (!active) {
+          if (rejectRelease) throw StateError('Focus release failed');
+          cached = false;
+          return true;
+        }
+        if (cached) return true;
+        cached = true;
+        requests++;
+        return requests > 1;
+      };
+      await expectLater(
+        engine.open('/cache/valid.audio'),
+        throwsA(isA<AudioFocusUnavailable>()),
+      );
+      expect(player.opens, 0);
+      expect(cached, isTrue);
+      await expectLater(
+        engine.open('/cache/valid.audio'),
+        throwsA(isA<AudioFocusUnavailable>()),
+      );
+      expect(player.opens, 0);
+      expect(requests, 1);
+      rejectRelease = false;
+      await engine.open('/cache/valid.audio');
+      expect(requests, 2);
+      expect(player.opens, 1);
+      expect(session.active, isTrue);
+    },
+  );
+
+  test('interrupted pre-open keeps its typed cause if cleanup fails', () async {
+    final activating = Completer<void>();
+    final grant = Completer<bool>();
+    var rejectRelease = true;
+    session.onSetActive = (active) async {
+      if (active) {
+        if (!activating.isCompleted) activating.complete();
+        return grant.future;
+      }
+      if (rejectRelease) throw StateError('Focus release failed');
+      return true;
+    };
+    final opening = engine.open('/cache/valid.audio');
+    final failed = expectLater(
+      opening,
+      throwsA(
+        isA<AudioFocusUnavailable>().having(
+          (e) => e.message,
+          'message',
+          contains('interrupted'),
+        ),
+      ),
+    );
+    await activating.future;
+    session.interruptions.add(
+      AudioInterruptionEvent(true, AudioInterruptionType.pause),
+    );
+    grant.complete(true);
+    await failed;
+    expect(player.opens, 0);
+    rejectRelease = false;
+  });
+
+  for (final action in ['pause', 'stop', 'noisy']) {
+    test(
+      'interruption during delayed explicit $action cannot re-arm auto-resume',
+      () async {
+        await engine.open('/cache/valid.audio');
+        final paused = Completer<void>();
+        player.onPause = () => paused.future;
+        final halting = action == 'pause'
+            ? engine.pause()
+            : action == 'stop'
+            ? engine.stop()
+            : Future<void>.sync(() => session.noisy.add(null));
+        session.interruptions.add(
+          AudioInterruptionEvent(true, AudioInterruptionType.pause),
+        );
+        session.interruptions.add(
+          AudioInterruptionEvent(false, AudioInterruptionType.pause),
+        );
+        paused.complete();
+        await halting;
+        await Future<void>.delayed(Duration.zero);
+        expect(player.plays, 0);
+        expect(player.state.playing, isFalse);
+        expect(session.active, isFalse);
+        if (action == 'stop') expect(player.stops, 1);
+      },
+    );
+  }
+
+  test('Apple unknown interruption begin still honors resumable end', () async {
+    await engine.dispose();
+    player = TestPlayer();
+    engine = MediaKitEngine(
+      createPlayer: () async => player,
+      loadSession: () async => session,
+      androidAudioFocus: false,
+    );
+    await engine.open('/cache/valid.audio');
+    session.interruptions.add(
+      AudioInterruptionEvent(true, AudioInterruptionType.unknown),
+    );
+    await Future<void>.delayed(Duration.zero);
+    expect(player.state.playing, isFalse);
+    expect(session.activations, [true]);
+    session.interruptions.add(
+      AudioInterruptionEvent(false, AudioInterruptionType.pause),
+    );
+    await Future<void>.delayed(Duration.zero);
+    expect(player.plays, 1);
+    expect(player.state.playing, isTrue);
+  });
+
+  test('unsuccessful release stays focus-typed and blocks cached activation until cleared', () async {
+    await engine.open('/cache/valid.audio');
+    var allowRelease = false;
+    session.onSetActive = (active) => active || allowRelease;
+    await expectLater(engine.pause(), throwsA(isA<AudioFocusUnavailable>()));
+    final requestsBefore = session.activations.where((active) => active).length;
+    await expectLater(engine.play(), throwsA(isA<AudioFocusUnavailable>()));
+    expect(
+      session.activations.where((active) => active).length,
+      requestsBefore,
+    );
+    expect(player.plays, 0);
+    allowRelease = true;
+    await engine.play();
+    expect(player.plays, 1);
+    expect(session.active, isTrue);
+  });
+
+  test(
+    'new open waiting for a failed release receives focus-typed failure',
+    () async {
+      await engine.open('/cache/valid.audio');
+      final releasing = Completer<void>();
+      final release = Completer<bool>();
+      session.onSetActive = (active) {
+        if (active) return true;
+        if (!releasing.isCompleted) releasing.complete();
+        return release.future;
+      };
+      final pausing = engine.pause();
+      final pauseFailed = expectLater(
+        pausing,
+        throwsA(isA<AudioFocusUnavailable>()),
+      );
+      await releasing.future;
+      final opening = engine.open('/cache/next.audio');
+      final openFailed = expectLater(
+        opening,
+        throwsA(isA<AudioFocusUnavailable>()),
+      );
+      release.completeError(StateError('Focus release failed'));
+      await Future.wait([pauseFailed, openFailed]);
+      expect(player.opens, 1);
+      session.onSetActive = null;
+    },
+  );
+
+  for (final action in ['pause', 'stop']) {
+    test(
+      'failed native $action remains the original cause if focus cleanup also fails',
+      () async {
+        await engine.open('/cache/valid.audio');
+        player.onPause = () => throw StateError('Native pause failed');
+        session.onSetActive = (active) {
+          if (!active) throw StateError('Focus release failed');
+          return true;
+        };
+        await expectLater(
+          action == 'pause' ? engine.pause() : engine.stop(),
+          throwsA(
+            isA<StateError>().having(
+              (e) => e.message,
+              'message',
+              'Native pause failed',
+            ),
+          ),
+        );
+        player.onPause = null;
+        session.onSetActive = null;
+      },
+    );
+  }
+
+  test(
+    'activation platform failure is focus-typed and cannot open native audio',
+    () async {
+      session.onSetActive = (active) {
+        if (active) throw StateError('OS activation failed');
+        return true;
+      };
+      await expectLater(
+        engine.open('/cache/valid.audio'),
+        throwsA(isA<AudioFocusUnavailable>()),
+      );
+      expect(player.opens, 0);
+      expect(session.active, isFalse);
+      session.onSetActive = null;
+      await engine.open('/cache/valid.audio');
+      expect(player.opens, 1);
+    },
+  );
+
+  test(
+    'late focus grant after dispose is released through its captured session',
+    () async {
+      session.activation = Completer<bool>();
+      final activating = Completer<void>();
+      session.onActivate = activating.complete;
+      final opening = engine.open('/cache/valid.audio');
+      await activating.future;
+      await engine.dispose();
+      expect(session.active, isFalse);
+      session.activation!.complete(true);
+      await opening;
+      expect(player.opens, 0);
+      expect(session.active, isFalse);
+      expect(session.activations, [true, false, false]);
+    },
+  );
+
+  test(
+    'obsolete automatic-resume denial cannot publish an error for newer Play',
+    () async {
+      await engine.open('/cache/valid.audio');
+      final states = <EngineState>[];
+      final subscription = engine.states.listen(states.add);
+      addTearDown(subscription.cancel);
+      session.interruptions.add(
+        AudioInterruptionEvent(true, AudioInterruptionType.pause),
+      );
+      await Future<void>.delayed(Duration.zero);
+      final releasing = Completer<void>();
+      final released = Completer<bool>();
+      var requests = 0;
+      session.onSetActive = (active) {
+        if (active) return ++requests > 1;
+        if (!releasing.isCompleted) releasing.complete();
+        return released.future;
+      };
+      session.interruptions.add(
+        AudioInterruptionEvent(false, AudioInterruptionType.pause),
+      );
+      await releasing.future;
+      final playing = engine.play();
+      released.complete(true);
+      await playing;
+      await Future<void>.delayed(Duration.zero);
+      expect(player.plays, 1);
+      expect(player.state.playing, isTrue);
+      expect(session.active, isTrue);
+      expect(states.where((state) => state.error != null), isEmpty);
+      session.onSetActive = null;
+    },
+  );
+
+  test('dispose still destroys native player and retries release after a pending halt fails', () async {
+    await engine.open('/cache/valid.audio');
+    final releasing = Completer<void>();
+    final release = Completer<bool>();
+    var releases = 0;
+    session.onSetActive = (active) {
+      if (active || ++releases > 1) return true;
+      releasing.complete();
+      return release.future;
+    };
+    final pausing = engine.pause();
+    final pauseFailed = expectLater(
+      pausing,
+      throwsA(isA<AudioFocusUnavailable>()),
+    );
+    await releasing.future;
+    final disposing = engine.dispose();
+    final disposeFailed = expectLater(
+      disposing,
+      throwsA(isA<AudioFocusUnavailable>()),
+    );
+    await Future<void>.delayed(Duration.zero);
+    release.completeError(StateError('Focus release failed'));
+    await Future.wait([pauseFailed, disposeFailed]);
+    expect(player.disposed, isTrue);
+    expect(session.active, isFalse);
+    expect(releases, 2);
+  });
+
   test('unknown interruption end clears pending automatic resume', () async {
     await engine.play();
     session.interruptions.add(
@@ -957,7 +1540,7 @@ class TestPlayer implements Player {
   final TestPlayerStream stream = TestPlayerStream();
   int plays = 0, opens = 0, stops = 0;
   String? opened;
-  FutureOr<void> Function()? onOpen;
+  FutureOr<void> Function()? onOpen, onPause, onStop;
   bool disposed = false, failVolume = false;
   final volumeCalls = <double>[];
   @override
@@ -990,6 +1573,7 @@ class TestPlayer implements Player {
 
   @override
   Future<void> pause() async {
+    if (onPause != null) await onPause!();
     state = state.copyWith(playing: false);
     stream.playingEvents.add(false);
   }
@@ -997,6 +1581,7 @@ class TestPlayer implements Player {
   @override
   Future<void> stop() async {
     stops++;
+    if (onStop != null) await onStop!();
     await pause();
   }
 
@@ -1072,6 +1657,8 @@ class TestSession implements AudioSession {
   int configurations = 0;
   Completer<bool>? activation;
   void Function()? onActivate;
+  FutureOr<bool> Function(bool)? onSetActive;
+  bool active = false;
   final activations = <bool>[];
   @override
   Stream<AudioInterruptionEvent> get interruptionEventStream =>
@@ -1096,7 +1683,13 @@ class TestSession implements AudioSession {
   }) async {
     activations.add(active);
     if (active) onActivate?.call();
-    return active && activation != null ? activation!.future : true;
+    final accepted = onSetActive != null
+        ? await onSetActive!(active)
+        : active && activation != null
+        ? await activation!.future
+        : true;
+    if (accepted) this.active = active;
+    return accepted;
   }
 
   @override
