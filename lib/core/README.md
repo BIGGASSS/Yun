@@ -22,7 +22,34 @@ Import `package:yun/core/app_controller.dart` (re-exports models). `AppControlle
 
 ## PlaybackController
 `Track? currentTrack`; `List<Track> queue`; `int index`; `bool isPlaying, isBuffering, shuffle`; `Duration position, duration`; `RepeatMode repeatMode` (`off`, `all`, `one`); `String? error`.
-`Future<void> playQueue(List<Track> tracks, {int? index})`, `play()`, `pause()`, `toggle()`, `next()`, `previous()`, `seek(Duration position)`, `stop()`, `checkpoint()`, `shutdown()`; `void setShuffle(bool)`, `setRepeat(RepeatMode)`. UI may listen directly or via app. `checkpoint()` persists measured time without pausing (useful on application lifecycle transitions). The controller also checkpoints automatically every 10 seconds and on pause/buffering/seek/track transitions.
+`Future<void> playQueue(List<Track> tracks, {int? index})`, `play()`, `pause()`, `toggle()`, `next()`, `previous()`, `seek(Duration position)`, `stop()`, `checkpoint()`, `shutdown()`; `void setShuffle(bool)`, `setRepeat(RepeatMode)`. UI may listen directly or via app. `checkpoint()` persists measured time without pausing (useful on application lifecycle transitions). The controller also checkpoints on a 10-second monotonic deadline (checked by timer and engine callbacks), immediately after position-backed gap recovery, and on pause/buffering/seek/track transitions.
+
+Listening accounting counts short active monotonic intervals directly. Callback
+gaps over 2.5 seconds are not assumed silent: native playback may continue while
+Dart is delayed. Fresh engine positions can recover the uncredited portion,
+bounded by both position progress and elapsed monotonic time. Previously counted
+time, including flushed events, is subtracted; checkpoints retain this evidence.
+Pause/buffering/focus-wait/EOF close the interval after reconciling its final
+position. Track changes and source recovery never bridge old evidence into the
+new source. Stationary positions cannot recover gaps.
+
+The engine does not currently acknowledge post-seek position provenance. Gap
+recovery is therefore disabled after a seek (even a failed seek) until the next
+source open; ordinary short-interval accounting continues. Late terminal positions
+arriving only after an inactive state are conservatively excluded too. These are
+bounded inferences from engine snapshots, not a native audibility ledger. Recovered
+events retain the existing checkpoint-relative wall labels and 60-second maximum
+segment size. A native discontinuity/position acknowledgement would be needed to
+safely recover every post-seek or late-terminal gap.
+
+`yun.listening` developer logs report scheduler-gap observed/recovered/discarded/
+pending milliseconds and failed checkpoint buffer counts, never track IDs, account
+IDs, media URLs or raw storage errors. Foreground-service health is reported through
+`systemMediaControlsAvailable` / `systemMediaControlsError`. Foreground protection
+and lifecycle checkpoints cannot guarantee persistence on process termination:
+the normal unpersisted tail is roughly ten seconds, but delayed callbacks or failed
+storage writes can leave more in memory. Successfully persisted outbox events
+remain retryable across restarts.
 
 Without an explicit `index`, `playQueue` starts at a random track when shuffle is enabled, otherwise the first track. An explicit index always selects that entry. Queue order, shuffle, repeat, and volume preferences are preserved.
 

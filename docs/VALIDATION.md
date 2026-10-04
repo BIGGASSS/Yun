@@ -301,6 +301,21 @@ do not publish credentials, listening history, personal library files, or tokens
   offline restart/cache, reconnect, network loss and resumed chunk uploads.
 - [ ] Playlist conflicts/tombstones, multi-device sync, and offline event retry
   idempotence; statistics reflect listening rather than download time.
+  For Android stats, compare native position advancement with synced listening
+  during screen-off playback of both downloaded and streamed tracks. Confirm a
+  healthy media-playback foreground service and held partial wakelock (for example
+  with `adb shell dumpsys activity services app.yun.yun` and
+  `adb shell dumpsys power`); repeat with a deliberately failed service promotion.
+  Observe `yun.listening` developer diagnostics while delaying Dart callbacks:
+  advancing positions recover gaps once, stationary positions do not, and a
+  timer/lifecycle checkpoint before position delivery must not lose recovery.
+  Exercise pause, buffering, focus wait, EOF/repeat, track changes, and delayed
+  seek-position delivery. After a seek, long-gap recovery remains intentionally
+  disabled until source reopen; short intervals still count. Checkpoint failures
+  must retain event IDs for retry; killing the process may lose only data not yet
+  successfully persisted, with no strict ten-second bound under callback/storage
+  delays. Mock regression tests do not establish on-device audibility or OEM
+  background behavior.
 - [ ] UI scaling/window sizes, keyboard/focus/navigation, Android lifecycle,
   accessibility labels/contrast, and failure states on slow/no-network devices.
 
