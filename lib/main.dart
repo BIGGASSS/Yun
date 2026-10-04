@@ -21,8 +21,9 @@ void main() {
 }
 
 /// Owns the account controller and checkpoints history on lifecycle transitions.
-/// Backgrounding does not stop music. OS process termination can still lose the
-/// last (at most roughly ten seconds) uncheckpointed listening segment.
+/// Backgrounding does not stop music. OS process termination can still lose
+/// unpersisted listening (normally roughly ten seconds; delayed callbacks or
+/// failed storage writes can leave more in memory).
 class YunBootstrap extends StatefulWidget {
   const YunBootstrap({
     super.key,

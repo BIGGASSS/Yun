@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:collection';
+import 'dart:developer' as developer;
 import 'dart:math';
 
 import 'package:flutter/foundation.dart';
@@ -140,7 +141,9 @@ class PlaybackController extends ChangeNotifier {
   StreamSubscription<EngineState>? _subscription;
   StreamSubscription<SystemMediaControlsStatus>? _controlsStatusSubscription;
   Timer? _timer;
-  int _ticks = 0;
+  int _lastCheckpointMs = 0;
+  int get _nowMs => _monotonicMs?.call() ?? _clock.elapsedMilliseconds;
+  bool get _checkpointDue => _nowMs - _lastCheckpointMs >= 10000;
   Future<void>? _initialization;
   int _initializationCancellation = 0, _controlsAttempt = 0;
   bool _engineInitialized = false,
@@ -186,8 +189,10 @@ class PlaybackController extends ChangeNotifier {
       ListeningTracker(
         deviceId: deviceId,
         newId: () => const Uuid().v4(),
-        monotonicMs: _monotonicMs ?? () => _clock.elapsedMilliseconds,
+        monotonicMs: () => _nowMs,
         wallNow: DateTime.now,
+        onGapDiagnostic: (diagnostic) =>
+            developer.log(diagnostic.toString(), name: 'yun.listening'),
       ),
     );
   }
@@ -266,9 +271,10 @@ class PlaybackController extends ChangeNotifier {
       if (_closing || _disposed) return;
       _subscription = _engine.states.listen(_onState);
       _engineInitialized = true;
+      _lastCheckpointMs = _nowMs;
       _timer = Timer.periodic(const Duration(seconds: 1), (_) {
         _tracker?.tick();
-        if (++_ticks % 10 == 0) unawaited(_safe(checkpoint));
+        if (_checkpointDue) unawaited(_safe(checkpoint));
       });
     }
     if (_controlsInitialized ||
@@ -406,7 +412,9 @@ class PlaybackController extends ChangeNotifier {
     duration = state.duration > Duration.zero
         ? state.duration
         : currentTrack?.duration ?? Duration.zero;
-    _tracker?.setActive(
+    final tracker = _tracker;
+    final recoveredBefore = tracker?.recoveredGapMs;
+    tracker?.setActive(
       isPlaying &&
           !isBuffering &&
           !_opening &&
@@ -414,8 +422,17 @@ class PlaybackController extends ChangeNotifier {
           !state.completed &&
           !_completedSeen &&
           _playbackError == null,
+      position: !_opening && !_seeking && _playbackError == null
+          ? state.position
+          : null,
     );
-    if (wasActive && (!isPlaying || isBuffering)) unawaited(_safe(checkpoint));
+    if ((wasActive && (!isPlaying || isBuffering)) ||
+        _checkpointDue ||
+        tracker?.recoveredGapMs != recoveredBefore) {
+      // Persist catch-up immediately, including when the timer ran before the
+      // native position callback. Engine updates also enforce the time deadline.
+      unawaited(_safe(checkpoint));
+    }
     if (state.error != null) {
       unawaited(_safe(checkpoint));
       // A download stays local even when its decoder fails. Preserve the first
@@ -466,6 +483,7 @@ class PlaybackController extends ChangeNotifier {
   Future<void> checkpoint() {
     final recording = _recording;
     if (recording == null) return Future<void>.value();
+    _lastCheckpointMs = _nowMs;
     recording.buffer.pending.addAll(recording.tracker.flush());
     return recording.persisting ??= _persist(recording).whenComplete(() {
       recording.persisting = null;
@@ -488,7 +506,15 @@ class PlaybackController extends ChangeNotifier {
           }
           while (buffer.pending.isNotEmpty && recording.saveEvent != null) {
             final save = recording.saveEvent!;
-            await save(buffer.pending.first);
+            try {
+              await save(buffer.pending.first);
+            } catch (_) {
+              developer.log(
+                'checkpoint_failed pendingSegments=${buffer.pending.length}',
+                name: 'yun.listening',
+              );
+              rethrow;
+            }
             buffer.pending.removeFirst();
           }
         }().whenComplete(() {
@@ -761,6 +787,7 @@ class PlaybackController extends ChangeNotifier {
             !_lastState.completed &&
             cancellation == _initializationCancellation &&
             _playbackError == null,
+        position: _lastState.position,
       );
       _notify();
     }
@@ -833,6 +860,7 @@ class PlaybackController extends ChangeNotifier {
       _sourceLocal = source.local;
       _playbackError = error = null;
       _audioFocusFailure = false;
+      _tracker?.resetPositionEvidence();
       _acceptSourceState = true;
       await _engine.open(
         source.uri,
@@ -878,6 +906,7 @@ class PlaybackController extends ChangeNotifier {
             !_lastState.completed &&
             cancellation == _initializationCancellation &&
             _playbackError == null,
+        position: _lastState.position,
       );
       _notify();
     }
@@ -982,6 +1011,7 @@ class PlaybackController extends ChangeNotifier {
     if (currentTrack == null) return;
     _seeking = true;
     _tracker?.setActive(false);
+    _tracker?.resetPositionEvidence(enabled: false);
     try {
       await checkpoint();
       await _engine.seek(
