@@ -635,6 +635,74 @@ void main() {
     },
   );
 
+  for (final restart in [false, true]) {
+    test(
+      'unpin reclaims retained repair audio${restart ? ' after restart' : ' during download'}',
+      () async {
+        final bytes = [1, 2, 3];
+        final track = Track(
+          id: 'repair/track',
+          title: 'T',
+          sizeBytes: bytes.length,
+          sha256: sha256.convert(bytes).toString(),
+        );
+        final destination = File(
+          p.join(root.path, '${Uri.encodeComponent(track.id)}.audio'),
+        );
+        await destination.writeAsBytes(bytes);
+        await db.put('track', track.id, track.toJson());
+        await db.put('file', track.id, {
+          'id': track.id,
+          'path': destination.path,
+          'sha256': track.sha256,
+          'references': 1,
+        });
+        await transfers.restoreDownloads();
+
+        final started = Completer<void>();
+        final body = StreamController<Uint8List>();
+        addTearDown(body.close);
+        dio.httpClientAdapter = FakeAdapter((_, _) {
+          started.complete();
+          return ResponseBody(body.stream, 200);
+        });
+        final repair = transfers.redownloadTrack(
+          track,
+          [track],
+          [],
+          [PinSelection('track', track.id)],
+        );
+        await started.future;
+        expect(await db.get('file', track.id), isNull);
+        expect(await destination.readAsBytes(), bytes);
+
+        if (restart) {
+          await transfers.close().timeout(const Duration(seconds: 5));
+          await repair;
+          expect(await destination.readAsBytes(), bytes);
+          transfers = TransferService(
+            api: api,
+            database: db,
+            directory: root,
+            onChanged: () {},
+            onTrack: (t) => db.put('track', t.id, t.toJson()),
+            onError: errors.add,
+          );
+          await transfers.restoreDownloads();
+        }
+        final unpin = transfers.reconcile([track], [], []);
+        await Future.wait([repair, unpin]).timeout(const Duration(seconds: 5));
+
+        expect(errors, isEmpty);
+        expect(await db.get('file', track.id), isNull);
+        expect(await db.get('download', track.id), isNull);
+        expect(transfers.progressFor(track.id), isNull);
+        expect(await File('${destination.path}.part').exists(), isFalse);
+        expect(await destination.exists(), isFalse);
+      },
+    );
+  }
+
   test(
     'overlapping reference retains active download but replaces obsolete batch',
     () async {

@@ -1282,21 +1282,29 @@ class TransferService {
         _progress(track, DownloadStatus.queued, 0);
       }
     }
-    final selectedPartials = refs.keys
-        .map((id) => '${Uri.encodeComponent(id)}.audio.part')
-        .toSet();
-    await for (final file in directory.list()) {
-      if (obsolete()) return;
-      if (file is File &&
-          file.path.endsWith('.audio.part') &&
-          !selectedPartials.contains(p.basename(file.path))) {
-        await file.delete();
-      }
-    }
     final files = {
       for (final record in await database.list('file'))
         record['id'] as String: record,
     };
+    // Repairs remove the playable database reference but retain the old audio
+    // until replacement succeeds. Reclaim those bytes on deselection too,
+    // including when the repair was interrupted by an account close or restart.
+    final selectedFiles = {
+      for (final id in refs.keys) ...[
+        p.join(directory.path, '${Uri.encodeComponent(id)}.audio'),
+        p.join(directory.path, '${Uri.encodeComponent(id)}.audio.part'),
+      ],
+      for (final record in files.values)
+        if (refs.containsKey(record['id'])) record['path'] as String,
+    }.map((path) => p.normalize(p.absolute(path))).toSet();
+    await for (final file in directory.list()) {
+      if (obsolete()) return;
+      if (file is File &&
+          (file.path.endsWith('.audio') || file.path.endsWith('.audio.part')) &&
+          !selectedFiles.contains(p.normalize(file.absolute.path))) {
+        await file.delete();
+      }
+    }
     for (final record in files.values) {
       if (obsolete()) return;
       final id = record['id'] as String;
