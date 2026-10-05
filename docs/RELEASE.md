@@ -351,14 +351,15 @@ dependencies on Ubuntu 24.04:
 
 ```sh
 sudo apt-get update
-sudo apt-get install libgtk-3-0t64 libmpv2 libsecret-1-0 libayatana-appindicator3-1
+sudo apt-get install libgtk-3-0t64 libmpv2 libsecret-1-0
 # A running user Secret Service/keyring (e.g. GNOME Keyring) is also required.
 tar -xzf yun-linux-x64.tar.gz
 bash yun/install.sh
 ```
 
-Tray display additionally needs a StatusNotifier host (for example KDE Plasma).
-Without one Yun remains usable but will not hide to the tray. Closing quits by
+Yun uses D-Bus directly for its Linux tray; no Ayatana/AppIndicator library is
+required. Tray display additionally needs a StatusNotifier host (for example KDE
+Plasma). Without one Yun remains usable but will not hide to the tray. Closing quits by
 default; **Settings → Window behavior** can opt into close-to-tray. Use **Quit Yun**
 before replacing binaries when that preference is enabled.
 

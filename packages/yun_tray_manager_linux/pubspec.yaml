@@ -1,0 +1,15 @@
+name: yun_tray_manager_linux
+description: Dart-only Linux tray selection for Yun's StatusNotifier implementation.
+version: 0.1.0
+publish_to: none
+
+environment:
+  sdk: ^3.13.4
+  flutter: '>=3.3.0'
+
+flutter:
+  plugin:
+    implements: tray_manager
+    platforms:
+      linux:
+        dartPluginClass: YunTrayManagerLinux
