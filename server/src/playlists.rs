@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::{FromRow, Row, SqliteConnection};
 use std::collections::HashSet;
 
-#[derive(Deserialize, Serialize, FromRow, Debug)]
+#[derive(Deserialize, Serialize, FromRow, Debug, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Entry {
     pub(crate) id: String,
@@ -131,6 +131,13 @@ pub(crate) async fn replace(
     if unknown {
         return Err(ApiError::bad("unknown track"));
     }
+    let stored_entries: Vec<Entry> = sqlx::query_as(
+        "SELECT id,track_id FROM playlist_entries WHERE playlist_id=? ORDER BY position",
+    )
+    .bind(&id)
+    .fetch_all(&mut *tx)
+    .await?;
+    let entries_changed = stored_entries != input.entries;
     let revision = bump(&mut tx, &auth.user).await?;
     sqlx::query("UPDATE playlists SET name=?,revision=?,updated_at=? WHERE user_id=? AND id=?")
         .bind(input.name)
@@ -140,9 +147,12 @@ pub(crate) async fn replace(
         .bind(&id)
         .execute(&mut *tx)
         .await?;
-    sqlx::query("DELETE FROM playlist_entries WHERE playlist_id=? AND EXISTS(SELECT 1 FROM playlists WHERE id=? AND user_id=?)").bind(&id).bind(&id).bind(&auth.user).execute(&mut *tx).await?;
-    sqlx::query("INSERT INTO playlist_entries(playlist_id,id,track_id,position) SELECT ?,json_extract(value,'$.id'),json_extract(value,'$.track_id'),CAST(key AS INTEGER) FROM json_each(?)")
-        .bind(&id).bind(entries).execute(&mut *tx).await?;
+    // A rename still advances the revision, but must not rewrite unchanged entries.
+    if entries_changed {
+        sqlx::query("DELETE FROM playlist_entries WHERE playlist_id=? AND EXISTS(SELECT 1 FROM playlists WHERE id=? AND user_id=?)").bind(&id).bind(&id).bind(&auth.user).execute(&mut *tx).await?;
+        sqlx::query("INSERT INTO playlist_entries(playlist_id,id,track_id,position) SELECT ?,json_extract(value,'$.id'),json_extract(value,'$.track_id'),CAST(key AS INTEGER) FROM json_each(?)")
+            .bind(&id).bind(entries).execute(&mut *tx).await?;
+    }
     let result = load(&mut tx, &auth.user, &id).await?;
     tx.commit().await?;
     Ok(Json(result))

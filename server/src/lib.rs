@@ -223,15 +223,17 @@ pub fn router(state: AppState) -> Router {
             )
         })
         .layer(DefaultBodyLimit::max(2 * 1024 * 1024))
-        .layer(axum::middleware::from_fn_with_state(
-            state.clone(),
-            admission::admit,
-        ))
         .layer(tower_http::timeout::TimeoutLayer::with_status_code(
             axum::http::StatusCode::REQUEST_TIMEOUT,
             Duration::from_secs(60),
         ))
         .layer(axum::middleware::map_response(error::normalize))
+        // Admission wraps the final normalized body, including extractor errors
+        // and timeouts, rather than a body that normalization may replace.
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            admission::admit,
+        ))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
 }

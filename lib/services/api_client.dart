@@ -79,6 +79,10 @@ class ApiClient {
           Dio(
             BaseOptions(
               connectTimeout: const Duration(seconds: 15),
+              // Bound stalled upload writes too. Let Dio surface sendTimeout
+              // so the upload worker can reconcile the durable server offset
+              // on retry rather than blindly replaying an uncertain chunk.
+              sendTimeout: const Duration(seconds: 60),
               receiveTimeout: const Duration(seconds: 60),
             ),
           ),

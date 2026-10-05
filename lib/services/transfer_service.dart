@@ -1,7 +1,6 @@
 import 'dart:async';
 import 'dart:io';
 
-import 'package:crypto/crypto.dart';
 import 'package:dio/dio.dart';
 import 'package:path/path.dart' as p;
 
@@ -19,31 +18,34 @@ Map<String, int> pinReferences(
   List<Playlist> playlists,
 ) {
   final refs = <String, int>{};
-  final known = tracks.map((t) => t.id).toSet();
+  final known = <String>{};
+  final albums = <String, Set<String>>{};
+  final playlistTracks = <String, Set<String>>{};
+  // Build membership indexes once per snapshot, not once per selection.
+  for (final track in tracks) {
+    known.add(track.id);
+    final album = albumPinId(
+      track.album,
+      track.albumArtist.isEmpty ? track.artist : track.albumArtist,
+    );
+    (albums[album] ??= {}).add(track.id);
+  }
+  for (final playlist in playlists) {
+    (playlistTracks[playlist.id] ??= {}).addAll(
+      playlist.entries.map((entry) => entry.trackId),
+    );
+  }
   for (final pin in pins) {
-    final ids = <String>{};
-    if (pin.type == 'track') ids.add(pin.id);
-    if (pin.type == 'album') {
-      ids.addAll(
-        tracks
-            .where(
-              (t) =>
-                  albumPinId(
-                    t.album,
-                    t.albumArtist.isEmpty ? t.artist : t.albumArtist,
-                  ) ==
-                  pin.id,
-            )
-            .map((t) => t.id),
-      );
-    }
-    if (pin.type == 'playlist') {
-      for (final playlist in playlists.where((p) => p.id == pin.id)) {
-        ids.addAll(playlist.entries.map((e) => e.trackId));
+    final Iterable<String> ids = switch (pin.type) {
+      'track' => [pin.id],
+      'album' => albums[pin.id] ?? const <String>{},
+      'playlist' => playlistTracks[pin.id] ?? const <String>{},
+      _ => const <String>[],
+    };
+    for (final id in ids) {
+      if (known.contains(id)) {
+        refs.update(id, (n) => n + 1, ifAbsent: () => 1);
       }
-    }
-    for (final id in ids.intersection(known)) {
-      refs.update(id, (n) => n + 1, ifAbsent: () => 1);
     }
   }
   return refs;
@@ -111,9 +113,22 @@ class DownloadProgress {
   );
 }
 
-/// Expected cancellation when an account closes during local transfer work.
+/// Expected cancellation when an account closes or a selection is removed.
 class TransferCancelled extends StateError {
-  TransferCancelled() : super('Account locked');
+  TransferCancelled() : super('Transfer cancelled');
+}
+
+/// Immutable selections plus their once-computed membership index.
+class _DownloadSelection {
+  _DownloadSelection(
+    List<Track> tracks,
+    List<Playlist> playlists,
+    List<PinSelection> pins,
+  ) : tracks = List.of(tracks),
+      references = pinReferences(pins, tracks, playlists);
+
+  final List<Track> tracks;
+  final Map<String, int> references;
 }
 
 class TransferService {
@@ -126,6 +141,9 @@ class TransferService {
     required this.onError,
     this.onDownloadChanged,
     this.onFilesChanged,
+    this.onUploadChanged,
+    this.onUploadsRemoved,
+    this.onFileChanged,
     this.onDownloaded,
     this.onVerificationChanged,
     DownloadFileVerifier Function()? verificationWorkerFactory,
@@ -230,7 +248,7 @@ class TransferService {
       if (_closed) throw TransferCancelled();
       await database.put('upload', id, job.toJson());
       committed = true;
-      onChanged();
+      _publishUpload(id, job);
       return job;
     } finally {
       if (!committed) {
@@ -292,6 +310,29 @@ class TransferService {
   final void Function(Object) onError;
   final void Function()? onDownloadChanged;
   final void Function()? onFilesChanged;
+
+  /// Committed record deltas; null means removal. Published synchronously so
+  /// awaiting an operation also observes its updated inventory.
+  final void Function(String id, UploadJob? job)? onUploadChanged;
+  final void Function(Set<String> ids)? onUploadsRemoved;
+  final void Function(String id, Map<String, dynamic>? record)? onFileChanged;
+
+  void _publishUpload(String id, UploadJob? job) {
+    if (onUploadChanged != null) {
+      onUploadChanged!(id, job);
+    } else {
+      onChanged();
+    }
+  }
+
+  void _publishFile(String id, Map<String, dynamic>? record) {
+    if (onFileChanged != null) {
+      onFileChanged!(id, record);
+    } else {
+      (onFilesChanged ?? onChanged)();
+    }
+  }
+
   final Future<void> Function(Track)? onDownloaded;
   final void Function()? onVerificationChanged;
   final DownloadFileVerifier Function() _verificationWorkerFactory;
@@ -483,7 +524,7 @@ class TransferService {
     _runningDownloadIds.remove(track.id);
     _completedDownloadBatchIds.remove(track.id);
     _downloadSectionsRevision++;
-    (onFilesChanged ?? onChanged)();
+    _publishFile(track.id, null);
     (onDownloadChanged ?? onChanged)();
     return true;
   }
@@ -505,7 +546,7 @@ class TransferService {
   Future<void> _invalidateFile(String id, Map<String, dynamic> record) async {
     // Remove the playable reference before attempting cleanup or replacement.
     await database.remove('file', id);
-    (onFilesChanged ?? onChanged)();
+    _publishFile(id, null);
     final file = File(record['path'] as String);
     if (await file.exists()) await file.delete();
   }
@@ -677,7 +718,7 @@ class TransferService {
           damaged.add(id);
           invalid++;
           _downloadSectionsRevision++;
-          (onFilesChanged ?? onChanged)();
+          _publishFile(id, null);
           (onDownloadChanged ?? onChanged)();
           // The invalid reference is already quarantined. Failure to delete
           // leftover bytes does not allow playback or prevent other checks.
@@ -884,9 +925,12 @@ class TransferService {
   final Map<String, CancelToken> _uploadTokens = {};
   final Map<String, Completer<void>> _uploadDone = {};
   CancelToken? _downloadToken;
+  String? _activeDownloadId;
+  bool _activeDownloadCancelled = false;
+  DownloadFileVerifier? _automaticVerificationWorker;
   final Set<String> _cancelled = {};
   bool _closed = false;
-  (List<Track>, List<Playlist>, List<PinSelection>)? _nextReconciliation;
+  _DownloadSelection? _nextReconciliation, _latestSelection;
   Future<void>? _uploadsRunning, _downloadsRunning;
   bool _uploadsRequested = false;
   Future<void> runUploads() {
@@ -911,7 +955,7 @@ class TransferService {
 
   Future<void> _save(UploadJob job) async {
     await database.put('upload', job.id, job.toJson());
-    onChanged();
+    _publishUpload(job.id, job);
   }
 
   Future<void> _runUploads() async {
@@ -1081,7 +1125,7 @@ class TransferService {
           });
         }
       });
-      onChanged();
+      _publishUpload(id, job.copyWith(status: 'cancelled'));
     }
     _uploadTokens[id]?.cancel('Cancelled');
     // Wait only for this job, not unrelated uploads later in the queue.
@@ -1121,14 +1165,24 @@ class TransferService {
 
   /// Clear completed history without touching pending, failed or cancelled jobs.
   Future<void> clearDoneUploads() async {
+    final removed = <String>{};
     await database.transaction(() async {
       for (final record in await database.list('upload')) {
         if (record['status'] == 'done') {
-          await database.remove('upload', record['id'] as String);
+          final id = record['id'] as String;
+          await database.remove('upload', id);
+          removed.add(id);
         }
       }
     });
-    onChanged();
+    if (removed.isEmpty) return;
+    if (onUploadsRemoved != null) {
+      onUploadsRemoved!(removed);
+    } else {
+      for (final id in removed) {
+        _publishUpload(id, null);
+      }
+    }
   }
 
   Future<void> retryUpload(String id) async {
@@ -1150,7 +1204,15 @@ class TransferService {
     List<PinSelection> pins,
   ) {
     if (_closed) return Future.value();
-    _nextReconciliation = (List.of(tracks), List.of(playlists), List.of(pins));
+    final selection = _DownloadSelection(tracks, playlists, pins);
+    _latestSelection = _nextReconciliation = selection;
+    _requestedRedownloads.retainAll(selection.references.keys);
+    if (_activeDownloadId != null &&
+        !selection.references.containsKey(_activeDownloadId)) {
+      _activeDownloadCancelled = true;
+      _downloadToken?.cancel('Download no longer selected');
+      _automaticVerificationWorker?.cancel();
+    }
     if (_verificationRunning != null) {
       return _verificationRunning!.then((_) => _resumeReconciliations());
     }
@@ -1163,9 +1225,9 @@ class TransferService {
       while (!_closed &&
           _verificationRunning == null &&
           _nextReconciliation != null) {
-        final (tracks, playlists, pins) = _nextReconciliation!;
+        final selection = _nextReconciliation!;
         _nextReconciliation = null;
-        await _reconcile(tracks, playlists, pins);
+        await _reconcile(selection);
       }
       pausedForVerification =
           !_closed &&
@@ -1190,19 +1252,20 @@ class TransferService {
     }
   }
 
-  Future<void> _reconcile(
-    List<Track> tracks,
-    List<Playlist> playlists,
-    List<PinSelection> pins,
-  ) async {
+  Future<void> _reconcile(_DownloadSelection selection) async {
+    final tracks = selection.tracks;
+    final refs = selection.references;
+    bool obsolete() => _closed || !identical(selection, _latestSelection);
     await directory.create(recursive: true);
-    final refs = pinReferences(pins, tracks, playlists);
+    if (obsolete()) return;
     for (final record in await database.list('download')) {
+      if (obsolete()) return;
       final id = record['id'] as String;
       if (!refs.containsKey(id) && record['repair_required'] != true) {
         await database.remove('download', id);
       }
     }
+    if (obsolete()) return;
     final removedProgress = _downloads.entries.any(
       (entry) => !refs.containsKey(entry.key) && !entry.value.repairRequired,
     );
@@ -1219,33 +1282,44 @@ class TransferService {
         _progress(track, DownloadStatus.queued, 0);
       }
     }
-    final selectedPartials = refs.keys
-        .map((id) => '${Uri.encodeComponent(id)}.audio.part')
-        .toSet();
-    await for (final file in directory.list()) {
-      if (file is File &&
-          file.path.endsWith('.audio.part') &&
-          !selectedPartials.contains(p.basename(file.path))) {
-        await file.delete();
-      }
-    }
     final files = {
       for (final record in await database.list('file'))
         record['id'] as String: record,
     };
-    var removedFiles = false;
+    // Repairs remove the playable database reference but retain the old audio
+    // until replacement succeeds. Reclaim those bytes on deselection too,
+    // including when the repair was interrupted by an account close or restart.
+    final selectedFiles = {
+      for (final id in refs.keys) ...[
+        p.join(directory.path, '${Uri.encodeComponent(id)}.audio'),
+        p.join(directory.path, '${Uri.encodeComponent(id)}.audio.part'),
+      ],
+      for (final record in files.values)
+        if (refs.containsKey(record['id'])) record['path'] as String,
+    }.map((path) => p.normalize(p.absolute(path))).toSet();
+    await for (final file in directory.list()) {
+      if (obsolete()) return;
+      if (file is File &&
+          (file.path.endsWith('.audio') || file.path.endsWith('.audio.part')) &&
+          !selectedFiles.contains(p.normalize(file.absolute.path))) {
+        await file.delete();
+      }
+    }
     for (final record in files.values) {
+      if (obsolete()) return;
       final id = record['id'] as String;
       if (!refs.containsKey(id)) {
         final file = File(record['path'] as String);
-        if (await file.exists()) await file.delete();
+        final exists = await file.exists();
+        if (obsolete()) return;
+        if (exists) await file.delete();
         await database.remove('file', id);
-        removedFiles = true;
+        _publishFile(id, null);
       } else if (record['references'] != refs[id]) {
         await database.put('file', id, {...record, 'references': refs[id]});
       }
     }
-    if (removedFiles) (onFilesChanged ?? onChanged)();
+    if (obsolete()) return;
     // Plan all actual download work before starting the first track. Cached
     // files and repair-held downloads are not tasks unless explicitly retried.
     final previousBatch = downloadBatchProgress;
@@ -1264,9 +1338,9 @@ class TransferService {
       (onDownloadChanged ?? onChanged)();
     }
     for (final track in tracks.where((t) => refs.containsKey(t.id))) {
-      if (_closed) break;
+      if (obsolete()) break;
       if (_verificationRunning != null) {
-        _nextReconciliation ??= (tracks, playlists, pins);
+        _nextReconciliation ??= selection;
         break;
       }
       final redownload = _requestedRedownloads.remove(track.id);
@@ -1289,6 +1363,7 @@ class TransferService {
             await database.remove('file', track.id);
           });
           files.remove(track.id);
+          _publishFile(track.id, null);
           final partial = File(
             p.join(
               directory.path,
@@ -1298,10 +1373,13 @@ class TransferService {
           if (await partial.exists()) await partial.delete();
           _progress(track, DownloadStatus.queued, 0);
           await _saveDownload(track.id);
-          (onFilesChanged ?? onChanged)();
         }
+        if (obsolete()) return;
         final record = files[track.id];
-        if (record != null && await _hasExpectedFileMetadata(track, record)) {
+        final cached =
+            record != null && await _hasExpectedFileMetadata(track, record);
+        if (obsolete()) return;
+        if (cached) {
           if (_progress(track, DownloadStatus.downloaded, track.sizeBytes)) {
             await _saveDownload(track.id);
             await onDownloaded?.call(track);
@@ -1317,35 +1395,77 @@ class TransferService {
         }
         _startDownloadTask(track.id);
         final file = await _download(track);
-        await database.put('file', track.id, {
+        if (_closed || !_latestSelection!.references.containsKey(track.id)) {
+          // A selection can change while the final rename is in flight.
+          if (await file.exists()) await file.delete();
+          throw TransferCancelled();
+        }
+        final completedFile = <String, dynamic>{
           'id': track.id,
           'path': file.path,
           'sha256': track.sha256,
-          'references': refs[track.id],
-        });
+          'references': _latestSelection!.references[track.id],
+        };
+        await database.put('file', track.id, completedFile);
+        _publishFile(track.id, completedFile);
+        if (_closed || !_latestSelection!.references.containsKey(track.id)) {
+          throw TransferCancelled();
+        }
         _progress(track, DownloadStatus.downloaded, track.sizeBytes);
         await _saveDownload(track.id);
-        (onFilesChanged ?? onChanged)();
-        await onDownloaded?.call(track);
+        if (!_closed && _latestSelection!.references.containsKey(track.id)) {
+          await onDownloaded?.call(track);
+        }
       } catch (e) {
         // Per-track worker boundary: persist failure for retry and report it,
         // without preventing independent pinned tracks from downloading.
         final partial = File(
           p.join(directory.path, '${Uri.encodeComponent(track.id)}.audio.part'),
         );
+        final cancelled =
+            _closed ||
+            e is TransferCancelled ||
+            !_latestSelection!.references.containsKey(track.id);
         _progress(
           track,
-          _closed ? DownloadStatus.queued : DownloadStatus.failed,
+          cancelled ? DownloadStatus.queued : DownloadStatus.failed,
           await partial.exists() ? await partial.length() : 0,
-          error: _closed ? null : e.toString(),
+          error: cancelled ? null : e.toString(),
         );
         await _saveDownload(track.id);
-        if (!_closed) onError(e);
+        if (!cancelled) onError(e);
       }
     }
   }
 
+  void _checkDownloadWanted() {
+    if (_closed ||
+        _activeDownloadCancelled ||
+        !_latestSelection!.references.containsKey(_activeDownloadId)) {
+      throw TransferCancelled();
+    }
+  }
+
   Future<File> _download(Track track) async {
+    _activeDownloadId = track.id;
+    _activeDownloadCancelled = false;
+    try {
+      return await _downloadSelected(track);
+    } catch (_) {
+      _checkDownloadWanted();
+      rethrow;
+    } finally {
+      try {
+        await _automaticVerificationWorker?.close();
+      } finally {
+        _automaticVerificationWorker = null;
+        _activeDownloadId = null;
+      }
+    }
+  }
+
+  Future<File> _downloadSelected(Track track) async {
+    _checkDownloadWanted();
     final destination = File(
       p.join(directory.path, '${Uri.encodeComponent(track.id)}.audio'),
     );
@@ -1357,7 +1477,7 @@ class TransferService {
     }
     _progress(track, DownloadStatus.downloading, offset);
     await _saveDownload(track.id);
-    if (_closed) throw TransferCancelled();
+    _checkDownloadWanted();
     if (offset < track.sizeBytes) {
       final token = CancelToken();
       _downloadToken = token;
@@ -1390,6 +1510,7 @@ class TransferService {
         );
         try {
           await for (final chunk in (response.data as ResponseBody).stream) {
+            _checkDownloadWanted();
             if (chunk.length > track.sizeBytes - offset) {
               // Cancel before awaiting stream/file cleanup, and never write an
               // offending chunk. Do not poison subsequent requests or retries.
@@ -1410,22 +1531,44 @@ class TransferService {
         _downloadToken = null;
       }
     }
+    _checkDownloadWanted();
     if (await partial.length() != track.sizeBytes) {
       throw StateError('Incomplete download; retry will resume');
     }
+    _checkDownloadWanted();
     _progress(track, DownloadStatus.verifying, track.sizeBytes);
-    final digest = await sha256.bind(partial.openRead()).first;
-    if (digest.toString() != track.sha256) {
+    _checkDownloadWanted();
+    final worker = _automaticVerificationWorker = _verificationWorkerFactory();
+    final result = await worker.verify(
+      VerificationFile(
+        path: partial.path,
+        sizeBytes: track.sizeBytes,
+        sha256: track.sha256,
+        recordedSha256: track.sha256,
+      ),
+      (_) {},
+    );
+    _checkDownloadWanted();
+    if (result.outcome == FileVerificationOutcome.invalid) {
       await partial.delete();
       throw StateError('Downloaded audio checksum mismatch');
     }
-    if (await destination.exists()) await destination.delete();
+    if (result.outcome != FileVerificationOutcome.valid) {
+      throw StateError(
+        result.error ?? 'Downloaded audio could not be verified',
+      );
+    }
+    final destinationExists = await destination.exists();
+    _checkDownloadWanted();
+    if (destinationExists) await destination.delete();
+    _checkDownloadWanted();
     return partial.rename(destination.path);
   }
 
   Future<void> close() async {
     _closed = true;
     cancelVerification();
+    _automaticVerificationWorker?.cancel();
     _downloadToken?.cancel('Account locked');
     for (final token in _uploadTokens.values) {
       token.cancel('Account locked');
