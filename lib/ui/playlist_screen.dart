@@ -820,6 +820,51 @@ class _AddTracksDialogState extends State<_AddTracksDialog> {
   TrackSort get _sort => _selection.sort;
   bool get _descending => _selection.descending;
 
+  Object? _eligibleKey, _searchKey, _sortKey;
+  List<Track> _eligible = const [], _matching = const [], _sorted = const [];
+  Set<String> _visible = const {};
+
+  void _deriveTracks(Playlist? playlist) {
+    final app = widget.app;
+    // Library snapshots and playlists are replaced on edits. Include account
+    // scope as well: IDs/revisions alone can coincide across users.
+    final eligibleKey = (
+      app,
+      app.account?.server,
+      app.account?.userId,
+      app.tracks,
+      playlist,
+    );
+    if (_eligibleKey != eligibleKey) {
+      _eligibleKey = eligibleKey;
+      final existing =
+          playlist?.entries.map((entry) => entry.trackId).toSet() ?? <String>{};
+      _eligible = playlist == null
+          ? <Track>[]
+          : app.tracks.where((track) => !existing.contains(track.id)).toList();
+      _selected.retainAll(_eligible.map((track) => track.id));
+    }
+
+    final searchKey = (_eligible, _query);
+    if (_searchKey != searchKey) {
+      _searchKey = searchKey;
+      _matching = _eligible
+          .where(
+            (track) => '${track.title} ${track.artist} ${track.album}'
+                .toLowerCase()
+                .contains(_query),
+          )
+          .toList();
+      _visible = _matching.map((track) => track.id).toSet();
+    }
+
+    final sortKey = (_matching, _sort, _descending);
+    if (_sortKey != sortKey) {
+      _sortKey = sortKey;
+      _sorted = sortTracks(_matching, _sort, descending: _descending);
+    }
+  }
+
   void _setSort(TrackSort sort, bool descending) {
     if (!widget.isCurrent()) return;
     setState(() {
@@ -844,24 +889,9 @@ class _AddTracksDialogState extends State<_AddTracksDialog> {
           : widget.app.playlists
                 .where((item) => item.id == widget.playlistId)
                 .firstOrNull;
-      final existing =
-          playlist?.entries.map((entry) => entry.trackId).toSet() ?? <String>{};
-      final eligible = playlist == null
-          ? <Track>[]
-          : widget.app.tracks
-                .where((track) => !existing.contains(track.id))
-                .toList();
-      _selected.retainAll(eligible.map((track) => track.id));
-      final tracks = sortTracks(
-        eligible.where(
-          (track) => '${track.title} ${track.artist} ${track.album}'
-              .toLowerCase()
-              .contains(_query),
-        ),
-        _sort,
-        descending: _descending,
-      );
-      final visible = tracks.map((track) => track.id).toSet();
+      _deriveTracks(playlist);
+      final tracks = _sorted;
+      final visible = _visible;
       final all = visible.isNotEmpty && visible.every(_selected.contains);
       return AlertDialog(
         insetPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 24),

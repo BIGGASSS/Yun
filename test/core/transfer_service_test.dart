@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:collection';
 import 'dart:io';
 import 'dart:typed_data';
 
@@ -12,6 +13,51 @@ import 'package:yun/services/cache_database.dart';
 import 'package:yun/services/transfer_service.dart';
 
 import 'fakes.dart';
+
+class _CountingList<T> extends ListBase<T> {
+  _CountingList(this.values);
+  final List<T> values;
+  int reads = 0;
+  @override
+  int get length => values.length;
+  @override
+  set length(int value) => throw UnsupportedError('read only');
+  @override
+  T operator [](int index) {
+    reads++;
+    return values[index];
+  }
+
+  @override
+  void operator []=(int index, T value) => throw UnsupportedError('read only');
+}
+
+class _ControlledAutomaticVerifier implements DownloadFileVerifier {
+  final started = Completer<VerificationFile>();
+  final result = Completer<FileVerificationResult>();
+  bool cancelled = false, closed = false;
+
+  @override
+  Future<FileVerificationResult> verify(
+    VerificationFile file,
+    void Function(int) onBytes,
+  ) {
+    started.complete(file);
+    onBytes(file.sizeBytes ~/ 2);
+    return result.future;
+  }
+
+  @override
+  void cancel() {
+    cancelled = true;
+    if (!result.isCompleted) result.completeError(VerificationCancelled());
+  }
+
+  @override
+  Future<void> close() async {
+    closed = true;
+  }
+}
 
 void main() {
   late Directory root;
@@ -50,6 +96,93 @@ void main() {
     await db.close();
     await root.delete(recursive: true);
   });
+  test('pin membership indexes preserve overlapping selections and deduplicate entries', () {
+    const tracks = [
+      Track(
+        id: 'a',
+        title: 'A',
+        album: 'Album',
+        artist: 'Various',
+        albumArtist: 'Group',
+      ),
+      Track(id: 'b', title: 'B', album: 'Album', artist: 'Group'),
+      Track(id: 'c', title: 'C', album: 'Album', artist: 'Other'),
+    ];
+    const playlists = [
+      Playlist(
+        id: 'p',
+        name: 'P',
+        entries: [
+          PlaylistEntry(id: '1', trackId: 'a'),
+          PlaylistEntry(id: '2', trackId: 'a'),
+          PlaylistEntry(id: '3', trackId: 'missing'),
+        ],
+      ),
+      // Duplicate playlist identities are merged, as with the previous scan.
+      Playlist(
+        id: 'p',
+        name: 'P',
+        entries: [PlaylistEntry(id: '4', trackId: 'b')],
+      ),
+    ];
+    expect(
+      pinReferences(
+        [
+          const PinSelection('track', 'a'),
+          PinSelection('album', albumPinId('Album', 'Group')),
+          const PinSelection('playlist', 'p'),
+          const PinSelection('track', 'missing'),
+          const PinSelection('album', 'missing'),
+          const PinSelection('playlist', 'missing'),
+        ],
+        tracks,
+        playlists,
+      ),
+      {'a': 3, 'b': 2},
+    );
+  });
+
+  test('thousands of album and playlist pins index the library only once', () {
+    // Count source reads rather than asserting a machine-dependent time limit.
+    for (final albumCount in [1000, 4000]) {
+      final tracks = _CountingList(
+        List.generate(
+          albumCount * 10,
+          (i) => Track(
+            id: '$i',
+            title: '$i',
+            album: '${i ~/ 10}',
+            artist: 'Artist',
+          ),
+        ),
+      );
+      final playlists = _CountingList(
+        List.generate(
+          albumCount,
+          (i) => Playlist(
+            id: '$i',
+            name: '$i',
+            entries: [PlaylistEntry(id: '$i', trackId: '${i * 10}')],
+          ),
+        ),
+      );
+      final refs = pinReferences(
+        [
+          for (var i = 0; i < albumCount; i++)
+            PinSelection('album', albumPinId('$i', 'Artist')),
+          for (var i = 0; i < albumCount; i++) PinSelection('playlist', '$i'),
+        ],
+        tracks,
+        playlists,
+      );
+      expect(refs, hasLength(albumCount * 10));
+      expect(refs['0'], 2);
+      expect(refs['1'], 1);
+      expect(tracks.reads, tracks.length);
+      expect(playlists.reads, playlists.length);
+    }
+  });
+
   test('download resumes with Range/If-Range and verifies checksum before exposing file', () async {
     final bytes = List.generate(100, (i) => i);
     final hash = sha256.convert(bytes).toString();
@@ -448,6 +581,219 @@ void main() {
       expect(await File(p.join(root.path, 't.audio')).exists(), isFalse);
     },
   );
+  test(
+    'unpin cancels a stalled body and never starts obsolete queued tracks',
+    () async {
+      final bytes = [1, 2, 3];
+      final tracks = [
+        for (final id in ['a', 'b', 'c'])
+          Track(
+            id: id,
+            title: id,
+            sizeBytes: bytes.length,
+            sha256: sha256.convert(bytes).toString(),
+          ),
+      ];
+      final started = Completer<void>();
+      var bodyCancelled = false;
+      final body = StreamController<Uint8List>(
+        onCancel: () => bodyCancelled = true,
+      );
+      addTearDown(body.close);
+      CancelToken? activeToken;
+      final requests = <String>[];
+      dio.httpClientAdapter = FakeAdapter((options, _) {
+        requests.add(options.path.split('/').reversed.elementAt(1));
+        if (options.path.endsWith('/a/audio')) {
+          activeToken = options.cancelToken;
+          body.add(Uint8List.fromList([1]));
+          started.complete();
+          return ResponseBody(body.stream, 200);
+        }
+        return ResponseBody.fromBytes(bytes, 200);
+      });
+      final first = transfers.reconcile(tracks, [], [
+        for (final track in tracks) PinSelection('track', track.id),
+      ]);
+      await started.future;
+      final latest = transfers.reconcile(tracks, [], [
+        const PinSelection('track', 'c'),
+      ]);
+      expect(activeToken!.isCancelled, isTrue);
+      await Future.wait([first, latest]).timeout(const Duration(seconds: 5));
+      expect(bodyCancelled, isTrue);
+      expect(requests, ['a', 'c']);
+      expect(errors, isEmpty);
+      expect(transfers.progressFor('a'), isNull);
+      expect(transfers.progressFor('b'), isNull);
+      expect(await db.get('download', 'a'), isNull);
+      expect(await db.get('file', 'a'), isNull);
+      expect(await File(p.join(root.path, 'a.audio.part')).exists(), isFalse);
+      expect(await db.get('file', 'c'), isNotNull);
+      expect(transfers.hasRunningDownloads, isFalse);
+      expect(transfers.downloadBatchProgress, (completed: 0, total: 0));
+    },
+  );
+
+  test(
+    'overlapping reference retains active download but replaces obsolete batch',
+    () async {
+      final bytes = [1, 2, 3];
+      final tracks = [
+        for (final id in ['a', 'b', 'c'])
+          Track(
+            id: id,
+            title: id,
+            album: id,
+            artist: 'Artist',
+            sizeBytes: bytes.length,
+            sha256: sha256.convert(bytes).toString(),
+          ),
+      ];
+      final started = Completer<void>(), release = Completer<void>();
+      addTearDown(() {
+        if (!release.isCompleted) release.complete();
+      });
+      CancelToken? activeToken;
+      final requests = <String>[];
+      dio.httpClientAdapter = FakeAdapter((options, _) async {
+        requests.add(options.path.split('/').reversed.elementAt(1));
+        if (options.path.endsWith('/a/audio')) {
+          activeToken = options.cancelToken;
+          started.complete();
+          await release.future;
+        }
+        return ResponseBody.fromBytes(bytes, 200);
+      });
+      final albumPin = PinSelection('album', albumPinId('a', 'Artist'));
+      final first = transfers.reconcile(tracks, [], [
+        const PinSelection('track', 'a'),
+        albumPin,
+        const PinSelection('track', 'b'),
+      ]);
+      await started.future;
+      final intermediate = transfers.reconcile(tracks, [], [
+        albumPin,
+        const PinSelection('track', 'b'),
+      ]);
+      final latest = transfers.reconcile(tracks, [], [
+        albumPin,
+        const PinSelection('track', 'c'),
+      ]);
+      expect(activeToken!.isCancelled, isFalse);
+      release.complete();
+      await Future.wait([first, intermediate, latest]);
+      expect(requests, ['a', 'c']);
+      expect(errors, isEmpty);
+      expect((await db.get('file', 'a'))!['references'], 1);
+      expect(await db.get('file', 'b'), isNull);
+      expect(await db.get('file', 'c'), isNotNull);
+    },
+  );
+
+  for (final action in ['complete', 'unpin', 'close', 'invalid', 'skipped']) {
+    test(
+      'automatic verifier $action gates publication and is drained',
+      () async {
+        await transfers.close();
+        final worker = _ControlledAutomaticVerifier();
+        final completed = <String>[];
+        transfers = TransferService(
+          api: api,
+          database: db,
+          directory: root,
+          onChanged: () {},
+          onTrack: (_) async {},
+          onError: errors.add,
+          onDownloaded: (track) async => completed.add(track.id),
+          verificationWorkerFactory: () => worker,
+        );
+        final bytes = [1, 2, 3, 4];
+        final track = Track(
+          id: 't',
+          title: 'T',
+          sizeBytes: bytes.length,
+          sha256: sha256.convert(bytes).toString(),
+        );
+        dio.httpClientAdapter = FakeAdapter(
+          (_, _) => ResponseBody.fromBytes(bytes, 200),
+        );
+        final downloading = transfers.reconcile(
+          [track],
+          [],
+          [const PinSelection('track', 't')],
+        );
+        final input = await worker.started.future;
+        expect(input.path, endsWith('t.audio.part'));
+        expect(input.sha256, track.sha256);
+        expect(input.sizeBytes, bytes.length);
+        expect(transfers.progressFor('t')!.status, DownloadStatus.verifying);
+        expect(await db.get('file', 't'), isNull);
+        expect(await File(p.join(root.path, 't.audio')).exists(), isFalse);
+        expect(completed, isEmpty);
+        if (action == 'unpin') {
+          await transfers
+              .reconcile([track], [], [])
+              .timeout(const Duration(seconds: 5));
+        } else if (action == 'close') {
+          await transfers.close().timeout(const Duration(seconds: 5));
+        } else {
+          worker.result.complete(
+            FileVerificationResult(switch (action) {
+              'complete' => FileVerificationOutcome.valid,
+              'invalid' => FileVerificationOutcome.invalid,
+              _ => FileVerificationOutcome.skipped,
+            }),
+          );
+        }
+        await downloading;
+        expect(worker.closed, isTrue);
+        expect(worker.cancelled, action == 'unpin' || action == 'close');
+        expect(completed, action == 'complete' ? ['t'] : isEmpty);
+        expect(
+          await db.get('file', 't'),
+          action == 'complete' ? isNotNull : isNull,
+        );
+        expect(
+          await File(p.join(root.path, 't.audio')).exists(),
+          action == 'complete',
+        );
+        expect(
+          await File(p.join(root.path, 't.audio.part')).exists(),
+          action == 'close' || action == 'skipped',
+        );
+        expect(
+          errors,
+          action == 'invalid' || action == 'skipped' ? hasLength(1) : isEmpty,
+        );
+        if (action == 'close') {
+          expect(transfers.progressFor('t')!.status, DownloadStatus.queued);
+          expect(transfers.progressFor('t')!.error, isNull);
+          // A complete partial survives account close and is verified on retry,
+          // without a second request or ever exposing unverified bytes.
+          transfers = TransferService(
+            api: api,
+            database: db,
+            directory: root,
+            onChanged: () {},
+            onTrack: (_) async {},
+            onError: errors.add,
+          );
+          dio.httpClientAdapter = FakeAdapter(
+            (_, _) => throw StateError('No network expected'),
+          );
+          await transfers.reconcile(
+            [track],
+            [],
+            [const PinSelection('track', 't')],
+          );
+          expect(await db.get('file', 't'), isNotNull);
+          expect(errors, isEmpty);
+        }
+      },
+    );
+  }
+
   test(
     'offline upload cancellation persists server cleanup for retry',
     () async {

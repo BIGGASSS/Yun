@@ -109,10 +109,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
           case 'playlist':
             await addTracksToPlaylist(context, app, current);
           case 'offline':
-            for (final track in current) {
-              if (!stillSelected(track)) continue;
-              await app.pinTrack(track.id);
-            }
+            await app.pinTracks(current.map((track) => track.id));
           case 'delete':
             for (final track in current) {
               if (!stillSelected(track)) continue;

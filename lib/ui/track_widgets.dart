@@ -288,26 +288,40 @@ Future<void> addTracksToPlaylist(
       account == (app.account?.server, app.account?.userId);
   final id = await showDialog<String>(
     context: context,
-    builder: (context) => SimpleDialog(
-      title: const Text('Add to playlist'),
-      children: [
-        for (final playlist in app.playlists)
-          SimpleDialogOption(
-            onPressed: () => Navigator.pop(context, playlist.id),
-            child: Padding(
-              padding: const EdgeInsets.symmetric(vertical: 8),
-              child: Text(playlist.name),
-            ),
-          ),
-        SimpleDialogOption(
-          onPressed: () => Navigator.pop(context, '__new'),
-          child: const Padding(
-            padding: EdgeInsets.symmetric(vertical: 8),
-            child: Text('＋ New playlist'),
+    builder: (context) {
+      final playlists = app.playlists;
+      return AlertDialog(
+        title: const Text('Add to playlist'),
+        content: SizedBox(
+          width: 480,
+          height: 360,
+          child: ListView.builder(
+            itemCount: playlists.length,
+            itemBuilder: (context, index) {
+              final playlist = playlists[index];
+              return SimpleDialogOption(
+                key: ValueKey('playlist-choice-${playlist.id}'),
+                onPressed: () => Navigator.pop(context, playlist.id),
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 8),
+                  child: Text(playlist.name),
+                ),
+              );
+            },
           ),
         ),
-      ],
-    ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context, '__new'),
+            child: const Text('＋ New playlist'),
+          ),
+        ],
+      );
+    },
   );
   if (id == null || !context.mounted || !sameAccount()) return;
   Playlist? playlist;

@@ -158,6 +158,11 @@ class _LibraryApp extends ChangeNotifier implements AppController {
   }
 
   @override
+  Future<void> pinTracks(Iterable<String> ids, {bool pinned = true}) async {
+    if (pinned) this.pinned.addAll(ids);
+  }
+
+  @override
   Future<void> deleteTrack(String id) async {
     deleted.add(id);
     library = library.where((track) => track.id != id).toList();

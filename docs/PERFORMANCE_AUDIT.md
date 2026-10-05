@@ -5,6 +5,40 @@ The original audit was read-only. The remediation below was subsequently
 implemented; the remaining sections preserve the original findings and baseline
 line references. This is not a production capacity or four-platform certification.
 
+## Follow-up snapshot review remediation
+
+The ten follow-up findings against `0c5ca0b` are addressed:
+
+- Album/playlist membership is indexed once per pin-expansion snapshot; deterministic
+  traversal-count regressions cover libraries up to 40,000 tracks.
+- Bulk track pins are persisted atomically, followed by one cache reload and
+  reconciliation. Tests cover 1,000 tracks, duplicates, empty input and rollback.
+- Shared admission reservations survive JSON response consumption and transport
+  backpressure. Buffered JSON exceeding its request reservation acquires the excess
+  from the shared 64 MiB budget or fails immediately with HTTP 429. Tests cover
+  retained responses, large JSON byte saturation, final-frame ownership, bounded
+  Hyper writes, disconnect recovery and streaming-media exemption.
+- Superseded download batches stop between tracks; losing the last pin reference
+  cancels active network work or isolate verification. Overlapping pins retain work.
+- Uploads have a finite send timeout; real non-reading-peer tests and uncertain
+  write recovery tests preserve server-acknowledged offsets.
+- Automatic checksums reuse the cancellable isolate verifier before publishing files.
+- Upload/file deltas update controller inventories directly, including changes racing
+  full cache loads. Read-only inventory views are live rather than copied per tick.
+  Bulk history removal compacts/reindexes and notifies once.
+- Playlist renames skip unchanged entry writes; a 10,000-entry regression verifies
+  zero entry mutations, with separate coverage for identity/order/track changes.
+- Track-picker derivations are cached independently of checkbox state; playlist
+  chooser rows build lazily in a bounded viewport.
+
+Local validation: **1,104 Flutter tests passed, 19 opt-in tests skipped**; separate
+native playback run **18 passed, one external-network opt-in skipped**. **36 Rust
+tests passed**, Flutter analysis, Rust strict Clippy and formatting passed, and
+API smoke checks passed **65 real TCP requests**. These are regression/component
+checks, not physical-device frame-time or production RSS guarantees. Admission
+cannot bound transient allocations already made by handlers/serialization, and
+buffering proxies/custom transports still require their own connection/write limits.
+
 ## Remediation implemented
 
 All eight primary findings and the additional code-level risks have fixes and

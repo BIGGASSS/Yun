@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:collection';
 import 'dart:convert';
 import 'dart:io';
 
@@ -80,15 +81,22 @@ class AppController extends ChangeNotifier implements SystemMediaArtwork {
   List<Track> _tracks = const [];
   List<Playlist> _playlists = const [];
   List<UploadJob> _uploads = const [];
+  final List<UploadJob> _uploadRecords = [];
+  final Map<String, int> _uploadIndexes = {};
   List<PinSelection> _pins = const [];
   Map<String, Track> _tracksById = const {};
   Map<String, String> _files = {};
   Set<String> _downloadedTrackIds = const {};
+  final Set<String> _fileIds = {};
   Set<String> _wantedDownloads = {};
   List<Track> get tracks => _tracks;
   List<Playlist> get playlists => _playlists;
+
+  /// Read-only live inventory; its view identity changes on each update.
   List<UploadJob> get uploads => _uploads;
   List<PinSelection> get pins => _pins;
+
+  /// Read-only live inventory; copy explicitly when a durable snapshot is needed.
   Set<String> get downloadedTrackIds => _downloadedTrackIds;
   bool get hasRunningDownloads =>
       !_locking && !_shuttingDown && (_transfers?.hasRunningDownloads ?? false);
@@ -121,9 +129,11 @@ class AppController extends ChangeNotifier implements SystemMediaArtwork {
   Future<void>? _redownloadingCorruptedFiles;
   final Map<String, Future<void>> _redownloadingTracks = {};
   Future<void>? _reloadRunning;
-  bool _reloadRequested = false,
-      _uploadsRequested = false,
-      _filesRequested = false;
+  bool _reloadRequested = false;
+  // Only changes arriving during a full read need retaining. Coalesce by ID,
+  // including tombstones, so stale snapshots cannot resurrect removed records.
+  Map<String, UploadJob?>? _uploadLoadChanges;
+  Map<String, Map<String, dynamic>?>? _fileLoadChanges;
   int _generation = 0;
   String newId() => const Uuid().v4();
   void _notify() {
@@ -269,8 +279,21 @@ class AppController extends ChangeNotifier implements SystemMediaArtwork {
       directory: Directory(p.join(directory.path, 'audio')),
       importsDirectory: Directory(p.join(directory.path, 'imports')),
       onChanged: () {
-        if (generation == _generation && !_locking) {
-          unawaited(_background(_reloadUploads()));
+        if (generation == _generation) _notifyDownloads();
+      },
+      onUploadChanged: (id, job) {
+        if (generation == _generation && !_locking && !_shuttingDown) {
+          _updateUpload(id, job);
+        }
+      },
+      onUploadsRemoved: (ids) {
+        if (generation == _generation && !_locking && !_shuttingDown) {
+          _removeUploads(ids);
+        }
+      },
+      onFileChanged: (id, record) {
+        if (generation == _generation && !_locking && !_shuttingDown) {
+          _updateFile(id, record);
         }
       },
       onTrack: (track) async {
@@ -290,11 +313,6 @@ class AppController extends ChangeNotifier implements SystemMediaArtwork {
       },
       onVerificationChanged: () {
         if (generation == _generation) _notifyVerification();
-      },
-      onFilesChanged: () {
-        if (generation == _generation && !_locking) {
-          unawaited(_background(_reloadFiles()));
-        }
       },
       onDownloaded: (track) async {
         // The cache bounds/deduplicates work; images cannot stall audio.
@@ -328,62 +346,110 @@ class AppController extends ChangeNotifier implements SystemMediaArtwork {
     return _scheduleReload();
   }
 
-  Future<void> _reloadUploads() {
-    _uploadsRequested = true;
-    return _scheduleReload();
-  }
-
-  Future<void> _reloadFiles() {
-    _filesRequested = true;
-    return _scheduleReload();
-  }
-
   Future<void> _scheduleReload() => _reloadRunning ??= _drainReloads();
 
   Future<void> _drainReloads() async {
     try {
-      while (_reloadRequested || _uploadsRequested || _filesRequested) {
-        final full = _reloadRequested;
-        final uploads = _uploadsRequested;
-        final files = _filesRequested;
-        _reloadRequested = _uploadsRequested = _filesRequested = false;
-        if (full) {
-          await _loadCache();
-        } else {
-          final db = _database;
-          final generation = _generation;
-          if (db == null) continue;
-          final jobs = uploads ? await db.list('upload') : null;
-          final records = files ? await db.list('file') : null;
-          if (generation != _generation || _shuttingDown) continue;
-          if (jobs != null) {
-            _uploads = List.unmodifiable(jobs.map(UploadJob.fromJson));
-          }
-          if (records != null) {
-            _setFiles({
-              for (final record in records)
-                if (_tracksById[record['id']]?.sha256 == record['sha256'])
-                  record['id'] as String: record['path'] as String,
-            });
-          }
-          _notifyDownloads();
-        }
+      while (_reloadRequested) {
+        _reloadRequested = false;
+        await _loadCache();
       }
     } finally {
       _reloadRunning = null;
     }
   }
 
+  void _setUploads(Iterable<UploadJob> jobs) {
+    _uploadRecords.clear();
+    _uploadIndexes.clear();
+    for (final job in jobs) {
+      _uploadIndexes[job.id] = _uploadRecords.length;
+      _uploadRecords.add(job);
+    }
+    _uploads = UnmodifiableListView(_uploadRecords);
+  }
+
+  void _updateUpload(String id, UploadJob? job) {
+    _uploadLoadChanges?[id] = job;
+    final index = _uploadIndexes[id];
+    if (job == null) {
+      if (index == null) return;
+      _uploadRecords.removeAt(index);
+      _uploadIndexes.remove(id);
+      for (var i = index; i < _uploadRecords.length; i++) {
+        _uploadIndexes[_uploadRecords[i].id] = i;
+      }
+    } else if (index == null) {
+      _uploadIndexes[id] = _uploadRecords.length;
+      _uploadRecords.add(job);
+    } else {
+      _uploadRecords[index] = job;
+    }
+    // New view identity signals selectors without copying retained history on
+    // every chunk. These read-only inventory views are live, not snapshots.
+    _uploads = UnmodifiableListView(_uploadRecords);
+    _notifyDownloads();
+  }
+
+  void _removeUploads(Set<String> ids) {
+    for (final id in ids) {
+      _uploadLoadChanges?[id] = null;
+    }
+    _uploadRecords.removeWhere((job) => ids.contains(job.id));
+    _uploadIndexes.clear();
+    for (var i = 0; i < _uploadRecords.length; i++) {
+      _uploadIndexes[_uploadRecords[i].id] = i;
+    }
+    _uploads = UnmodifiableListView(_uploadRecords);
+    _notifyDownloads();
+  }
+
+  void _updateFile(String id, Map<String, dynamic>? record) {
+    _fileLoadChanges?[id] = record;
+    final path = record != null && _tracksById[id]?.sha256 == record['sha256']
+        ? record['path'] as String
+        : null;
+    if (_files[id] == path) return;
+    if (path == null) {
+      _files.remove(id);
+      _fileIds.remove(id);
+    } else {
+      _files[id] = path;
+      _fileIds.add(id);
+    }
+    _downloadedTrackIds = UnmodifiableSetView(_fileIds);
+    _notifyDownloads();
+  }
+
   void _setFiles(Map<String, String> files) {
     if (mapEquals(_files, files)) return;
     _files = files;
-    _downloadedTrackIds = Set.unmodifiable(files.keys);
+    _fileIds
+      ..clear()
+      ..addAll(files.keys);
+    _downloadedTrackIds = UnmodifiableSetView(_fileIds);
   }
 
   Future<void> _loadCache() async {
     final db = _database;
     final generation = _generation;
     if (db == null) return;
+    final uploadChanges = _uploadLoadChanges = <String, UploadJob?>{};
+    final fileChanges = _fileLoadChanges = <String, Map<String, dynamic>?>{};
+    try {
+      await _readCache(db, generation, uploadChanges, fileChanges);
+    } finally {
+      _uploadLoadChanges = null;
+      _fileLoadChanges = null;
+    }
+  }
+
+  Future<void> _readCache(
+    CacheDatabase db,
+    int generation,
+    Map<String, UploadJob?> uploadChanges,
+    Map<String, Map<String, dynamic>?> fileChanges,
+  ) async {
     final tracks = (await db.list('track')).map(Track.fromJson).toList()
       ..sort((a, b) => a.title.toLowerCase().compareTo(b.title.toLowerCase()));
     final playlists =
@@ -406,7 +472,23 @@ class AppController extends ChangeNotifier implements SystemMediaArtwork {
     _tracksById = {for (final track in tracks) track.id: track};
     _artwork?.updateTracks(tracks);
     _playlists = List.unmodifiable(playlists);
-    _uploads = List.unmodifiable(uploads);
+    final mergedUploads = {for (final job in uploads) job.id: job};
+    for (final entry in uploadChanges.entries) {
+      if (entry.value == null) {
+        mergedUploads.remove(entry.key);
+      } else {
+        mergedUploads[entry.key] = entry.value!;
+      }
+    }
+    _setUploads(mergedUploads.values);
+    for (final entry in fileChanges.entries) {
+      final record = entry.value;
+      if (record == null || hashes[entry.key] != record['sha256']) {
+        files.remove(entry.key);
+      } else {
+        files[entry.key] = record['path'] as String;
+      }
+    }
     _pins = List.unmodifiable(pins);
     _wantedDownloads = pinReferences(pins, tracks, playlists).keys.toSet();
     _setFiles(files);
@@ -528,7 +610,7 @@ class AppController extends ChangeNotifier implements SystemMediaArtwork {
     _tracks = const [];
     _tracksById = const {};
     _playlists = const [];
-    _uploads = const [];
+    _setUploads(const []);
     _pins = const [];
     _wantedDownloads = {};
     _setFiles({});
@@ -853,13 +935,7 @@ class AppController extends ChangeNotifier implements SystemMediaArtwork {
   Future<void> verifyDownloads() {
     _requireDatabase();
     final transfers = _transfers!;
-    final generation = _generation;
-    final operation = () async {
-      await transfers.verifyDownloads();
-      if (generation == _generation && !_locking && !_shuttingDown) {
-        await _reloadFiles();
-      }
-    }();
+    final operation = transfers.verifyDownloads();
     _downloadMaintenanceOperations.add(operation);
     return operation.whenComplete(
       () => _downloadMaintenanceOperations.remove(operation),
@@ -932,7 +1008,6 @@ class AppController extends ChangeNotifier implements SystemMediaArtwork {
       if (!_canPublish(db) || generation != _generation) return;
       await transfers.redownloadTrack(track, tracks, playlists, pins);
       if (!_canPublish(db) || generation != _generation) return;
-      await _reloadFiles();
       final progress = transfers.progressFor(track.id);
       if (progress?.status != DownloadStatus.downloaded) {
         throw StateError(
@@ -1099,8 +1174,7 @@ class AppController extends ChangeNotifier implements SystemMediaArtwork {
         if (replacement != null) return replacement;
       }
       if (held || record == null) {
-        _setFiles(Map.of(_files)..remove(track.id));
-        _notifyDownloads();
+        _updateFile(track.id, null);
       }
       progress = transfers.progressFor(track.id);
       throw LocalAudioUnavailable(
@@ -1296,34 +1370,41 @@ class AppController extends ChangeNotifier implements SystemMediaArtwork {
   });
   bool isPinned(String type, String id) =>
       _pins.any((pin) => pin.type == type && pin.id == id);
-  Future<void> _pin(String type, String id, bool pinned) async {
+  Future<void> _pin(String type, Iterable<String> ids, bool pinned) async {
     final db = _requireDatabase();
-    final key = jsonEncode([type, id]);
-    if (pinned) {
-      await db.put('pin', key, PinSelection(type, id).toJson());
-    } else {
-      await db.remove('pin', key);
-    }
+    final selection = ids.toSet();
+    if (selection.isEmpty) return;
+    await db.transaction(() async {
+      for (final id in selection) {
+        final key = jsonEncode([type, id]);
+        if (pinned) {
+          await db.put('pin', key, PinSelection(type, id).toJson());
+        } else {
+          await db.remove('pin', key);
+        }
+      }
+    });
+    if (!_canPublish(db)) return;
     await _reloadCache();
-    unawaited(_background(_transfers!.reconcile(tracks, playlists, pins)));
+    if (_canPublish(db)) {
+      unawaited(_background(_transfers!.reconcile(tracks, playlists, pins)));
+    }
   }
 
+  Future<void> pinTracks(Iterable<String> ids, {bool pinned = true}) =>
+      _pin('track', ids, pinned);
   Future<void> pinTrack(String id, {bool pinned = true}) =>
-      _pin('track', id, pinned);
+      pinTracks([id], pinned: pinned);
   Future<void> pinAlbum(String album, String artist, {bool pinned = true}) =>
-      _pin('album', albumPinId(album, artist), pinned);
+      _pin('album', [albumPinId(album, artist)], pinned);
   Future<void> pinPlaylist(String id, {bool pinned = true}) =>
-      _pin('playlist', id, pinned);
+      _pin('playlist', [id], pinned);
   // Local upload work is tracked separately from online mutations: copying or
   // cancelling offline must not clear isOffline, nor lock out other enqueues.
   Future<void> _uploadOperation(Future<void> Function(TransferService) action) {
     _requireDatabase();
     final transfers = _transfers!;
-    final generation = _generation;
-    final operation = () async {
-      await action(transfers);
-      if (!_locking && generation == _generation) await _reloadUploads();
-    }();
+    final operation = action(transfers);
     _uploadOperations.add(operation);
     return operation.whenComplete(() => _uploadOperations.remove(operation));
   }

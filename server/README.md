@@ -224,10 +224,21 @@ regeneration is optional: `bash scripts/generate-fixtures.sh` (requires FFmpeg).
   a hard kill or total process-memory guarantee. For hostile public uploads, add
   a resource-limited worker process/container and decoder validation. The service
   is intended for authenticated personal-library uploads, not anonymous hosting.
-* One process, a global mutation lock, up to 128 in-flight routed requests, 60-second
-  request timeout. Parsing/finalizing media holds the mutation lock; large imports
-  can temporarily delay other writes and media opens. Already-open streams proceed.
-  Proxy-level admission controls remain necessary, particularly for slow clients.
+* One process, a global mutation lock, up to 32 admitted requests/responses, a
+  shared 64 MiB request/response byte budget (64 KiB units), and a 60-second handler
+  timeout. Requests reserve the route body maximum before body polling (normally
+  2 MiB). Buffered JSON responses reserve any excess of their actual serialized
+  body size over that request reservation, rounded up to 64 KiB. Either admission
+  fails immediately with HTTP 429 rather than queueing; a JSON response that cannot
+  acquire its excess budget is discarded and replaced with a small 429 response.
+  Base and excess reservations survive handler completion until the response body
+  and emitted bytes are consumed or dropped, including JSON queued behind socket
+  backpressure in the built-in Axum/Tokio TCP transport. Streaming media's advertised
+  Content-Length is not charged as buffered JSON; media also has a 32-stream limit.
+  These bound admitted outstanding bodies, not transient handler/JSON serialization
+  allocations (which occur before response admission), response write deadlines,
+  or total process memory. Proxy connection/write/idle limits remain necessary;
+  copying/buffering proxies or custom transports must enforce their own bounds.
 * Full library responses have no pagination because the v1 contract has none.
   Stats recompute via SQL windows over the account's events, so queries get slower
   with a very large history. A materialized/rebuildable aggregate is a future
