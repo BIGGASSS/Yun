@@ -32,6 +32,8 @@ class _App extends PlayerTestApp {
   int trackReads = 0, downloadedReads = 0, progressReads = 0;
   @override
   bool hasRunningDownloads = false;
+  @override
+  ({int completed, int total}) downloadBatchProgress = (completed: 0, total: 0);
   void changed() => notifyListeners();
   @override
   List<Track> get tracks {
@@ -400,6 +402,7 @@ void main() {
         (i) => Track(id: '$i', title: 'Track $i', sizeBytes: 100),
       );
       app.selections = List.generate(5000, (i) => PinSelection('track', '$i'));
+      app.downloadBatchProgress = (completed: 0, total: 5000);
       try {
         await tester.pumpWidget(
           MaterialApp(
@@ -427,10 +430,19 @@ void main() {
           expect(app.progressReads, lessThan(40));
           expect(identical(tester.widget(activity), scroll), isTrue);
           expect(
-            find.text('0 of 5000 selected tracks ready · 5000 remaining'),
+            find.text('0/5000 downloads complete'),
             running ? findsOneWidget : findsNothing,
           );
         }
+        // Counter-only notifications update the summary, not the inventory.
+        app.hasRunningDownloads = true;
+        app.downloadBatchProgress = (completed: 1, total: 5000);
+        app.progressReads = 0;
+        app.downloadChanges.notifyListeners();
+        await tester.pump();
+        expect(find.text('1/5000 downloads complete'), findsOneWidget);
+        expect(app.progressReads, lessThan(40));
+        expect(identical(tester.widget(activity), scroll), isTrue);
         expect(tester.takeException(), isNull);
       } finally {
         await tester.pumpWidget(const SizedBox.shrink());
@@ -474,6 +486,7 @@ void main() {
           find.byType(CustomScrollView),
         );
         app.hasRunningDownloads = true;
+        app.downloadBatchProgress = (completed: 0, total: 1);
         app.progress['2500'] = const DownloadProgress(
           trackId: '2500',
           totalBytes: 100,
@@ -487,16 +500,13 @@ void main() {
           isTrue,
         );
         expect(find.textContaining('Downloading · 50 B'), findsOneWidget);
-        expect(
-          find.text('0 of 1 selected tracks ready · 1 remaining'),
-          findsOneWidget,
-        );
+        expect(find.text('0/1 downloads complete'), findsOneWidget);
         app.downloaded = Set.unmodifiable({...app.downloaded, '2500'});
         app.hasRunningDownloads = false;
         app.progress.remove('2500');
         app.downloadChanges.notifyListeners();
         await tester.pump();
-        expect(find.textContaining('selected tracks ready'), findsNothing);
+        expect(find.textContaining('downloads complete'), findsNothing);
         expect(find.textContaining('2501 tracks'), findsOneWidget);
         expect(find.textContaining('Downloading ·'), findsNothing);
       } finally {

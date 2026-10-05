@@ -92,6 +92,10 @@ class AppController extends ChangeNotifier implements SystemMediaArtwork {
   Set<String> get downloadedTrackIds => _downloadedTrackIds;
   bool get hasRunningDownloads =>
       !_locking && !_shuttingDown && (_transfers?.hasRunningDownloads ?? false);
+  ({int completed, int total}) get downloadBatchProgress =>
+      !_locking && !_shuttingDown
+      ? _transfers?.downloadBatchProgress ?? (completed: 0, total: 0)
+      : (completed: 0, total: 0);
   int get downloadSectionsRevision =>
       !_locking ? _transfers?.downloadSectionsRevision ?? 0 : 0;
   final ChangeNotifier downloadChanges = ChangeNotifier();

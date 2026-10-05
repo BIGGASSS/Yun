@@ -40,6 +40,9 @@ class PlayerTestApp extends ChangeNotifier implements AppController {
   int get downloadSectionsRevision => 0;
   @override
   bool get hasRunningDownloads => false;
+  @override
+  ({int completed, int total}) get downloadBatchProgress =>
+      (completed: 0, total: 0);
 
   final FakeEngine engine;
   bool disconnected = false;
