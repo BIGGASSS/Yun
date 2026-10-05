@@ -84,7 +84,6 @@ class DownloadsScreen extends StatelessWidget {
       }
     }
     wanted.retainAll(tracks.map((track) => track.id));
-    final ready = wanted.intersection(downloadedIds).length;
     return LayoutBuilder(
       builder: (context, constraints) => DefaultTabController(
         length: 2,
@@ -138,25 +137,42 @@ class DownloadsScreen extends StatelessWidget {
                   CustomScrollView(
                     key: const PageStorageKey('download-activity'),
                     slivers: [
-                      if (wanted.isNotEmpty)
-                        SliverPadding(
-                          padding: const EdgeInsets.fromLTRB(24, 20, 24, 0),
-                          sliver: SliverToBoxAdapter(
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                QuietProgress(
-                                  value: ready / wanted.length,
-                                  label: 'Offline download completion',
-                                ),
-                                const SizedBox(height: 8),
-                                Text(
-                                  '$ready of ${wanted.length} selected tracks ready${ready < wanted.length ? ' · ${wanted.length - ready} remaining' : ''}',
-                                ),
-                              ],
-                            ),
-                          ),
+                      SelectedBuilder(
+                        listenable: Listenable.merge([
+                          app,
+                          app.downloadChanges,
+                        ]),
+                        select: () => (
+                          app.hasRunningDownloads,
+                          app.downloadBatchProgress,
                         ),
+                        builder: (context, state, _) {
+                          final progress = state.$2;
+                          if (!state.$1 || progress.total == 0) {
+                            return const SliverToBoxAdapter(
+                              child: SizedBox.shrink(),
+                            );
+                          }
+                          return SliverPadding(
+                            padding: const EdgeInsets.fromLTRB(24, 20, 24, 0),
+                            sliver: SliverToBoxAdapter(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  QuietProgress(
+                                    value: progress.completed / progress.total,
+                                    label: 'Offline download completion',
+                                  ),
+                                  const SizedBox(height: 8),
+                                  Text(
+                                    '${progress.completed}/${progress.total} downloads complete',
+                                  ),
+                                ],
+                              ),
+                            ),
+                          );
+                        },
+                      ),
                       _section(
                         context,
                         'Done',

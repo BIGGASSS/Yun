@@ -66,6 +66,14 @@ class _DownloadsApp extends PlayerTestApp {
   @override
   int get downloadSectionsRevision => revision;
   @override
+  ({int completed, int total}) downloadBatchProgress = (completed: 0, total: 0);
+  @override
+  bool get hasRunningDownloads => progress.values.any(
+    (value) =>
+        value.status == DownloadStatus.downloading ||
+        value.status == DownloadStatus.verifying,
+  );
+  @override
   bool isPinned(String type, String id) =>
       selections.any((pin) => pin.type == type && pin.id == id);
   @override
@@ -247,6 +255,143 @@ void main() {
   }
 
   Finder clearButton() => find.widgetWithText(TextButton, 'Clear All');
+
+  Finder completionProgress() => find.byWidgetPredicate(
+    (widget) =>
+        widget is LinearProgressIndicator &&
+        widget.semanticsLabel == 'Offline download completion',
+  );
+
+  downloadsTest('hides completion summary when no downloads are running', (
+    tester,
+  ) async {
+    final app = await open(tester);
+    // Queued and failed selections are not running jobs.
+    expect(completionProgress(), findsNothing);
+    expect(find.textContaining('downloads complete'), findsNothing);
+
+    app.setProgress('pending', DownloadStatus.downloaded, received: 100);
+    await tester.pumpAndSettle();
+    expect(completionProgress(), findsNothing);
+    expect(find.textContaining('downloads complete'), findsNothing);
+
+    app.setProgress('failed', DownloadStatus.downloaded, received: 100);
+    await tester.pumpAndSettle();
+    // All selections are ready, as in the completed-download screenshot.
+    expect(completionProgress(), findsNothing);
+    expect(find.textContaining('downloads complete'), findsNothing);
+    expect(find.text('Finished song'), findsOneWidget);
+    expect(find.text('Waiting song'), findsOneWidget);
+    expect(find.text('Failed song'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
+  downloadsTest('completion summary follows running jobs without regrouping', (
+    tester,
+  ) async {
+    final app = await open(tester);
+    app.downloadBatchProgress = (completed: 0, total: 1);
+    final activity = find.byKey(const PageStorageKey('download-activity'));
+    final scroll = tester.widget<CustomScrollView>(activity);
+
+    for (final status in [
+      DownloadStatus.downloading,
+      DownloadStatus.verifying,
+      DownloadStatus.queued,
+      DownloadStatus.downloading,
+    ]) {
+      app.setProgress('pending', status, received: 50);
+      await tester.pump();
+      final running = status != DownloadStatus.queued;
+      expect(completionProgress(), running ? findsOneWidget : findsNothing);
+      expect(
+        find.text('0/1 downloads complete'),
+        running ? findsOneWidget : findsNothing,
+      );
+      if (running) {
+        expect(
+          tester.widget<LinearProgressIndicator>(completionProgress()).value,
+          0,
+        );
+      }
+      expect(identical(tester.widget(activity), scroll), isTrue);
+    }
+
+    final indicator = tester.widget(completionProgress());
+    app.setProgress('pending', DownloadStatus.downloading, received: 75);
+    await tester.pump();
+    expect(identical(tester.widget(completionProgress()), indicator), isTrue);
+    expect(identical(tester.widget(activity), scroll), isTrue);
+
+    app.setProgress('pending', DownloadStatus.failed);
+    await tester.pumpAndSettle();
+    expect(completionProgress(), findsNothing);
+    expect(find.textContaining('downloads complete'), findsNothing);
+    expect(tester.takeException(), isNull);
+  });
+
+  downloadsTest('keeps completion summary while another download is running', (
+    tester,
+  ) async {
+    final app = await open(tester);
+    app.downloadBatchProgress = (completed: 0, total: 2);
+    app.setProgress('pending', DownloadStatus.downloading, received: 50);
+    app.setProgress('failed', DownloadStatus.downloading, received: 50);
+    await tester.pump();
+    expect(completionProgress(), findsOneWidget);
+    expect(find.text('0/2 downloads complete'), findsOneWidget);
+
+    app.downloadBatchProgress = (completed: 1, total: 2);
+    app.setProgress('pending', DownloadStatus.downloaded, received: 100);
+    await tester.pump();
+    expect(completionProgress(), findsOneWidget);
+    expect(
+      tester.widget<LinearProgressIndicator>(completionProgress()).value,
+      1 / 2,
+    );
+    expect(find.text('1/2 downloads complete'), findsOneWidget);
+
+    app.downloadBatchProgress = (completed: 2, total: 2);
+    app.setProgress('failed', DownloadStatus.downloaded, received: 100);
+    await tester.pumpAndSettle();
+    expect(completionProgress(), findsNothing);
+    expect(find.textContaining('downloads complete'), findsNothing);
+    expect(tester.takeException(), isNull);
+  });
+
+  downloadsTest('505 earlier downloads do not count toward the current task', (
+    tester,
+  ) async {
+    final initial = _DownloadsApp(
+      library: List.generate(
+        506,
+        (i) => Track(id: '$i', title: 'Track $i', sizeBytes: 100),
+      ),
+      selections: List.generate(506, (i) => PinSelection('track', '$i')),
+    );
+    initial.localIds = Set.unmodifiable(List.generate(505, (i) => '$i'));
+    for (final id in initial.localIds) {
+      initial.progress[id] = DownloadProgress(
+        trackId: id,
+        totalBytes: 100,
+        status: DownloadStatus.downloaded,
+        historyCleared: true,
+      );
+    }
+    initial.downloadBatchProgress = (completed: 0, total: 1);
+    initial.setProgress('505', DownloadStatus.downloading, received: 50);
+    await open(tester, initialApp: initial);
+
+    expect(find.text('0/1 downloads complete'), findsOneWidget);
+    expect(
+      tester.widget<LinearProgressIndicator>(completionProgress()).value,
+      0,
+    );
+    expect(find.text('No completed downloads'), findsOneWidget);
+    expect(find.text('Track 505'), findsOneWidget);
+    expect(find.textContaining('selected tracks ready'), findsNothing);
+    expect(tester.takeException(), isNull);
+  });
 
   downloadsTest('separates Done, Pending, Failed and lists every local track', (
     tester,

@@ -296,6 +296,18 @@ class TransferService {
   final void Function()? onVerificationChanged;
   final DownloadFileVerifier Function() _verificationWorkerFactory;
   final Map<String, DownloadProgress> _downloads = {};
+  final Set<String> _runningDownloadIds = {};
+  final Set<String> _downloadBatchIds = {};
+  final Set<String> _completedDownloadBatchIds = {};
+
+  /// Live workers only; queued and restored interrupted jobs are not running.
+  bool get hasRunningDownloads => _runningDownloadIds.isNotEmpty;
+
+  /// Current reconciliation batch, excluding downloads completed before it.
+  ({int completed, int total}) get downloadBatchProgress => (
+    completed: _completedDownloadBatchIds.length,
+    total: _downloadBatchIds.length,
+  );
   Map<String, DownloadProgress> get downloads => Map.unmodifiable(_downloads);
   DownloadProgress? progressFor(String trackId) => _downloads[trackId];
   int _downloadSectionsRevision = 0;
@@ -468,6 +480,8 @@ class TransferService {
     });
     if (failed == null) return false;
     _downloads[track.id] = failed!;
+    _runningDownloadIds.remove(track.id);
+    _completedDownloadBatchIds.remove(track.id);
     _downloadSectionsRevision++;
     (onFilesChanged ?? onChanged)();
     (onDownloadChanged ?? onChanged)();
@@ -658,6 +672,8 @@ class TransferService {
         });
         if (outcome == FileVerificationOutcome.invalid) {
           _downloads[id] = invalidProgress!;
+          _runningDownloadIds.remove(id);
+          _completedDownloadBatchIds.remove(id);
           damaged.add(id);
           invalid++;
           _downloadSectionsRevision++;
@@ -797,6 +813,19 @@ class TransferService {
       error: error,
       previouslyDownloaded: previous?.requiresOfflinePlayback ?? false,
     );
+    if (status == DownloadStatus.downloading ||
+        status == DownloadStatus.verifying) {
+      _runningDownloadIds.add(track.id);
+    } else {
+      _runningDownloadIds.remove(track.id);
+    }
+    if (_downloadBatchIds.contains(track.id)) {
+      if (status == DownloadStatus.downloaded) {
+        _completedDownloadBatchIds.add(track.id);
+      } else {
+        _completedDownloadBatchIds.remove(track.id);
+      }
+    }
     if (_downloadSection(previous?.status) != _downloadSection(status) ||
         previous?.historyCleared == true) {
       _downloadSectionsRevision++;
@@ -1129,6 +1158,7 @@ class TransferService {
   }
 
   Future<void> _drainReconciliations() async {
+    var pausedForVerification = false;
     try {
       while (!_closed &&
           _verificationRunning == null &&
@@ -1137,8 +1167,26 @@ class TransferService {
         _nextReconciliation = null;
         await _reconcile(tracks, playlists, pins);
       }
+      pausedForVerification =
+          !_closed &&
+          _verificationRunning != null &&
+          _nextReconciliation != null;
     } finally {
       _downloadsRunning = null;
+      if (!pausedForVerification && _downloadBatchIds.isNotEmpty) {
+        _downloadBatchIds.clear();
+        _completedDownloadBatchIds.clear();
+        (onDownloadChanged ?? onChanged)();
+      }
+    }
+  }
+
+  void _startDownloadTask(String id) {
+    final previous = downloadBatchProgress;
+    _downloadBatchIds.add(id);
+    _completedDownloadBatchIds.remove(id);
+    if (downloadBatchProgress != previous) {
+      (onDownloadChanged ?? onChanged)();
     }
   }
 
@@ -1161,6 +1209,7 @@ class TransferService {
     _downloads.removeWhere(
       (id, progress) => !refs.containsKey(id) && !progress.repairRequired,
     );
+    _runningDownloadIds.retainAll(_downloads.keys);
     if (removedProgress) {
       _downloadSectionsRevision++;
       (onDownloadChanged ?? onChanged)();
@@ -1197,6 +1246,23 @@ class TransferService {
       }
     }
     if (removedFiles) (onFilesChanged ?? onChanged)();
+    // Plan all actual download work before starting the first track. Cached
+    // files and repair-held downloads are not tasks unless explicitly retried.
+    final previousBatch = downloadBatchProgress;
+    _downloadBatchIds.retainAll(refs.keys);
+    _completedDownloadBatchIds.retainAll(_downloadBatchIds);
+    for (final track in tracks.where((t) => refs.containsKey(t.id))) {
+      final progress = _downloads[track.id];
+      if (_requestedRedownloads.contains(track.id) ||
+          (files[track.id] == null &&
+              progress?.status != DownloadStatus.downloaded &&
+              progress?.repairRequired != true)) {
+        _downloadBatchIds.add(track.id);
+      }
+    }
+    if (downloadBatchProgress != previousBatch) {
+      (onDownloadChanged ?? onChanged)();
+    }
     for (final track in tracks.where((t) => refs.containsKey(t.id))) {
       if (_closed) break;
       if (_verificationRunning != null) {
@@ -1207,6 +1273,8 @@ class TransferService {
       if (!redownload && _downloads[track.id]?.repairRequired == true) continue;
       try {
         if (redownload) {
+          // A repair request can arrive after this pass planned its batch.
+          _startDownloadTask(track.id);
           // A decoder error does not prove corruption. Keep the old bytes until
           // the verified replacement is ready, but stop exposing its reference.
           await database.transaction(() async {
@@ -1247,6 +1315,7 @@ class TransferService {
           await holdUnavailableDownload(track);
           continue;
         }
+        _startDownloadTask(track.id);
         final file = await _download(track);
         await database.put('file', track.id, {
           'id': track.id,

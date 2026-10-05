@@ -37,12 +37,37 @@ class _GatedDatabase extends CacheDatabase {
   }
 }
 
+class _DownloadRequestGate {
+  final _started = Completer<void>();
+  final _release = Completer<void>();
+  RequestOptions? request;
+
+  Future<void> get started =>
+      _started.future.timeout(const Duration(seconds: 5));
+
+  Future<ResponseBody> respond(
+    RequestOptions options,
+    ResponseBody response,
+  ) async {
+    if (_started.isCompleted) throw StateError('Unexpected duplicate request');
+    request = options;
+    _started.complete();
+    await _release.future;
+    return response;
+  }
+
+  void release() {
+    if (!_release.isCompleted) _release.complete();
+  }
+}
+
 void main() {
   late Directory root;
   late CacheDatabase db;
   late ApiClient api;
   late TransferService transfers;
   late List<DownloadProgress> observed;
+  late List<bool> observedRunning;
   final bytes = List.generate(100, (i) => i);
   late Track track;
   const pins = [PinSelection('track', 't')];
@@ -56,7 +81,10 @@ void main() {
     onError: (_) {},
     onDownloadChanged: () {
       final value = transfers.downloads['t'];
-      if (value != null) observed.add(value);
+      if (value != null) {
+        observed.add(value);
+        observedRunning.add(transfers.hasRunningDownloads);
+      }
     },
   );
 
@@ -64,6 +92,7 @@ void main() {
     root = await Directory.systemTemp.createTemp('yun-progress-');
     db = _GatedDatabase();
     observed = [];
+    observedRunning = [];
     api = ApiClient(dio: Dio(), credentials: MemoryCredentials())
       ..session = SessionCredentials(
         account: const Account(
@@ -87,6 +116,424 @@ void main() {
     await transfers.close();
     await db.close();
     await root.delete(recursive: true);
+  });
+
+  group('current download batch progress', () {
+    Track anotherTrack(String id) =>
+        Track(id: id, title: id, sizeBytes: bytes.length, sha256: track.sha256);
+
+    Future<File> cache(Track value) async {
+      final file = await File('${root.path}/${value.id}.audio')
+          .writeAsBytes(bytes);
+      await db.put('track', value.id, value.toJson());
+      await db.put('file', value.id, {
+        'id': value.id,
+        'path': file.path,
+        'sha256': value.sha256,
+        'references': 1,
+      });
+      await db.put(
+        'download',
+        value.id,
+        DownloadProgress(
+          trackId: value.id,
+          totalBytes: value.sizeBytes,
+          receivedBytes: value.sizeBytes,
+          status: DownloadStatus.downloaded,
+        ).toJson(),
+      );
+      return file;
+    }
+
+    List<String> gateRequests(Map<String, _DownloadRequestGate> gates) {
+      final requests = <String>[];
+      api.dio.httpClientAdapter = FakeAdapter((options, _) {
+        final id = Uri.parse(options.path).pathSegments.reversed.elementAt(1);
+        requests.add(id);
+        return gates[id]!.respond(options, ResponseBody.fromBytes(bytes, 200));
+      });
+      return requests;
+    }
+
+    test(
+      '505 cached downloads do not count, including after clearing Done',
+      () async {
+        final cached = List.generate(505, (i) => anotherTrack('cached-$i'));
+        for (final value in cached) {
+          await cache(value);
+        }
+        await transfers.restoreDownloads();
+        expect(transfers.downloads, hasLength(505));
+        expect(transfers.downloadBatchProgress, (completed: 0, total: 0));
+        final allTracks = [...cached, track];
+        final allPins = [
+          for (final value in allTracks) PinSelection('track', value.id),
+        ];
+        final gate = _DownloadRequestGate();
+        final requests = gateRequests({track.id: gate});
+        final running = transfers.reconcile(allTracks, [], allPins);
+        try {
+          await gate.started;
+          expect(transfers.hasRunningDownloads, isTrue);
+          expect(transfers.downloadBatchProgress, (completed: 0, total: 1));
+          await transfers.clearDoneDownloads(allTracks);
+          expect(
+            cached.every(
+              (value) => transfers.progressFor(value.id)!.historyCleared,
+            ),
+            isTrue,
+          );
+          expect(transfers.progressFor(track.id)!.historyCleared, isFalse);
+          expect(transfers.downloadBatchProgress, (completed: 0, total: 1));
+        } finally {
+          gate.release();
+          await running;
+        }
+        expect(requests, [track.id]);
+        expect(
+          transfers.progressFor(track.id)!.status,
+          DownloadStatus.downloaded,
+        );
+        expect(transfers.hasRunningDownloads, isFalse);
+        expect(transfers.downloadBatchProgress, (completed: 0, total: 0));
+      },
+    );
+
+    test(
+      'plans both sequential tasks and retains the first completion',
+      () async {
+        final second = anotherTrack('second');
+        final allTracks = [track, second];
+        final allPins = [
+          for (final value in allTracks) PinSelection('track', value.id),
+        ];
+        final firstGate = _DownloadRequestGate();
+        final secondGate = _DownloadRequestGate();
+        final requests = gateRequests({
+          track.id: firstGate,
+          second.id: secondGate,
+        });
+        final committed = Completer<void>(), releaseCommit = Completer<void>();
+        (db as _GatedDatabase).afterPut = (kind) async {
+          if (kind == 'file' && !committed.isCompleted) {
+            committed.complete();
+            await releaseCommit.future;
+          }
+        };
+        final running = transfers.reconcile(allTracks, [], allPins);
+        try {
+          await firstGate.started;
+          expect(transfers.downloadBatchProgress, (completed: 0, total: 2));
+          expect(transfers.hasRunningDownloads, isTrue);
+          expect(
+            transfers.progressFor(second.id)!.status,
+            DownloadStatus.queued,
+          );
+          firstGate.release();
+          await committed.future.timeout(const Duration(seconds: 5));
+          expect(
+            transfers.progressFor(track.id)!.status,
+            DownloadStatus.verifying,
+          );
+          expect(transfers.downloadBatchProgress, (completed: 0, total: 2));
+          releaseCommit.complete();
+          await secondGate.started;
+          expect(
+            transfers.progressFor(track.id)!.status,
+            DownloadStatus.downloaded,
+          );
+          expect(transfers.hasRunningDownloads, isTrue);
+          expect(transfers.downloadBatchProgress, (completed: 1, total: 2));
+          await transfers.clearDoneDownloads(allTracks);
+          expect(transfers.progressFor(track.id)!.historyCleared, isTrue);
+          expect(transfers.downloadBatchProgress, (completed: 1, total: 2));
+        } finally {
+          firstGate.release();
+          secondGate.release();
+          if (!releaseCommit.isCompleted) releaseCommit.complete();
+          await running;
+        }
+        expect(requests, [track.id, second.id]);
+        expect(
+          transfers.progressFor(second.id)!.status,
+          DownloadStatus.downloaded,
+        );
+        expect(transfers.hasRunningDownloads, isFalse);
+        expect(transfers.downloadBatchProgress, (completed: 0, total: 0));
+      },
+    );
+
+    test(
+      'failure is not completion and a retry excludes earlier successes',
+      () async {
+        final failed = anotherTrack('failed');
+        final last = anotherTrack('last');
+        final allTracks = [track, failed, last];
+        final allPins = [
+          for (final value in allTracks) PinSelection('track', value.id),
+        ];
+        for (final value in allTracks) {
+          await db.put('track', value.id, value.toJson());
+        }
+        final lastGate = _DownloadRequestGate(),
+            retryGate = _DownloadRequestGate();
+        final requests = <String>[];
+        var attempts = 0;
+        Stream<Uint8List> broken() async* {
+          yield Uint8List.fromList(bytes.take(30).toList());
+          throw StateError('connection lost');
+        }
+
+        api.dio.httpClientAdapter = FakeAdapter((options, _) {
+          final id = Uri.parse(options.path).pathSegments.reversed.elementAt(1);
+          requests.add(id);
+          if (id == failed.id) {
+            if (++attempts == 1) return ResponseBody(broken(), 200);
+            return retryGate.respond(
+              options,
+              ResponseBody.fromBytes(
+                bytes.sublist(30),
+                206,
+                headers: {
+                  'content-range': ['bytes 30-99/100'],
+                },
+              ),
+            );
+          }
+          if (id == last.id) {
+            return lastGate.respond(
+              options,
+              ResponseBody.fromBytes(bytes, 200),
+            );
+          }
+          return ResponseBody.fromBytes(bytes, 200);
+        });
+        final running = transfers.reconcile(allTracks, [], allPins);
+        try {
+          await lastGate.started;
+          expect(
+            transfers.progressFor(track.id)!.status,
+            DownloadStatus.downloaded,
+          );
+          expect(
+            transfers.progressFor(failed.id)!.status,
+            DownloadStatus.failed,
+          );
+          expect(transfers.progressFor(failed.id)!.receivedBytes, 30);
+          expect(transfers.downloadBatchProgress, (completed: 1, total: 3));
+        } finally {
+          lastGate.release();
+          await running;
+        }
+        expect(transfers.hasRunningDownloads, isFalse);
+        expect(transfers.downloadBatchProgress, (completed: 0, total: 0));
+        final retrying = transfers.reconcile(allTracks, [], allPins);
+        try {
+          await retryGate.started;
+          expect(retryGate.request!.headers['Range'], 'bytes=30-');
+          expect(transfers.hasRunningDownloads, isTrue);
+          expect(transfers.downloadBatchProgress, (completed: 0, total: 1));
+        } finally {
+          retryGate.release();
+          await retrying;
+        }
+        expect(requests, [track.id, failed.id, last.id, failed.id]);
+        expect(
+          transfers.progressFor(failed.id)!.status,
+          DownloadStatus.downloaded,
+        );
+        expect(transfers.downloadBatchProgress, (completed: 0, total: 0));
+      },
+    );
+
+    test(
+      'explicit redownload of a cached track is a fresh batch task',
+      () async {
+        final file = await cache(track);
+        await transfers.restoreDownloads();
+        await transfers.clearDoneDownloads([track]);
+        final gate = _DownloadRequestGate();
+        final requests = gateRequests({track.id: gate});
+        await transfers.reconcile([track], [], pins);
+        expect(requests, isEmpty);
+        expect(transfers.downloadBatchProgress, (completed: 0, total: 0));
+        final running = transfers.redownloadTrack(track, [track], [], pins);
+        try {
+          await gate.started;
+          expect(transfers.progressFor(track.id)!.historyCleared, isFalse);
+          expect(transfers.hasRunningDownloads, isTrue);
+          expect(transfers.downloadBatchProgress, (completed: 0, total: 1));
+          expect(await file.readAsBytes(), bytes);
+          await transfers.clearDoneDownloads([track]);
+          expect(transfers.downloadBatchProgress, (completed: 0, total: 1));
+        } finally {
+          gate.release();
+          await running;
+        }
+        expect(requests, [track.id]);
+        expect(
+          transfers.progressFor(track.id)!.status,
+          DownloadStatus.downloaded,
+        );
+        expect(transfers.downloadBatchProgress, (completed: 0, total: 0));
+      },
+    );
+
+    test('repair-held files are excluded until explicit redownload', () async {
+      final held = anotherTrack('held');
+      await (await cache(held)).delete();
+      await transfers.restoreDownloads();
+      expect(transfers.progressFor(held.id)!.repairRequired, isTrue);
+      final allTracks = [held, track];
+      final allPins = [
+        for (final value in allTracks) PinSelection('track', value.id),
+      ];
+      final newGate = _DownloadRequestGate(),
+          repairGate = _DownloadRequestGate();
+      final requests = gateRequests({track.id: newGate, held.id: repairGate});
+      final running = transfers.reconcile(allTracks, [], allPins);
+      try {
+        await newGate.started;
+        expect(transfers.downloadBatchProgress, (completed: 0, total: 1));
+        expect(transfers.progressFor(held.id)!.repairRequired, isTrue);
+        expect(requests, [track.id]);
+      } finally {
+        newGate.release();
+        await running;
+      }
+      expect(transfers.downloadBatchProgress, (completed: 0, total: 0));
+      final repairing = transfers.redownloadTrack(held, allTracks, [], allPins);
+      try {
+        await repairGate.started;
+        expect(transfers.progressFor(held.id)!.repairRequired, isFalse);
+        expect(transfers.downloadBatchProgress, (completed: 0, total: 1));
+      } finally {
+        repairGate.release();
+        await repairing;
+      }
+      expect(requests, [track.id, held.id]);
+      expect(transfers.progressFor(held.id)!.status, DownloadStatus.downloaded);
+      expect(transfers.downloadBatchProgress, (completed: 0, total: 0));
+    });
+
+    test(
+      'a newly pinned trailing task retains the earlier batch completion',
+      () async {
+        final added = anotherTrack('added');
+        final allTracks = [track, added];
+        final allPins = [
+          for (final value in allTracks) PinSelection('track', value.id),
+        ];
+        final firstGate = _DownloadRequestGate(),
+            addedGate = _DownloadRequestGate();
+        final requests = gateRequests({
+          track.id: firstGate,
+          added.id: addedGate,
+        });
+        final running = transfers.reconcile(allTracks, [], pins);
+        Future<void>? trailing;
+        try {
+          await firstGate.started;
+          expect(transfers.downloadBatchProgress, (completed: 0, total: 1));
+          trailing = transfers.reconcile(allTracks, [], allPins);
+          firstGate.release();
+          await addedGate.started;
+          expect(
+            transfers.progressFor(track.id)!.status,
+            DownloadStatus.downloaded,
+          );
+          expect(transfers.hasRunningDownloads, isTrue);
+          expect(transfers.downloadBatchProgress, (completed: 1, total: 2));
+          await transfers.clearDoneDownloads(allTracks);
+          expect(transfers.downloadBatchProgress, (completed: 1, total: 2));
+        } finally {
+          firstGate.release();
+          addedGate.release();
+          await Future.wait([running, ?trailing]);
+        }
+        expect(requests, [track.id, added.id]);
+        expect(
+          transfers.progressFor(added.id)!.status,
+          DownloadStatus.downloaded,
+        );
+        expect(transfers.hasRunningDownloads, isFalse);
+        expect(transfers.downloadBatchProgress, (completed: 0, total: 0));
+      },
+    );
+    test(
+      'verification pause retains the current batch until it resumes',
+      () async {
+        final second = anotherTrack('second');
+        final allTracks = [track, second];
+        final allPins = [
+          for (final value in allTracks) PinSelection('track', value.id),
+        ];
+        for (final value in allTracks) {
+          await db.put('track', value.id, value.toJson());
+        }
+        final firstGate = _DownloadRequestGate(),
+            secondGate = _DownloadRequestGate();
+        final requests = gateRequests({
+          track.id: firstGate,
+          second.id: secondGate,
+        });
+        final scanCommitted = Completer<void>(),
+            releaseScan = Completer<void>();
+        (db as _GatedDatabase).afterCommit = () async {
+          if (!scanCommitted.isCompleted) {
+            scanCommitted.complete();
+            await releaseScan.future;
+          }
+        };
+        final running = transfers.reconcile(allTracks, [], allPins);
+        Future<void>? scanning, deferred, resumed;
+        try {
+          await firstGate.started;
+          expect(transfers.downloadBatchProgress, (completed: 0, total: 2));
+          scanning = transfers.verifyDownloads();
+          firstGate.release();
+          await scanCommitted.future.timeout(const Duration(seconds: 5));
+          await running;
+          expect(
+            transfers.verificationProgress!.status,
+            VerificationStatus.running,
+          );
+          expect(
+            transfers.progressFor(track.id)!.status,
+            DownloadStatus.downloaded,
+          );
+          expect(
+            transfers.progressFor(second.id)!.status,
+            DownloadStatus.queued,
+          );
+          expect(transfers.hasRunningDownloads, isFalse);
+          expect(transfers.downloadBatchProgress, (completed: 1, total: 2));
+          deferred = transfers.reconcile(allTracks, [], allPins);
+          await transfers.clearDoneDownloads(allTracks);
+          expect(transfers.downloadBatchProgress, (completed: 1, total: 2));
+          releaseScan.complete();
+          await secondGate.started;
+          // The initial drain ends at the verification pause. Join the resumed
+          // drain so cleanup waits for the second worker, not just the scan.
+          resumed = transfers.reconcile(allTracks, [], allPins);
+          expect(transfers.hasRunningDownloads, isTrue);
+          expect(transfers.downloadBatchProgress, (completed: 1, total: 2));
+        } finally {
+          firstGate.release();
+          secondGate.release();
+          if (!releaseScan.isCompleted) releaseScan.complete();
+          await Future.wait([running, ?scanning, ?deferred, ?resumed]);
+        }
+        expect(requests, [track.id, second.id]);
+        expect(
+          transfers.progressFor(second.id)!.status,
+          DownloadStatus.downloaded,
+        );
+        expect(transfers.verificationProgress!.validFiles, 1);
+        expect(transfers.hasRunningDownloads, isFalse);
+        expect(transfers.downloadBatchProgress, (completed: 0, total: 0));
+      },
+    );
   });
 
   test(
@@ -177,12 +624,14 @@ void main() {
           },
         );
       });
+      expect(transfers.hasRunningDownloads, isFalse);
       final running = transfers.reconcile([track], [], pins);
       await delivered.future;
       while (transfers.downloads['t']!.receivedBytes < 60) {
         await Future<void>.delayed(const Duration(milliseconds: 1));
       }
       expect(transfers.downloads['t']!.status, DownloadStatus.downloading);
+      expect(transfers.hasRunningDownloads, isTrue);
       expect(transfers.downloads['t']!.receivedBytes, 60);
       expect(transfers.downloads['t']!.fraction, .6);
       expect(await db.get('file', 't'), isNull);
@@ -191,6 +640,15 @@ void main() {
       expect(observed.any((p) => p.receivedBytes == 40), isTrue);
       expect(observed.any((p) => p.status == DownloadStatus.verifying), isTrue);
       expect(transfers.downloads['t']!.status, DownloadStatus.downloaded);
+      expect(transfers.hasRunningDownloads, isFalse);
+      expect(
+        observedRunning,
+        observed.map(
+          (progress) =>
+              progress.status == DownloadStatus.downloading ||
+              progress.status == DownloadStatus.verifying,
+        ),
+      );
       expect((await db.get('download', 't'))!['received_bytes'], 100);
       expect(await File('${root.path}/t.audio').readAsBytes(), bytes);
     },
@@ -207,6 +665,9 @@ void main() {
     );
     await transfers.reconcile([track], [], pins);
     expect(transfers.downloads['t']!.status, DownloadStatus.failed);
+    expect(transfers.hasRunningDownloads, isFalse);
+    expect(observedRunning, contains(true));
+    expect(observedRunning.last, isFalse);
     expect(transfers.downloads['t']!.receivedBytes, 30);
     expect(transfers.downloads['t']!.error, contains('connection lost'));
     expect(await db.get('file', 't'), isNull);
@@ -267,6 +728,7 @@ void main() {
           .writeAsBytes(bytes.take(40).toList());
       await transfers.restoreDownloads();
       expect(transfers.downloads['t']!.status, DownloadStatus.queued);
+      expect(transfers.hasRunningDownloads, isFalse);
       expect(transfers.downloads['t']!.receivedBytes, 40);
     },
   );
@@ -666,6 +1128,7 @@ void main() {
       await Future.wait([running, closing]);
       expect(requests, 0);
       expect(transfers.progressFor(track.id)!.status, DownloadStatus.queued);
+      expect(transfers.hasRunningDownloads, isFalse);
       expect(await db.get('file', track.id), isNull);
     },
   );
