@@ -43,6 +43,7 @@ void main() {
   late ApiClient api;
   late TransferService transfers;
   late List<DownloadProgress> observed;
+  late List<bool> observedRunning;
   final bytes = List.generate(100, (i) => i);
   late Track track;
   const pins = [PinSelection('track', 't')];
@@ -56,7 +57,10 @@ void main() {
     onError: (_) {},
     onDownloadChanged: () {
       final value = transfers.downloads['t'];
-      if (value != null) observed.add(value);
+      if (value != null) {
+        observed.add(value);
+        observedRunning.add(transfers.hasRunningDownloads);
+      }
     },
   );
 
@@ -64,6 +68,7 @@ void main() {
     root = await Directory.systemTemp.createTemp('yun-progress-');
     db = _GatedDatabase();
     observed = [];
+    observedRunning = [];
     api = ApiClient(dio: Dio(), credentials: MemoryCredentials())
       ..session = SessionCredentials(
         account: const Account(
@@ -177,12 +182,14 @@ void main() {
           },
         );
       });
+      expect(transfers.hasRunningDownloads, isFalse);
       final running = transfers.reconcile([track], [], pins);
       await delivered.future;
       while (transfers.downloads['t']!.receivedBytes < 60) {
         await Future<void>.delayed(const Duration(milliseconds: 1));
       }
       expect(transfers.downloads['t']!.status, DownloadStatus.downloading);
+      expect(transfers.hasRunningDownloads, isTrue);
       expect(transfers.downloads['t']!.receivedBytes, 60);
       expect(transfers.downloads['t']!.fraction, .6);
       expect(await db.get('file', 't'), isNull);
@@ -191,6 +198,15 @@ void main() {
       expect(observed.any((p) => p.receivedBytes == 40), isTrue);
       expect(observed.any((p) => p.status == DownloadStatus.verifying), isTrue);
       expect(transfers.downloads['t']!.status, DownloadStatus.downloaded);
+      expect(transfers.hasRunningDownloads, isFalse);
+      expect(
+        observedRunning,
+        observed.map(
+          (progress) =>
+              progress.status == DownloadStatus.downloading ||
+              progress.status == DownloadStatus.verifying,
+        ),
+      );
       expect((await db.get('download', 't'))!['received_bytes'], 100);
       expect(await File('${root.path}/t.audio').readAsBytes(), bytes);
     },
@@ -207,6 +223,9 @@ void main() {
     );
     await transfers.reconcile([track], [], pins);
     expect(transfers.downloads['t']!.status, DownloadStatus.failed);
+    expect(transfers.hasRunningDownloads, isFalse);
+    expect(observedRunning, contains(true));
+    expect(observedRunning.last, isFalse);
     expect(transfers.downloads['t']!.receivedBytes, 30);
     expect(transfers.downloads['t']!.error, contains('connection lost'));
     expect(await db.get('file', 't'), isNull);
@@ -267,6 +286,7 @@ void main() {
           .writeAsBytes(bytes.take(40).toList());
       await transfers.restoreDownloads();
       expect(transfers.downloads['t']!.status, DownloadStatus.queued);
+      expect(transfers.hasRunningDownloads, isFalse);
       expect(transfers.downloads['t']!.receivedBytes, 40);
     },
   );
@@ -666,6 +686,7 @@ void main() {
       await Future.wait([running, closing]);
       expect(requests, 0);
       expect(transfers.progressFor(track.id)!.status, DownloadStatus.queued);
+      expect(transfers.hasRunningDownloads, isFalse);
       expect(await db.get('file', track.id), isNull);
     },
   );

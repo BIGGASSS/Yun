@@ -139,23 +139,40 @@ class DownloadsScreen extends StatelessWidget {
                     key: const PageStorageKey('download-activity'),
                     slivers: [
                       if (wanted.isNotEmpty)
-                        SliverPadding(
-                          padding: const EdgeInsets.fromLTRB(24, 20, 24, 0),
-                          sliver: SliverToBoxAdapter(
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                QuietProgress(
-                                  value: ready / wanted.length,
-                                  label: 'Offline download completion',
+                        SelectedBuilder(
+                          listenable: Listenable.merge([
+                            app,
+                            app.downloadChanges,
+                          ]),
+                          select: () => app.hasRunningDownloads,
+                          builder: (context, running, _) => running
+                              ? SliverPadding(
+                                  padding: const EdgeInsets.fromLTRB(
+                                    24,
+                                    20,
+                                    24,
+                                    0,
+                                  ),
+                                  sliver: SliverToBoxAdapter(
+                                    child: Column(
+                                      crossAxisAlignment:
+                                          CrossAxisAlignment.start,
+                                      children: [
+                                        QuietProgress(
+                                          value: ready / wanted.length,
+                                          label: 'Offline download completion',
+                                        ),
+                                        const SizedBox(height: 8),
+                                        Text(
+                                          '$ready of ${wanted.length} selected tracks ready${ready < wanted.length ? ' · ${wanted.length - ready} remaining' : ''}',
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                )
+                              : const SliverToBoxAdapter(
+                                  child: SizedBox.shrink(),
                                 ),
-                                const SizedBox(height: 8),
-                                Text(
-                                  '$ready of ${wanted.length} selected tracks ready${ready < wanted.length ? ' · ${wanted.length - ready} remaining' : ''}',
-                                ),
-                              ],
-                            ),
-                          ),
                         ),
                       _section(
                         context,

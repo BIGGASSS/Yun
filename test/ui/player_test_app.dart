@@ -38,6 +38,8 @@ class PlayerTestApp extends ChangeNotifier implements AppController {
   final artworkChanges = ChangeNotifier();
   @override
   int get downloadSectionsRevision => 0;
+  @override
+  bool get hasRunningDownloads => false;
 
   final FakeEngine engine;
   bool disconnected = false;

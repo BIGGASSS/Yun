@@ -29,7 +29,9 @@ class _App extends PlayerTestApp {
   bool get isAuthenticated => authenticated;
   @override
   bool get isOffline => offline;
-  int trackReads = 0, downloadedReads = 0;
+  int trackReads = 0, downloadedReads = 0, progressReads = 0;
+  @override
+  bool hasRunningDownloads = false;
   void changed() => notifyListeners();
   @override
   List<Track> get tracks {
@@ -53,15 +55,17 @@ class _App extends PlayerTestApp {
   @override
   Track? trackById(String id) => library.where((t) => t.id == id).firstOrNull;
   @override
-  DownloadProgress downloadProgress(Track track) =>
-      progress[track.id] ??
-      DownloadProgress(
-        trackId: track.id,
-        totalBytes: track.sizeBytes,
-        status: downloaded.contains(track.id)
-            ? DownloadStatus.downloaded
-            : DownloadStatus.availableOnline,
-      );
+  DownloadProgress downloadProgress(Track track) {
+    progressReads++;
+    return progress[track.id] ??
+        DownloadProgress(
+          trackId: track.id,
+          totalBytes: track.sizeBytes,
+          status: downloaded.contains(track.id)
+              ? DownloadStatus.downloaded
+              : DownloadStatus.availableOnline,
+        );
+  }
 }
 
 /// An immutable snapshot that exposes accidental rescans on transfer ticks.
@@ -388,6 +392,55 @@ void main() {
   );
 
   testWidgets(
+    'Downloads does not rescan a large pending queue on notifications',
+    (tester) async {
+      final app = _App(FakeEngine());
+      app.library = List.generate(
+        5000,
+        (i) => Track(id: '$i', title: 'Track $i', sizeBytes: 100),
+      );
+      app.selections = List.generate(5000, (i) => PinSelection('track', '$i'));
+      try {
+        await tester.pumpWidget(
+          MaterialApp(
+            home: Scaffold(body: DownloadsScreen(app: app)),
+          ),
+        );
+        await tester.pumpAndSettle();
+        final activity = find.byKey(const PageStorageKey('download-activity'));
+        final scroll = tester.widget<CustomScrollView>(activity);
+
+        for (final running in [false, true, true, false]) {
+          app.hasRunningDownloads = running;
+          app.progress['4999'] = DownloadProgress(
+            trackId: '4999',
+            totalBytes: 100,
+            receivedBytes: running ? 50 : 0,
+            status: running
+                ? DownloadStatus.downloading
+                : DownloadStatus.queued,
+          );
+          app.progressReads = 0;
+          app.downloadChanges.notifyListeners();
+          await tester.pump();
+          // Only visible row indicators may read progress, not all 5,000 jobs.
+          expect(app.progressReads, lessThan(40));
+          expect(identical(tester.widget(activity), scroll), isTrue);
+          expect(
+            find.text('0 of 5000 selected tracks ready · 5000 remaining'),
+            running ? findsOneWidget : findsNothing,
+          );
+        }
+        expect(tester.takeException(), isNull);
+      } finally {
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.runAsync(app.shutdown);
+        app.dispose();
+      }
+    },
+  );
+
+  testWidgets(
     'Downloads captures IDs once and progress only updates indicators',
     (tester) async {
       final app = _App(FakeEngine());
@@ -420,6 +473,7 @@ void main() {
         final scroll = tester.widget<CustomScrollView>(
           find.byType(CustomScrollView),
         );
+        app.hasRunningDownloads = true;
         app.progress['2500'] = const DownloadProgress(
           trackId: '2500',
           totalBytes: 100,
@@ -433,11 +487,16 @@ void main() {
           isTrue,
         );
         expect(find.textContaining('Downloading · 50 B'), findsOneWidget);
+        expect(
+          find.text('0 of 1 selected tracks ready · 1 remaining'),
+          findsOneWidget,
+        );
         app.downloaded = Set.unmodifiable({...app.downloaded, '2500'});
+        app.hasRunningDownloads = false;
         app.progress.remove('2500');
         app.downloadChanges.notifyListeners();
         await tester.pump();
-        expect(find.text('1 of 1 selected tracks ready'), findsOneWidget);
+        expect(find.textContaining('selected tracks ready'), findsNothing);
         expect(find.textContaining('2501 tracks'), findsOneWidget);
         expect(find.textContaining('Downloading ·'), findsNothing);
       } finally {

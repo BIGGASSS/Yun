@@ -296,6 +296,10 @@ class TransferService {
   final void Function()? onVerificationChanged;
   final DownloadFileVerifier Function() _verificationWorkerFactory;
   final Map<String, DownloadProgress> _downloads = {};
+  final Set<String> _runningDownloadIds = {};
+
+  /// Live workers only; queued and restored interrupted jobs are not running.
+  bool get hasRunningDownloads => _runningDownloadIds.isNotEmpty;
   Map<String, DownloadProgress> get downloads => Map.unmodifiable(_downloads);
   DownloadProgress? progressFor(String trackId) => _downloads[trackId];
   int _downloadSectionsRevision = 0;
@@ -468,6 +472,7 @@ class TransferService {
     });
     if (failed == null) return false;
     _downloads[track.id] = failed!;
+    _runningDownloadIds.remove(track.id);
     _downloadSectionsRevision++;
     (onFilesChanged ?? onChanged)();
     (onDownloadChanged ?? onChanged)();
@@ -658,6 +663,7 @@ class TransferService {
         });
         if (outcome == FileVerificationOutcome.invalid) {
           _downloads[id] = invalidProgress!;
+          _runningDownloadIds.remove(id);
           damaged.add(id);
           invalid++;
           _downloadSectionsRevision++;
@@ -797,6 +803,12 @@ class TransferService {
       error: error,
       previouslyDownloaded: previous?.requiresOfflinePlayback ?? false,
     );
+    if (status == DownloadStatus.downloading ||
+        status == DownloadStatus.verifying) {
+      _runningDownloadIds.add(track.id);
+    } else {
+      _runningDownloadIds.remove(track.id);
+    }
     if (_downloadSection(previous?.status) != _downloadSection(status) ||
         previous?.historyCleared == true) {
       _downloadSectionsRevision++;
@@ -1161,6 +1173,7 @@ class TransferService {
     _downloads.removeWhere(
       (id, progress) => !refs.containsKey(id) && !progress.repairRequired,
     );
+    _runningDownloadIds.retainAll(_downloads.keys);
     if (removedProgress) {
       _downloadSectionsRevision++;
       (onDownloadChanged ?? onChanged)();

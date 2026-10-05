@@ -66,6 +66,12 @@ class _DownloadsApp extends PlayerTestApp {
   @override
   int get downloadSectionsRevision => revision;
   @override
+  bool get hasRunningDownloads => progress.values.any(
+    (value) =>
+        value.status == DownloadStatus.downloading ||
+        value.status == DownloadStatus.verifying,
+  );
+  @override
   bool isPinned(String type, String id) =>
       selections.any((pin) => pin.type == type && pin.id == id);
   @override
@@ -247,6 +253,107 @@ void main() {
   }
 
   Finder clearButton() => find.widgetWithText(TextButton, 'Clear All');
+
+  Finder completionProgress() => find.byWidgetPredicate(
+    (widget) =>
+        widget is LinearProgressIndicator &&
+        widget.semanticsLabel == 'Offline download completion',
+  );
+
+  downloadsTest('hides completion summary when no downloads are running', (
+    tester,
+  ) async {
+    final app = await open(tester);
+    // Queued and failed selections are not running jobs.
+    expect(completionProgress(), findsNothing);
+    expect(find.textContaining('selected tracks ready'), findsNothing);
+
+    app.setProgress('pending', DownloadStatus.downloaded, received: 100);
+    await tester.pumpAndSettle();
+    expect(completionProgress(), findsNothing);
+    expect(find.textContaining('selected tracks ready'), findsNothing);
+
+    app.setProgress('failed', DownloadStatus.downloaded, received: 100);
+    await tester.pumpAndSettle();
+    // All selections are ready, as in the completed-download screenshot.
+    expect(completionProgress(), findsNothing);
+    expect(find.textContaining('selected tracks ready'), findsNothing);
+    expect(find.text('Finished song'), findsOneWidget);
+    expect(find.text('Waiting song'), findsOneWidget);
+    expect(find.text('Failed song'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
+  downloadsTest('completion summary follows running jobs without regrouping', (
+    tester,
+  ) async {
+    final app = await open(tester);
+    final activity = find.byKey(const PageStorageKey('download-activity'));
+    final scroll = tester.widget<CustomScrollView>(activity);
+
+    for (final status in [
+      DownloadStatus.downloading,
+      DownloadStatus.verifying,
+      DownloadStatus.queued,
+      DownloadStatus.downloading,
+    ]) {
+      app.setProgress('pending', status, received: 50);
+      await tester.pump();
+      final running = status != DownloadStatus.queued;
+      expect(completionProgress(), running ? findsOneWidget : findsNothing);
+      expect(
+        find.text('1 of 3 selected tracks ready · 2 remaining'),
+        running ? findsOneWidget : findsNothing,
+      );
+      if (running) {
+        expect(
+          tester.widget<LinearProgressIndicator>(completionProgress()).value,
+          1 / 3,
+        );
+      }
+      expect(identical(tester.widget(activity), scroll), isTrue);
+    }
+
+    final indicator = tester.widget(completionProgress());
+    app.setProgress('pending', DownloadStatus.downloading, received: 75);
+    await tester.pump();
+    expect(identical(tester.widget(completionProgress()), indicator), isTrue);
+    expect(identical(tester.widget(activity), scroll), isTrue);
+
+    app.setProgress('pending', DownloadStatus.failed);
+    await tester.pumpAndSettle();
+    expect(completionProgress(), findsNothing);
+    expect(find.textContaining('selected tracks ready'), findsNothing);
+    expect(tester.takeException(), isNull);
+  });
+
+  downloadsTest('keeps completion summary while another download is running', (
+    tester,
+  ) async {
+    final app = await open(tester);
+    app.setProgress('pending', DownloadStatus.downloading, received: 50);
+    app.setProgress('failed', DownloadStatus.downloading, received: 50);
+    await tester.pump();
+    expect(completionProgress(), findsOneWidget);
+
+    app.setProgress('pending', DownloadStatus.downloaded, received: 100);
+    await tester.pump();
+    expect(completionProgress(), findsOneWidget);
+    expect(
+      tester.widget<LinearProgressIndicator>(completionProgress()).value,
+      2 / 3,
+    );
+    expect(
+      find.text('2 of 3 selected tracks ready · 1 remaining'),
+      findsOneWidget,
+    );
+
+    app.setProgress('failed', DownloadStatus.downloaded, received: 100);
+    await tester.pumpAndSettle();
+    expect(completionProgress(), findsNothing);
+    expect(find.textContaining('selected tracks ready'), findsNothing);
+    expect(tester.takeException(), isNull);
+  });
 
   downloadsTest('separates Done, Pending, Failed and lists every local track', (
     tester,
