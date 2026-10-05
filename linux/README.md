@@ -5,14 +5,14 @@ On Debian/Ubuntu, install the Flutter native toolchain and plugin dependencies:
 
 ```sh
 sudo apt install clang cmake ninja-build pkg-config libgtk-3-dev \
-  libglib2.0-dev libsecret-1-dev libmpv-dev mpv libayatana-appindicator3-dev
+  libglib2.0-dev libsecret-1-dev libmpv-dev mpv
 ```
 
 `media_kit_libs_linux` does **not** bundle libmpv: playback dynamically loads the
 system `libmpv.so.2` (or `.so.1`). A build can succeed without it, but playback
 cannot. Distribution packages must depend on the appropriate libmpv runtime
-(e.g. `libmpv2`), GTK 3, `libsecret-1-0`, and `libayatana-appindicator3-1`, plus
-their transitive dependencies.
+(e.g. `libmpv2`), GTK 3, and `libsecret-1-0`, plus their transitive dependencies.
+No Ayatana/AppIndicator library is required by Yun.
 The runner links the plugin-provided mimalloc object as recommended by media_kit;
 the default plugin build downloads its pinned source archive.
 
@@ -34,10 +34,11 @@ keeps the window visible and reports an error. Watcher/host loss restores a
 hidden window, with polling for implementations missing loss signals. These
 checks are conservative, not proof that every desktop rendered the icon.
 
-The upstream tray plugin remains linked on Linux even though Yun uses its own
-D-Bus tray implementation there. Its deprecated Ayatana constructor still emits a build
-warning on newer systems; only that plugin is exempt from treating deprecation
-warnings as errors. No other warning policy is weakened.
+The Dart-only [`yun_tray_manager_linux`](../packages/yun_tray_manager_linux/README.md)
+platform selection excludes the unused upstream native Linux tray plugin from
+registration, linking, and bundling. Windows/macOS retain upstream `tray_manager`.
+CI verifies plugin selection and the Linux bundle's native dependencies with
+`python3 scripts/verify-linux-tray-linkage.py --bundle build/linux/x64/release/bundle`.
 
 ## Secure storage
 
