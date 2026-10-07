@@ -669,7 +669,10 @@ void main() {
     expect(observedRunning, contains(true));
     expect(observedRunning.last, isFalse);
     expect(transfers.downloads['t']!.receivedBytes, 30);
-    expect(transfers.downloads['t']!.error, contains('connection lost'));
+    expect(
+      transfers.downloads['t']!.error,
+      contains('Download reception failed'),
+    );
     expect(await db.get('file', 't'), isNull);
     await transfers.close();
     transfers = create();

@@ -74,7 +74,8 @@ String normalizeServer(String value) {
 /// stored as a single secure-storage value before the new token is made visible.
 class ApiClient {
   ApiClient({Dio? dio, CredentialStore? credentials})
-    : dio =
+    : usesDefaultTransport = dio == null,
+      dio =
           dio ??
           Dio(
             BaseOptions(
@@ -88,6 +89,11 @@ class ApiClient {
           ),
       credentials = credentials ?? SecureCredentialStore();
   final Dio dio;
+
+  /// Injected clients may have custom adapters, interceptors or trust settings
+  /// that cannot be copied to an isolate. Keep those downloads on that client;
+  /// the app's default transport can safely create its own worker-side Dio.
+  final bool usesDefaultTransport;
   final CredentialStore credentials;
   SessionCredentials? session;
   Future<void>? _refreshing;
@@ -171,13 +177,15 @@ class ApiClient {
       '${old.account.server}/api/v1/auth/refresh',
       data: {'refresh_token': old.refreshToken},
     );
-    if (generation != _generation) throw StateError('Session changed');
+    if (generation != _generation || !identical(session, old)) {
+      throw StateError('Session changed');
+    }
     final next = _fromResponse(
       old.account,
       Map<String, dynamic>.from(response.data as Map),
     );
     await credentials.write(sessionKey, jsonEncode(next.toJson()));
-    if (generation == _generation) session = next;
+    if (generation == _generation && identical(session, old)) session = next;
   }
 
   Future<Map<String, String>> headers() async {
@@ -198,31 +206,55 @@ class ApiClient {
     CancelToken? cancelToken,
     ProgressCallback? onReceiveProgress,
   }) async {
-    final auth = await this.headers();
-    final current = session!;
-    Future<Response<dynamic>> send(Map<String, String> auth) =>
-        dio.request<dynamic>(
-          '${current.account.server}/api/v1$path',
-          data: data,
-          queryParameters: query,
-          options: Options(
-            method: method,
-            headers: {...auth, ...?headers},
-            responseType: responseType,
-          ),
-          cancelToken: cancelToken,
-          onReceiveProgress: onReceiveProgress,
-        );
-    try {
-      return await send(auth);
-    } on DioException catch (e) {
-      if (e.response?.statusCode != 401) rethrow;
-      if (session?.accessToken == current.accessToken) await refreshToken();
-      if (session?.account.userId != current.account.userId ||
-          session?.account.server != current.account.server) {
+    return withAuthorization(
+      (server, auth) => dio.request<dynamic>(
+        '$server/api/v1$path',
+        data: data,
+        queryParameters: query,
+        options: Options(
+          method: method,
+          headers: {...auth, ...?headers},
+          responseType: responseType,
+        ),
+        cancelToken: cancelToken,
+        onReceiveProgress: onReceiveProgress,
+      ),
+      isUnauthorized: (error) =>
+          error is DioException && error.response?.statusCode == 401,
+    );
+  }
+
+  /// Runs an authenticated operation without sharing this client or credential
+  /// storage with its transport. Refresh stays serialized here, including the
+  /// single retry for a worker-reported 401. Never retry under another login.
+  Future<T> withAuthorization<T>(
+    Future<T> Function(String server, Map<String, String> headers) send, {
+    required bool Function(Object error) isUnauthorized,
+  }) async {
+    final generation = _generation;
+    final account = session?.account;
+    void checkSession() {
+      if (_generation != generation ||
+          session == null ||
+          session?.account.userId != account?.userId ||
+          session?.account.server != account?.server) {
         throw StateError('Session changed');
       }
-      return send({'Authorization': 'Bearer ${session!.accessToken}'});
+    }
+
+    final auth = await headers();
+    checkSession();
+    final current = session!;
+    try {
+      return await send(current.account.server, auth);
+    } catch (error) {
+      if (!isUnauthorized(error)) rethrow;
+      checkSession();
+      if (session?.accessToken == current.accessToken) await refreshToken();
+      checkSession();
+      return send(current.account.server, {
+        'Authorization': 'Bearer ${session!.accessToken}',
+      });
     }
   }
 

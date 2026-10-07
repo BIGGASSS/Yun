@@ -5,6 +5,69 @@ The original audit was read-only. The remediation below was subsequently
 implemented; the remaining sections preserve the original findings and baseline
 line references. This is not a production capacity or four-platform certification.
 
+## Download write buffering
+
+Audio reception now coalesces network fragments into a fixed 256 KiB write
+buffer rather than awaiting a file write for every fragment. Byte-progress
+notifications are coalesced into trailing 100 ms ticks; status transitions remain
+immediate, and pending ticks are cancelled when reception ends. This reduces
+main-isolate I/O wakeups and visible progress work, especially on Linux's GTK
+task runner. A deterministic regression checks that 1,024 four-KiB fragments
+produce 16 writes, not 1,024; this is not a measured end-to-end speedup.
+
+Live received-byte progress includes the bounded in-memory tail. Resume and
+persisted failure offsets always use the actual partial-file length. Normal EOF,
+transport errors and oversized responses drain only previously accepted bytes;
+close/unpin discards the unwritten tail. Entire oversized fragments are rejected,
+failed file writes are not retried, and flush/checksum verification still precede
+playable publication. Regression coverage includes buffer boundaries, large and
+tiny fragments, error/short-body retries, overflow without EOF, cancellation and
+notification timing/lifetime. This first fix did not change the transport or
+worker-isolate architecture; follow-up measurements motivated the next change.
+
+Local validation: **1,123 Flutter tests passed, 19 opt-in tests skipped**, including
+17 new buffer/notification regressions and the real Rust/Dart TCP suite. Flutter
+analysis, formatting, diff whitespace checks, Linux release build and bundled
+tray-linkage verification passed. The installed desktop bundle was not replaced.
+
+## Download reception isolate
+
+Follow-up measurements of the buffered Linux release still showed about 1.74
+MiB/s with Downloads visible and 1.9–2.2 MiB/s on Settings. The 256 KiB writes
+were confirmed active, yet roughly 75–90 KiB stayed unread at the socket while
+the main thread spent most sampled time waiting. Dart's small TLS buffers and
+native-filter/timer events on the Linux GTK task runner are the leading suspected
+bottleneck; individual event latency was not directly profiled.
+
+The default client now keeps a persistent download isolate with its own Dio
+connection pool. HTTP/TLS reception and bounded file writes both run there;
+audio buffers never cross back to Flutter. Progress is coalesced every 100 ms,
+with an acknowledgement bounding queued ordinary progress to one message plus
+a terminal update. The root retains serialized credential refresh (one 401
+retry), database publication and UI state. Only request-scoped access headers
+are copied to the worker, never the credential store or refresh token. Existing
+checksum verification still gates the final rename and offline publication.
+
+Cancellation waits for the response and file to close; service shutdown joins
+the worker's exit. IDs discard stale messages, fatal exits fail pending work
+and allow a fresh worker on the next request, and failures preserve sanitized
+HTTP/transport categories for offline/error handling. Injected Dio clients use
+the same file-reception routine inline so custom adapters/interceptors/trust
+settings are not silently discarded. Default root-client interceptors do not
+observe worker audio requests; tests observe the receiver boundary instead.
+
+New regressions cover real TCP transfers and Range retries, rejected audio
+headers, authentication and account replacement, cancellation/reselection,
+worker startup/exit/restart, progress acknowledgement and background error
+classification. The affected Linux user confirmed that this build resolved the
+slow downloads. No controlled post-change throughput figure was recorded, so
+this is qualitative device confirmation, not a claimed speedup multiplier.
+
+Local validation: **1,178 Flutter tests passed, 19 opt-in tests skipped**, including
+55 new receiver, lifecycle, authentication and error-classification regressions.
+Flutter analysis, formatting, whitespace checks, Linux release build and tray
+linkage verification passed. The installed desktop bundle was not replaced.
+
 ## Follow-up snapshot review remediation
 
 The ten follow-up findings against `0c5ca0b` are addressed:

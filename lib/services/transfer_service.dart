@@ -7,6 +7,8 @@ import 'package:path/path.dart' as p;
 import '../models/models.dart';
 import 'api_client.dart';
 import 'cache_database.dart';
+import 'download_buffer.dart';
+import 'download_receiver.dart';
 import 'download_verification.dart';
 
 export 'download_verification.dart';
@@ -147,8 +149,23 @@ class TransferService {
     this.onDownloaded,
     this.onVerificationChanged,
     DownloadFileVerifier Function()? verificationWorkerFactory,
+    DownloadReceiver? downloadReceiver,
     Directory? importsDirectory,
-  }) : _verificationWorkerFactory =
+  }) : _downloadReceiver =
+           downloadReceiver ??
+           (api.usesDefaultTransport
+               ? IsolateDownloadReceiver()
+               : InlineDownloadReceiver(
+                   request: (input, token) => api.dio.get<dynamic>(
+                     input.url,
+                     cancelToken: token,
+                     options: Options(
+                       responseType: ResponseType.stream,
+                       headers: input.headers,
+                     ),
+                   ),
+                 )),
+       _verificationWorkerFactory =
            verificationWorkerFactory ?? IsolateDownloadFileVerifier.new,
        importsDirectory =
            importsDirectory ?? Directory(p.join(directory.path, 'imports'));
@@ -336,6 +353,7 @@ class TransferService {
   final Future<void> Function(Track)? onDownloaded;
   final void Function()? onVerificationChanged;
   final DownloadFileVerifier Function() _verificationWorkerFactory;
+  final DownloadReceiver _downloadReceiver;
   final Map<String, DownloadProgress> _downloads = {};
   final Set<String> _runningDownloadIds = {};
   final Set<String> _downloadBatchIds = {};
@@ -836,6 +854,7 @@ class TransferService {
     DownloadStatus status,
     int bytes, {
     String? error,
+    bool notify = true,
   }) {
     final previous = _downloads[track.id];
     if (previous != null &&
@@ -871,7 +890,7 @@ class TransferService {
         previous?.historyCleared == true) {
       _downloadSectionsRevision++;
     }
-    (onDownloadChanged ?? onChanged)();
+    if (notify) (onDownloadChanged ?? onChanged)();
     return true;
   }
 
@@ -1481,52 +1500,61 @@ class TransferService {
     if (offset < track.sizeBytes) {
       final token = CancelToken();
       _downloadToken = token;
+      final progress = DownloadProgressThrottle(() {
+        if (!_closed &&
+            !_activeDownloadCancelled &&
+            _latestSelection!.references.containsKey(track.id)) {
+          (onDownloadChanged ?? onChanged)();
+        }
+      });
       try {
-        final response = await api.request(
-          '/tracks/${track.id}/audio',
-          responseType: ResponseType.stream,
-          headers: offset > 0
-              ? {'Range': 'bytes=$offset-', 'If-Range': '"${track.sha256}"'}
-              : null,
-          cancelToken: token,
-        );
-        final etag = response.headers.value('etag');
-        if (etag != null && etag != '"${track.sha256}"') {
-          throw StateError('Audio checksum identity changed; refresh library');
-        }
-        if (response.statusCode == 206) {
-          final range = response.headers.value('content-range');
-          if (range == null || !range.startsWith('bytes $offset-')) {
-            throw StateError('Invalid resume response');
-          }
-        } else if (response.statusCode == 200) {
-          offset = 0;
-        } else {
-          throw StateError('Unexpected download status ${response.statusCode}');
-        }
-        _progress(track, DownloadStatus.downloading, offset);
-        final output = await partial.open(
-          mode: offset > 0 ? FileMode.append : FileMode.write,
-        );
-        try {
-          await for (final chunk in (response.data as ResponseBody).stream) {
+        await api.withAuthorization<void>(
+          (server, auth) async {
             _checkDownloadWanted();
-            if (chunk.length > track.sizeBytes - offset) {
-              // Cancel before awaiting stream/file cleanup, and never write an
-              // offending chunk. Do not poison subsequent requests or retries.
-              token.cancel('Audio exceeds expected size');
-              throw StateError('Downloaded audio exceeds expected size');
-            }
-            await output.writeFrom(chunk);
-            offset += chunk.length;
-            _progress(track, DownloadStatus.downloading, offset);
-          }
-          await output.flush();
-        } finally {
-          await output.close();
-        }
+            // A retry uses only bytes actually committed to the partial file,
+            // never the worker's possibly buffered progress.
+            final resume = await partial.exists() ? await partial.length() : 0;
+            _checkDownloadWanted();
+            await _downloadReceiver.receive(
+              DownloadReceiveRequest(
+                url: '$server/api/v1/tracks/${track.id}/audio',
+                path: partial.path,
+                sha256: track.sha256,
+                offset: resume,
+                sizeBytes: track.sizeBytes,
+                headers: {
+                  ...auth,
+                  if (resume > 0) 'Range': 'bytes=$resume-',
+                  if (resume > 0) 'If-Range': '"${track.sha256}"',
+                },
+                connectTimeout: api.dio.options.connectTimeout,
+                sendTimeout: api.dio.options.sendTimeout,
+                receiveTimeout: api.dio.options.receiveTimeout,
+              ),
+              cancelToken: token,
+              onProgress: (received) {
+                // Ignore queued messages after unpin/close, even before the
+                // worker has acknowledged cancellation and closed its file.
+                if (_closed || _activeDownloadCancelled || token.isCancelled) {
+                  return;
+                }
+                if (_progress(
+                  track,
+                  DownloadStatus.downloading,
+                  received,
+                  notify: false,
+                )) {
+                  progress.schedule();
+                }
+              },
+            );
+            _checkDownloadWanted();
+          },
+          isUnauthorized: (error) =>
+              error is DownloadReceiveException && error.statusCode == 401,
+        );
       } finally {
-        // Also release an unread body when headers or local I/O are rejected.
+        progress.close();
         token.cancel('Download response closed');
         _downloadToken = null;
       }
@@ -1574,6 +1602,7 @@ class TransferService {
       token.cancel('Account locked');
     }
     await Future.wait([
+      _downloadReceiver.close(),
       ?_uploadsRunning,
       ?_downloadsRunning,
       ?_verificationRunning,
