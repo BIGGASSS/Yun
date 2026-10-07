@@ -49,7 +49,13 @@ are copied to the worker, never the credential store or refresh token. Existing
 checksum verification still gates the final rename and offline publication.
 
 Cancellation waits for the response and file to close; service shutdown joins
-the worker's exit. IDs discard stale messages, fatal exits fail pending work
+the worker's exit. After active file cleanup has been acknowledged, shutdown
+allows one second for natural exit before terminating a worker kept alive by
+lingering transport resources (notably a cancelled, stalled TLS handshake).
+The root still joins the VM's actual exit notification; the grace timer never
+interrupts active file work. Loopback regressions keep the TLS peer connected
+until close completes, and a gated-file test guards the cleanup-before-kill
+ordering. IDs discard stale messages, fatal exits fail pending work
 and allow a fresh worker on the next request, and failures preserve sanitized
 HTTP/transport categories for offline/error handling. Injected Dio clients use
 the same file-reception routine inline so custom adapters/interceptors/trust
@@ -63,8 +69,9 @@ classification. The affected Linux user confirmed that this build resolved the
 slow downloads. No controlled post-change throughput figure was recorded, so
 this is qualitative device confirmation, not a claimed speedup multiplier.
 
-Local validation: **1,178 Flutter tests passed, 19 opt-in tests skipped**, including
-55 new receiver, lifecycle, authentication and error-classification regressions.
+Local validation after the TLS shutdown follow-up: **1,182 Flutter tests passed,
+19 opt-in tests skipped**, including 59 new receiver, lifecycle, authentication,
+error-classification and shutdown regressions.
 Flutter analysis, formatting, whitespace checks, Linux release build and tray
 linkage verification passed. The installed desktop bundle was not replaced.
 

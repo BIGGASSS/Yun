@@ -547,7 +547,23 @@ class IsolateDownloadReceiver implements DownloadReceiver {
       _shutdownSent = true;
       commands.send({'type': 'close'});
     }
-    await _exited?.future;
+    final exited = _exited?.future;
+    if (exited != null) {
+      await exited.timeout(
+        const Duration(seconds: 1),
+        onTimeout: () {
+          // Dart/Dio can retain a socket in a stalled TLS handshake even after
+          // cancellation and close(force: true). Only bound the idle exit wait:
+          // the active job above has already acknowledged all file cleanup (or
+          // was cancelled before dispatch), and spawning has supplied the handle.
+          // A late header response can only close its body, never open a file.
+          _isolate?.kill(priority: Isolate.immediate);
+          // A kill request is not exit acknowledgement. Keep the port alive and
+          // join actual VM termination before allowing account teardown to finish.
+          return exited;
+        },
+      );
+    }
     _disposePorts();
     _isolate = null;
   }
