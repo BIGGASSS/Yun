@@ -616,11 +616,20 @@ void main() {
         for (final track in tracks) PinSelection('track', track.id),
       ]);
       await started.future;
+      final watch = Stopwatch()..start();
+      while (transfers.progressFor('a')?.receivedBytes != 1) {
+        if (watch.elapsed > const Duration(seconds: 5)) {
+          fail('The stalled body was not consumed');
+        }
+        await Future<void>.delayed(const Duration(milliseconds: 1));
+      }
       final latest = transfers.reconcile(tracks, [], [
         const PinSelection('track', 'c'),
       ]);
-      expect(activeToken!.isCancelled, isTrue);
       await Future.wait([first, latest]).timeout(const Duration(seconds: 5));
+      // Worker cancellation crosses an async boundary; completion must still
+      // wait for transport and file cleanup before reconciling the next track.
+      expect(activeToken!.isCancelled, isTrue);
       expect(bodyCancelled, isTrue);
       expect(requests, ['a', 'c']);
       expect(errors, isEmpty);

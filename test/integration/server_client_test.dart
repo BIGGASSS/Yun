@@ -9,10 +9,35 @@ import 'package:yun/core/app_controller.dart';
 import 'package:yun/core/listening_tracker.dart';
 import 'package:yun/services/api_client.dart';
 import 'package:yun/services/cache_database.dart';
+import 'package:yun/services/download_receiver.dart';
 import 'package:yun/services/transfer_service.dart';
 
 import '../core/fakes.dart';
 import 'real_server.dart';
+
+/// Observe request snapshots at the new isolate boundary, not on root Dio:
+/// production audio requests no longer run through root-isolate interceptors.
+class _RecordingReceiver implements DownloadReceiver {
+  final worker = IsolateDownloadReceiver();
+  final requests = <DownloadReceiveRequest>[];
+
+  @override
+  Future<void> receive(
+    DownloadReceiveRequest request, {
+    required CancelToken cancelToken,
+    required void Function(int) onProgress,
+  }) {
+    requests.add(request);
+    return worker.receive(
+      request,
+      cancelToken: cancelToken,
+      onProgress: onProgress,
+    );
+  }
+
+  @override
+  Future<void> close() => worker.close();
+}
 
 void main() {
   final server = RealServer();
@@ -35,8 +60,10 @@ void main() {
       final root = await Directory.systemTemp.createTemp('yun-transfer-tcp-');
       final db = CacheDatabase.memory();
       final errors = <Object>[];
+      final receiver = _RecordingReceiver();
       final service = TransferService(
         api: api,
+        downloadReceiver: receiver,
         database: db,
         directory: Directory('${root.path}/audio'),
         onChanged: () {},
@@ -83,22 +110,11 @@ void main() {
       await service.directory.create(recursive: true);
       await File('${service.directory.path}/${track.id}.audio.part')
           .writeAsBytes(bytes.sublist(0, 117));
-      var sawRange = false;
-      api.dio.interceptors.add(
-        InterceptorsWrapper(
-          onRequest: (request, handler) {
-            if (request.path.endsWith('/audio')) {
-              expect(request.headers['Range'], 'bytes=117-');
-              expect(request.headers['If-Range'], '"${track.sha256}"');
-              sawRange = true;
-            }
-            handler.next(request);
-          },
-        ),
-      );
       await service.reconcile([track], [], [PinSelection('track', track.id)]);
       expect(errors, isEmpty);
-      expect(sawRange, isTrue);
+      expect(receiver.requests, hasLength(1));
+      expect(receiver.requests.single.headers['Range'], 'bytes=117-');
+      expect(receiver.requests.single.headers['If-Range'], '"${track.sha256}"');
       final record = (await db.get('file', track.id))!;
       expect(await File(record['path'] as String).readAsBytes(), bytes);
       expect(

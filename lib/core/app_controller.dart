@@ -14,6 +14,7 @@ import '../models/models.dart';
 import '../services/api_client.dart';
 import '../services/artwork_cache.dart';
 import '../services/cache_database.dart';
+import '../services/download_receiver.dart';
 import '../services/playback_engine.dart';
 import '../services/system_media_controls.dart';
 import '../services/transfer_service.dart';
@@ -162,16 +163,19 @@ class AppController extends ChangeNotifier implements SystemMediaArtwork {
     // Mobile lifecycle transitions routinely interrupt background requests.
     // Use the offline indicator instead of a persistent error banner; explicit
     // actions still throw so their callers can report the failure locally.
+    final (transportType, statusCode) = switch (e) {
+      DioException() => (e.type, e.response?.statusCode),
+      DownloadReceiveException() => (e.transportType, e.statusCode),
+      _ => (null, null),
+    };
     final transientConnectionFailure =
-        e is DioException &&
-        e.response == null &&
-        (e.type == DioExceptionType.connectionError ||
-            e.type == DioExceptionType.connectionTimeout ||
-            e.type == DioExceptionType.sendTimeout ||
-            e.type == DioExceptionType.receiveTimeout);
+        statusCode == null &&
+        (transportType == DioExceptionType.connectionError ||
+            transportType == DioExceptionType.connectionTimeout ||
+            transportType == DioExceptionType.sendTimeout ||
+            transportType == DioExceptionType.receiveTimeout);
     if (!transientConnectionFailure) error = e.toString();
-    if (e is DioException &&
-        (e.response == null || e.response!.statusCode == 401)) {
+    if (transportType != null && (statusCode == null || statusCode == 401)) {
       isOffline = true;
     }
     _notify();
