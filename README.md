@@ -1,12 +1,10 @@
 # 韵 · Yun
 
-A quiet Material 3 music player for a private, self-hosted library. One Flutter
-client targets **Linux x64, macOS ARM64, Android ARM64, and Windows x64**, backed
-by an account-isolated Rust server. Flutter is pinned with FVM.
+A Material 3 music player for a private, self-hosted library. One Flutter client targets **Linux x64, macOS ARM64, Android ARM64, and Windows x64**. It is backed by an account-isolated Rust server. Flutter is pinned with FVM.
 
 ## Screenshots
 
-Rendered from the Flutter UI with a demo library and original sample artwork.
+Rendered from the Flutter UI using a demo library and original sample artwork.
 
 | Desktop · Library & queue (dark) | Desktop · Albums (light) |
 | --- | --- |
@@ -16,49 +14,27 @@ Rendered from the Flutter UI with a demo library and original sample artwork.
 | --- | --- |
 | <img src="docs/screenshots/mobile-library-dark.png" alt="Yun mobile library in dark mode with downloaded tracks and a mini player" width="260"> | <img src="docs/screenshots/mobile-now-playing-dark.png" alt="Yun mobile now playing screen with album artwork and playback controls" width="260"> |
 
-## What is implemented
+## Features
 
-- Adaptive mobile/desktop library, albums/artists/search, queue, shuffle/repeat,
-  keyboard shortcuts, light/dark/system appearance, metadata and artwork editing.
-- Desktop app-volume slider and mute, including compact windows and now playing;
-  volume/mute, shuffle, and repeat survive app restarts. Android retains system
-  volume and remembers shuffle/repeat.
-- Branded desktop tray: left-click restores Yun, right-click opens Show/Quit.
-  **Settings → Window behavior** remembers close to quit (default) or minimize
-  to tray without stopping music.
-  Android/iOS behavior is unchanged; an unavailable tray never hides the window.
-- Admin-created accounts, Argon2id passwords, rotating/revocable sessions,
-  authenticated original-file streaming with byte-range seeking.
-- In-app file selection and desktop drop, durable resumable uploads, embedded
-  tags/artwork, per-account deduplication, quotas and validation.
+- Adaptive mobile and desktop library, albums/artists/search, queue, shuffle/repeat, keyboard shortcuts, light/dark/system appearance, and metadata and artwork editing.
+- Desktop app-volume slider and mute, including compact windows and now playing. On desktop, volume, mute, shuffle, and repeat survive app restarts. Android uses system volume and remembers shuffle and repeat.
+- Desktop tray: left-click restores Yun, right-click opens Show/Quit. **Settings → Window behavior** chooses whether closing the window quits (default) or minimizes to the tray without stopping music. Android and iOS are unchanged. If the tray is unavailable, the window is never hidden.
+- Admin-created accounts, Argon2id passwords, rotating and revocable sessions, and authenticated original-file streaming with byte-range seeking.
+- File selection in the app and drag-and-drop on desktop, durable resumable uploads, embedded tags and artwork, per-account deduplication, quotas, and validation.
 - Versioned playlists with conflict detection and incremental library sync.
-- Explicit track/album/playlist offline selections, resumable checksum-verified
-  downloads, account-scoped artwork, byte progress and storage management.
-- Monotonic listening-time segments, durable offline outbox, idempotent server
-  ingestion, listening history and personal track/artist/album rankings.
-- Android foreground audio, macOS media controls, Linux MPRIS and Windows SMTC
-  adapters; platform configurations and native artifact workflows.
-- Container/HTTPS deployment, stopped-server backup/restore, unit/widget tests,
-  real Rust↔Dart TCP integration tests, CI and evaluation packaging.
+- Explicit offline selections for tracks, albums, and playlists. Downloads are resumable and checksum-verified. Artwork is cached per account, with byte progress and storage management.
+- Monotonic listening-time segments, a durable offline outbox, idempotent server ingestion, listening history, and personal track, artist, and album rankings.
+- Android foreground audio, macOS media controls, Linux MPRIS and Windows SMTC adapters, platform configurations, and native artifact workflows.
+- Container and HTTPS deployment, stopped-server backup and restore, unit and widget tests, real Rust↔Dart TCP integration tests, CI, and evaluation packaging.
 
 **This is an evaluation candidate, not a certified four-platform release.**
-[Hosted CI](https://github.com/BIGGASSS/Yun/actions/workflows/ci.yml) builds all
-four native packages and runs Flutter/Rust tests, TCP integration, null-output
-libmpv playback, container backup/restore, and isolated keyring tests. Choose a
-successful run for the version you want; its publicly accessible evaluation artifacts have
-14-day retention. See [validation evidence](docs/VALIDATION.md) for the tested
-scope and version-specific results.
+[Hosted CI](https://github.com/BIGGASSS/Yun/actions/workflows/ci.yml) builds all four native packages and runs Flutter and Rust tests, TCP integration tests, null-output libmpv playback, container backup and restore, and isolated keyring tests. Choose a successful run for the version you want; its public evaluation artifacts are kept for 14 days. See [validation evidence](docs/VALIDATION.md) for the tested scope and version-specific results.
 
-Hardware playback, Android/macOS/Windows runtime behavior, production signing,
-public TLS deployment and redistribution-license review still require the gates in
-[docs/VALIDATION.md](docs/VALIDATION.md). No transcoding, public signup, social
-features, DRM, or stats.fm service integration is included.
+These still need the gates in [docs/VALIDATION.md](docs/VALIDATION.md): hardware playback, Android/macOS/Windows runtime behavior, production signing, public TLS deployment, and redistribution-license review. Not included: transcoding, public signup, social features, DRM, or stats.fm service integration.
 
 ## Develop
 
-Install [FVM](https://fvm.app/), Rust (see `rust-toolchain.toml`), and the native
-Flutter toolchain for your host. Never replace the exact `.fvmrc` version with a
-floating channel for release builds.
+Install [FVM](https://fvm.app/), Rust (see `rust-toolchain.toml`), and the native Flutter toolchain for your host. For release builds, don't replace the exact `.fvmrc` version with a floating channel.
 
 ```sh
 fvm install --skip-pub-get
@@ -74,22 +50,11 @@ server/target/debug/yun-server --data-dir ./yun-data serve --insecure-loopback
 fvm flutter run -d linux
 ```
 
-In **Settings**, connect to `http://127.0.0.1:8080` and sign in. HTTP is permitted
-only on loopback. Use an HTTPS server URL for remote clients. An attached Android
-device can use `adb reverse tcp:8080 tcp:8080` for local development; do not enable
-global cleartext or bypass certificate validation. Remote audio is fetched by
-Dart with certificate verification and streamed to the decoder over a private
-loopback relay; account tokens never reach the native decoder. Audio redirects
-are rejected: use the final server URL. See [playback TLS](docs/PLAYBACK_TLS.md).
+In **Settings**, connect to `http://127.0.0.1:8080` and sign in. HTTP is allowed only on loopback; remote clients need an HTTPS server URL. For local development, an attached Android device can use `adb reverse tcp:8080 tcp:8080`. Don't enable global cleartext or bypass certificate validation.
 
-Native prerequisites and caveats: [Linux](linux/README.md),
-[Android](android/README.md), [macOS](macos/README.md),
-[Windows](windows/README.md). Linux needs libmpv at runtime and an unlocked Secret
-Service keyring for credentials. KWallet's `org.kde.secretservicecompat` endpoint
-is supported when the standard `org.freedesktop.secrets` name is absent—no separate
-GNOME Keyring installation is required. See [Linux setup](linux/README.md).
-The Windows SMTC bridge requires Rust; its Dart
-bridge version is deliberately pinned to the matching native generator.
+Dart fetches remote audio with certificate verification and streams it to the decoder through a private loopback relay, so account tokens never reach the native decoder. Audio redirects are rejected; use the final server URL. See [playback TLS](docs/PLAYBACK_TLS.md).
+
+Native prerequisites and caveats: [Linux](linux/README.md), [Android](android/README.md), [macOS](macos/README.md), [Windows](windows/README.md). On Linux, you need libmpv at runtime and an unlocked Secret Service keyring for credentials. KWallet is supported through its `org.kde.secretservicecompat` endpoint when the standard `org.freedesktop.secrets` name is absent. No separate GNOME Keyring installation is needed. See [Linux setup](linux/README.md). The Windows SMTC bridge requires Rust. Its Dart bridge version is pinned to match the native generator.
 
 ## Verify
 
@@ -110,45 +75,17 @@ python3 scripts/test-release-tooling.py
 RUN_NATIVE_PLAYBACK=1 fvm flutter test test/services/native_playback_test.dart
 ```
 
-Set `YUN_SERVER_BINARY` to test a different prebuilt server. CI passes the built
-server artifact to Flutter tests so integration tests cannot silently be skipped.
-The native smoke is opt-in locally, and enabled in Linux CI.
+Set `YUN_SERVER_BINARY` to test a different prebuilt server. CI passes the built server artifact to the Flutter tests, so integration tests can't be skipped silently. The native smoke test is opt-in locally and runs in Linux CI.
 
-## Offline and privacy semantics
+## Offline and privacy
 
-Download a track, album or playlist explicitly. Playlist selections follow server
-changes when connected; overlapping selections share a single copy. Originals are
-not silently evicted. Artwork has a separate bounded 1 GiB per-account cache.
-Mounted artwork consumers protect resident images from speculative eviction. If
-artwork cannot fit, placeholders are used instead of repeatedly downloading and
-evicting it; a new foreground demand or revision can retry capacity misses.
-Selected uploads are first copied into account-private staging storage (up to
-1 GiB per file by default); successful/cancelled jobs remove only those staged
-copies, never your originals. Allow staging space in addition to downloads.
-Transfers run while the app process is available and resume later; the app does
-not promise OS-scheduled background transfers after process termination.
+- Downloads are explicit: pick tracks, albums, or playlists. Originals are never evicted silently.
+- Completed downloads always play from the device. A missing, unreadable, or undecodable local copy shows a playback error instead of streaming.
+- Signing out keeps downloaded files and pending history. This is app-level isolation, not encryption or DRM against the device owner.
+- One play counts per session after `min(30 seconds, half the track duration)` of active listening.
+- In **Downloads**, **Verify downloads** checks cached audio against its SHA-256 checksum.
 
-Already signed-in accounts can browse/play cached music despite expired tokens or
-no network. Completed downloads always play from the device, including repeated
-Play attempts and failed or interrupted repairs. A missing, unreadable, or
-undecodable local copy shows a playback error instead of silently streaming.
-Choose **Redownload** in the player or beside a failed download to explicitly
-replace it when connected; playback does not restart automatically. Decoder
-errors alone never delete downloaded bytes. Tracks whose first download is only
-queued can still stream normally. Playlist/metadata edits require connectivity. Sign-out stops playback,
-removes credentials and hides the account, but **retains its downloaded files and
-pending history**; signing back into the same server/account unlocks them. This is
-app-level isolation, not encryption/DRM against the device owner. Offline logout
-cannot revoke a remote session until the server is reachable; use password reset
-to revoke all sessions if needed.
-
-Listening counts only active, non-buffering playback, not skipped seek distance.
-History checkpoints approximately every ten seconds and at transitions; abrupt
-process/power loss can lose the final uncommitted segment. One play is counted per
-session after `min(30 seconds, half the track duration)` of listening (at least
-1 ms). Stats retain partial listening and acknowledge event IDs before deleting
-local outbox records. See [API semantics](docs/API.md) and
-[server details](server/README.md) for date-range and clock behavior.
+Full rules, including caching, staging, redownload, sign-out, and listening history: [docs/OFFLINE.md](docs/OFFLINE.md).
 
 ## Structure
 
@@ -165,58 +102,18 @@ scripts/         Smoke tests, backup/restore and packaging
 docs/            API contract, operations, release and validation records
 ```
 
-The small client uses an injectable `ChangeNotifier` façade and Flutter navigation
-rather than introducing Riverpod/go_router before there is a routing requirement.
-Drift uses explicit transactional SQL without code generation. Server statistics
-are derived directly from immutable events rather than premature aggregate tables.
+The client uses an injectable `ChangeNotifier` façade and Flutter's built-in navigation. Riverpod and go_router are deferred until a routing requirement exists. Drift uses explicit transactional SQL, with no code generation. Server statistics are computed directly from immutable events, with no aggregate tables.
 
 ## Deploy and distribute
 
-Follow [OPERATIONS.md](docs/OPERATIONS.md) for Caddy/Compose, account management,
-monitoring and verified backup/restore. **Do not publish the HTTP origin port.**
-The server is for authenticated personal uploads, not hostile public hosting; its
-bounded metadata parser is not an OS sandbox.
+See [OPERATIONS.md](docs/OPERATIONS.md) for Caddy and Compose setup, account management, monitoring, and verified backup and restore. **Do not publish the HTTP origin port.** The server is for authenticated personal uploads, not hostile public hosting. Its bounded metadata parser is not an OS sandbox.
 
-[RELEASE.md](docs/RELEASE.md) describes releases, evaluation artifacts and installation.
-Push a `v*` tag (for example `v1.0.0`) to validate, build all clients and the Linux
-server, and publish a GitHub Release with checksums. Tag releases use the configured
-Android release signing; macOS/Windows artifacts remain unsigned. CI and the separate
-**Release candidates** workflow retain publicly accessible workflow artifacts only; candidates default to debug-signed
-Android APKs with opt-in fail-closed release signing. Production signing/notarization and dependency license/source
-obligations are explicit release gates.
+[RELEASE.md](docs/RELEASE.md) covers releases, evaluation artifacts, and installation. Push a `v*` tag (for example `v1.0.0`) to validate the release, build all clients and the Linux server, and publish a GitHub Release with checksums.
+
+Tag releases use the configured Android release signing. macOS and Windows artifacts are unsigned. CI and the separate **Release candidates** workflow keep only publicly accessible workflow artifacts. Release candidates default to debug-signed Android APKs. Opt-in release signing fails closed. Production signing and notarization, and dependency license and source obligations, remain release gates.
 
 ## License
 
-Yun's first-party material is licensed under the [MIT License](LICENSE),
-copyright © 2026 BIGGASSS. Third-party components are excluded from this grant
-and retain their own licenses and notices, including the vendored
-[Linux secure-storage plugin's BSD-3-Clause license](packages/flutter_secure_storage_linux/LICENSE),
-[nlohmann/json notices and licenses](packages/flutter_secure_storage_linux/linux/include/json.NOTICES.md),
-and [Flutter SDK action's MIT license](.github/actions/flutter-sdk/LICENSE)
-([upstream provenance](.github/actions/flutter-sdk/UPSTREAM.md)).
+Yun's first-party material is licensed under the [MIT License](LICENSE), copyright © 2026 BIGGASSS. Third-party components are not covered by this grant. They keep their own licenses and notices, including the vendored [Linux secure-storage plugin's BSD-3-Clause license](packages/flutter_secure_storage_linux/LICENSE), [nlohmann/json notices and licenses](packages/flutter_secure_storage_linux/linux/include/json.NOTICES.md), and [Flutter SDK action's MIT license](.github/actions/flutter-sdk/LICENSE) ([upstream provenance](.github/actions/flutter-sdk/UPSTREAM.md)).
 
-This source-license choice does not complete the binary redistribution review.
-The actual bundled dependencies (including mpv/FFmpeg), notices, and any source
-obligations still require the [release license gates](docs/RELEASE.md#dependencylicense-redistribution-gate).
-
-### Verify downloaded audio
-
-In **Downloads**, choose **Verify downloads** to check existing cached audio
-against its SHA-256 checksum, including older downloads without Activity entries.
-The local-only scan works offline, runs hashing in a background isolate, and shows
-byte progress, checked-file counts and an estimated time remaining once measured
-throughput is available. Cancel stops the scan; checks already completed remain
-applied, and leaving Downloads does not interrupt it.
-
-Startup, ordinary sync and retry passes check recorded identity, file existence
-and size without rehashing the whole library. New and resumed downloads still
-pass full checksum verification before becoming playable. Same-size damage to
-existing files is therefore detected when you explicitly run verification.
-
-Results distinguish valid, invalid and skipped files. Invalid audio is removed
-from playable storage; offline selections are retained. Choose **Redownload
-corrupted files** when connected to repair those files through the normal download
-queue. Verification itself does not redownload anything, and unrepaired failures
-remain held across restarts. Repair preserves existing selections and adds a track
-selection only for a damaged file that had no remaining selection. Unreadable or
-concurrently changed files are skipped so they can be checked again safely.
+The source license does not complete the binary redistribution review. Bundled dependencies (including mpv and FFmpeg), their notices, and any source obligations still need the [release license gates](docs/RELEASE.md#dependencylicense-redistribution-gate).
