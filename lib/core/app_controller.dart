@@ -21,6 +21,7 @@ import '../services/transfer_service.dart';
 import 'playback_controller.dart';
 
 export '../models/models.dart';
+export '../services/download_cleanup.dart' show UnusedDownloadPreview;
 export '../services/download_verification.dart'
     show DownloadVerificationProgress, VerificationStatus;
 export '../services/transfer_service.dart'
@@ -126,7 +127,8 @@ class AppController extends ChangeNotifier implements SystemMediaArtwork {
   final Set<Future<dynamic>> _onlineOperations = {};
   final Set<Future<void>> _uploadOperations = {};
   final Set<Future<void>> _downloadHistoryOperations = {};
-  final Set<Future<void>> _downloadMaintenanceOperations = {};
+  final Set<Future<dynamic>> _downloadMaintenanceOperations = {};
+  final _downloadCleanupPreviews = Expando<int>();
   Future<void>? _redownloadingCorruptedFiles;
   final Map<String, Future<void>> _redownloadingTracks = {};
   Future<void>? _reloadRunning;
@@ -317,6 +319,13 @@ class AppController extends ChangeNotifier implements SystemMediaArtwork {
       },
       onVerificationChanged: () {
         if (generation == _generation) _notifyVerification();
+      },
+      currentTrackId: () => playback.currentTrack?.id,
+      onCleanupChanged: () {
+        if (generation == _generation) {
+          _notifyDownloads();
+          _notify();
+        }
       },
       onDownloaded: (track) async {
         // The cache bounds/deduplicates work; images cannot stall audio.
@@ -596,9 +605,11 @@ class AppController extends ChangeNotifier implements SystemMediaArtwork {
     // History and verification/repair operations must finish before DB closure.
     // cleanup boundary still closes resources, then rethrows any failure.
     await cleanup(() async {
-      await Future.wait([
+      await Future.wait<dynamic>([
         ..._downloadHistoryOperations,
-        ..._downloadMaintenanceOperations,
+        ..._downloadMaintenanceOperations.map(
+          (operation) => operation.onError<TransferCancelled>((_, _) => null),
+        ),
       ]);
     });
     await cleanup(() async {
@@ -705,16 +716,17 @@ class AppController extends ChangeNotifier implements SystemMediaArtwork {
       if (changed) await _reloadCache();
       if (!_canPublish(db)) return;
       isOffline = false;
+      // Local reclamation must not depend on successful listening-event delivery.
+      // A failed/interrupted pass remains pending and is retried by no-op polls.
+      if (!_locking &&
+          (changed ||
+              _transfers!.hasPendingReconciliation ||
+              _wantedDownloads.any((id) => !_files.containsKey(id)))) {
+        unawaited(_background(_transfers!.reconcile(tracks, playlists, pins)));
+      }
       await flushOutbox();
       if (!_locking) {
         unawaited(_background(_transfers!.runUploads()));
-        // No-op polling retries missing/failed work, but does not repeatedly
-        // scan verified files. Integrity checks have their own slower cadence.
-        if (changed || _wantedDownloads.any((id) => !_files.containsKey(id))) {
-          unawaited(
-            _background(_transfers!.reconcile(tracks, playlists, pins)),
-          );
-        }
       }
     } on _AccountRefreshCancelled {
       // Account transitions drain refreshes; expected cancellation must not
@@ -934,6 +946,60 @@ class AppController extends ChangeNotifier implements SystemMediaArtwork {
 
   bool get redownloadingCorruptedFiles =>
       !_locking && _redownloadingCorruptedFiles != null;
+
+  /// A local-only scan or confirmed purge is in progress for this account.
+  bool get cleaningDownloads =>
+      !_locking && !_shuttingDown && (_transfers?.cleaningDownloads ?? false);
+
+  /// Preview is local-only and leaves bytes, selections and progress unchanged.
+  Future<UnusedDownloadPreview> previewUnusedDownloads() {
+    _requireDatabase();
+    final transfers = _transfers!;
+    final generation = _generation;
+    final operation = () async {
+      final preview = await transfers.previewUnusedDownloads(
+        protectedTrackId: playback.currentTrack?.id,
+      );
+      if (generation != _generation || _locking || _shuttingDown) {
+        throw TransferCancelled();
+      }
+      _downloadCleanupPreviews[preview] = generation;
+      return preview;
+    }();
+    _downloadMaintenanceOperations.add(operation);
+    return operation.whenComplete(
+      () => _downloadMaintenanceOperations.remove(operation),
+    );
+  }
+
+  /// Confirm only this account's exact preview, revalidating live pins/playback.
+  /// A stale dialog after an account transition cannot reclaim the new account.
+  Future<UnusedDownloadPreview> purgeUnusedDownloads(
+    UnusedDownloadPreview preview,
+  ) {
+    _requireDatabase();
+    final generation = _generation;
+    if (_downloadCleanupPreviews[preview] != generation) {
+      return Future.error(
+        StateError('Download cleanup preview belongs to another account'),
+      );
+    }
+    final transfers = _transfers!;
+    final operation = () async {
+      final removed = await transfers.purgeUnusedDownloads(
+        preview,
+        protectedTrackId: playback.currentTrack?.id,
+      );
+      if (generation != _generation || _locking || _shuttingDown) {
+        throw TransferCancelled();
+      }
+      return removed;
+    }();
+    _downloadMaintenanceOperations.add(operation);
+    return operation.whenComplete(
+      () => _downloadMaintenanceOperations.remove(operation),
+    );
+  }
 
   /// Explicit local-only integrity check, available without a connection.
   Future<void> verifyDownloads() {
@@ -1297,6 +1363,11 @@ class AppController extends ChangeNotifier implements SystemMediaArtwork {
       await playback.stop();
     }
     await _reloadCache();
+    if (_canPublish(db)) {
+      // The DELETE is already confirmed. Reclamation must also run when the
+      // following refresh/outbox delivery fails or returns a no-op snapshot.
+      unawaited(_background(_transfers!.reconcile(tracks, playlists, pins)));
+    }
     await refresh();
   });
   Future<Track> setArtwork(

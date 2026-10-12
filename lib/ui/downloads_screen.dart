@@ -105,6 +105,7 @@ class DownloadsScreen extends StatelessWidget {
                           '${downloaded.length} tracks · ${formatBytes(bytes)} on this device',
                       actions: [
                         _VerificationActions(app: app),
+                        _PurgeUnusedDownloadsAction(app: app),
                         OutlinedButton.icon(
                           onPressed: app.isAuthenticated && !app.busy
                               ? () => runUiAction(context, app.refresh)
@@ -457,6 +458,106 @@ class _OfflineSelectionsState extends State<_OfflineSelections> {
   );
 }
 
+class _PurgeUnusedDownloadsAction extends StatefulWidget {
+  const _PurgeUnusedDownloadsAction({required this.app});
+
+  final AppController app;
+
+  @override
+  State<_PurgeUnusedDownloadsAction> createState() =>
+      _PurgeUnusedDownloadsActionState();
+}
+
+class _PurgeUnusedDownloadsActionState
+    extends State<_PurgeUnusedDownloadsAction> {
+  bool _inFlight = false;
+
+  bool get _canPurge {
+    final app = widget.app;
+    return app.isAuthenticated &&
+        !app.busy &&
+        !app.cleaningDownloads &&
+        !app.hasRunningDownloads &&
+        !(app.verificationProgress?.isRunning ?? false);
+  }
+
+  Future<void> _purge() async {
+    if (_inFlight || !_canPurge) return;
+    final app = widget.app;
+    final account = app.account;
+    if (account == null) return;
+    bool sameAccount() =>
+        identical(widget.app, app) &&
+        app.isAuthenticated &&
+        identical(app.account, account);
+
+    setState(() => _inFlight = true);
+    try {
+      await runUiAction(context, () async {
+        final preview = await app.previewUnusedDownloads();
+        if (!mounted || !sameAccount()) return;
+        if (preview.fileCount == 0) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('No unused downloads to purge.')),
+          );
+          return;
+        }
+        final confirmed =
+            await showDialog<bool>(
+              context: context,
+              builder: (context) => AlertDialog(
+                scrollable: true,
+                title: const Text('Purge unused downloads?'),
+                content: Text(
+                  '${preview.fileCount} ${preview.fileCount == 1 ? 'file' : 'files'} · ${formatBytes(preview.totalBytes)} can be removed from this device.\n\n'
+                  'Only unselected audio and partial files will be removed. Selected music, current playback, your server library, history, and uploads stay unchanged.'
+                  '${app.isOffline ? '\n\nWhile offline, this uses your last synced library.' : ''}',
+                ),
+                actions: [
+                  TextButton(
+                    onPressed: () => Navigator.pop(context, false),
+                    child: const Text('Cancel'),
+                  ),
+                  FilledButton(
+                    onPressed: () => Navigator.pop(context, true),
+                    child: const Text('Purge'),
+                  ),
+                ],
+              ),
+            ) ??
+            false;
+        if (!confirmed || !mounted || !sameAccount() || !_canPurge) return;
+        final removed = await app.purgeUnusedDownloads(preview);
+        if (!mounted || !sameAccount()) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              'Removed ${removed.fileCount} unused ${removed.fileCount == 1 ? 'file' : 'files'} · ${formatBytes(removed.totalBytes)} freed.',
+            ),
+          ),
+        );
+      });
+    } finally {
+      if (mounted) setState(() => _inFlight = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) => SelectedBuilder(
+    listenable: Listenable.merge([
+      widget.app,
+      widget.app.downloadChanges,
+      widget.app.verificationChanges,
+    ]),
+    select: () => !_inFlight && _canPurge,
+    builder: (context, enabled, _) => OutlinedButton.icon(
+      onPressed: enabled ? _purge : null,
+      icon: const Icon(Icons.delete_sweep_outlined),
+      label: const Text('Purge unused downloads'),
+    ),
+  );
+}
+
 class _VerificationActions extends StatelessWidget {
   const _VerificationActions({required this.app});
 
@@ -464,11 +565,16 @@ class _VerificationActions extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => SelectedBuilder(
-    listenable: Listenable.merge([app, app.verificationChanges]),
+    listenable: Listenable.merge([
+      app,
+      app.verificationChanges,
+      app.downloadChanges,
+    ]),
     select: () => (
       app.isAuthenticated,
       app.verificationProgress?.isRunning ?? false,
       app.redownloadingCorruptedFiles,
+      app.cleaningDownloads,
     ),
     builder: (context, state, _) => Wrap(
       spacing: 8,
@@ -476,7 +582,7 @@ class _VerificationActions extends StatelessWidget {
       crossAxisAlignment: WrapCrossAlignment.center,
       children: [
         OutlinedButton.icon(
-          onPressed: state.$1 && !state.$2 && !state.$3
+          onPressed: state.$1 && !state.$2 && !state.$3 && !state.$4
               ? () => runUiAction(context, app.verifyDownloads)
               : null,
           icon: const Icon(Icons.fact_check_outlined),
@@ -499,12 +605,17 @@ class _VerificationSummary extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => SelectedBuilder(
-    listenable: Listenable.merge([app, app.verificationChanges]),
+    listenable: Listenable.merge([
+      app,
+      app.verificationChanges,
+      app.downloadChanges,
+    ]),
     select: () => (
       app.verificationProgress,
       app.isAuthenticated,
       app.isOffline,
       app.redownloadingCorruptedFiles,
+      app.cleaningDownloads,
     ),
     builder: (context, state, _) {
       final progress = state.$1;
@@ -563,7 +674,7 @@ class _VerificationSummary extends StatelessWidget {
               Align(
                 alignment: Alignment.centerLeft,
                 child: OutlinedButton.icon(
-                  onPressed: !state.$3 && !state.$4
+                  onPressed: !state.$3 && !state.$4 && !state.$5
                       ? () => runUiAction(context, app.redownloadCorruptedFiles)
                       : null,
                   icon: const Icon(Icons.download_rounded),

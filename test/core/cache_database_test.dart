@@ -8,17 +8,22 @@ void main() {
   setUp(() => db = CacheDatabase.memory());
   tearDown(() => db.close());
   test(
-    'cursor snapshots are atomic and preserve files, pins, and events',
+    'cursor resets remove stale direct pins but preserve other local data',
     () async {
       await db.put('event', 'event', {'id': 'event'});
       await db.put('file', 'old', {'id': 'old', 'path': 'file'});
+      await db.put('upload', 'upload', {'id': 'upload'});
+      await db.put('download', 'old', {'id': 'old'});
       await db.put('pin', 'pin', {'type': 'track', 'id': 'old'});
+      await db.put('pin', 'album', {'type': 'album', 'id': 'old'});
+      await db.put('pin', 'playlist', {'type': 'playlist', 'id': 'old'});
       await db.applyLibrary({
         'cursor': 4,
         'reset': true,
         'tracks': [const Track(id: 'old', title: 'old').toJson()],
         'playlists': [],
       });
+      expect(await db.get('pin', 'pin'), isNotNull);
       await db.applyLibrary({
         'cursor': 5,
         'reset': true,
@@ -29,27 +34,64 @@ void main() {
       expect((await db.list('track')).single['id'], 'new');
       expect(await db.get('event', 'event'), isNotNull);
       expect(await db.get('file', 'old'), isNotNull);
-      expect(await db.get('pin', 'pin'), isNotNull);
+      expect(await db.get('upload', 'upload'), isNotNull);
+      expect(await db.get('download', 'old'), isNotNull);
+      expect(await db.get('pin', 'pin'), isNull);
+      expect(await db.get('pin', 'album'), {'type': 'album', 'id': 'old'});
+      expect(await db.get('pin', 'playlist'), {
+        'type': 'playlist',
+        'id': 'old',
+      });
     },
   );
   test(
-    'incremental tombstones remove library records, not delayed events',
+    'incremental tombstones remove direct pins, not other selections or events',
     () async {
       await db.applyLibrary({
         'cursor': 1,
         'reset': true,
-        'tracks': [const Track(id: 'a', title: 'A').toJson()],
+        'tracks': [
+          const Track(id: 'a', title: 'A').toJson(),
+          const Track(id: 'b', title: 'B').toJson(),
+        ],
         'playlists': [],
       });
+      for (final key in ['pin', 'track:a', '["track","a"]']) {
+        await db.put('pin', key, {'type': 'track', 'id': 'a'});
+      }
+      await db.put('pin', 'track:already-absent', {
+        'type': 'track',
+        'id': 'already-absent',
+      });
+      await db.put('pin', 'track:unknown', {'type': 'track', 'id': 'unknown'});
+      // Document keys are not authoritative selection IDs.
+      await db.put('pin', 'track:looks-deleted', {'type': 'track', 'id': 'b'});
+      await db.put('pin', 'album', {'type': 'album', 'id': 'a'});
+      await db.put('pin', 'playlist', {'type': 'playlist', 'id': 'a'});
       await db.put('event', 'event', {'id': 'event', 'track_id': 'a'});
       await db.applyLibrary({
         'cursor': 2,
         'reset': false,
-        'deleted_track_ids': ['a'],
+        'deleted_track_ids': ['a', 'already-absent', 'looks-deleted'],
         'tracks': [],
         'playlists': [],
       });
-      expect(await db.list('track'), isEmpty);
+      expect((await db.list('track')).single['id'], 'b');
+      for (final key in [
+        'pin',
+        'track:a',
+        '["track","a"]',
+        'track:already-absent',
+      ]) {
+        expect(await db.get('pin', key), isNull);
+      }
+      expect(await db.get('pin', 'track:unknown'), isNotNull);
+      expect(await db.get('pin', 'track:looks-deleted'), {
+        'type': 'track',
+        'id': 'b',
+      });
+      expect(await db.get('pin', 'album'), {'type': 'album', 'id': 'a'});
+      expect(await db.get('pin', 'playlist'), {'type': 'playlist', 'id': 'a'});
       expect(await db.list('event'), hasLength(1));
       await db.acknowledgeEvents(['other']);
       expect(await db.list('event'), hasLength(1));
@@ -57,6 +99,217 @@ void main() {
       expect(await db.list('event'), isEmpty);
     },
   );
+  test('offline reads and no-op deltas do not infer track deletion', () async {
+    final pin = {'type': 'track', 'id': 'missing'};
+    await db.put('pin', 'pin', pin);
+    expect(await db.get('track', 'missing'), isNull);
+    expect(await db.list('track'), isEmpty);
+    expect(await db.list('pin'), [pin]);
+    await db.applyLibrary({
+      'cursor': 1,
+      'reset': false,
+      'tracks': [],
+      'playlists': [],
+    });
+    expect(await db.get('pin', 'pin'), pin);
+    await db.applyLibrary({
+      'cursor': 2,
+      'deleted_track_ids': ['unrelated'],
+    });
+    expect(await db.get('pin', 'pin'), pin);
+  });
+
+  test(
+    'full reset sweeps historical pins only after installing tracks',
+    () async {
+      await db.applyLibrary({'cursor': 1});
+      for (final id in ['historical', 'arriving', 'mutation']) {
+        await db.put('pin', 'track:$id', {'type': 'track', 'id': id});
+      }
+      final mutation = const Track(
+        id: 'mutation',
+        title: 'Concurrent mutation',
+        revision: 3,
+      ).toJson();
+      expect(
+        await db.publishLibraryRecord(
+          'track',
+          mutation,
+          expectedEpoch: await db.libraryEpoch,
+        ),
+        isTrue,
+      );
+      await db.applyLibrary({
+        'cursor': 2,
+        'reset': true,
+        'tracks': [
+          const Track(id: 'arriving', title: 'New', revision: 2).toJson(),
+        ],
+      });
+      expect(await db.get('pin', 'track:historical'), isNull);
+      expect(await db.get('pin', 'track:arriving'), {
+        'type': 'track',
+        'id': 'arriving',
+      });
+      expect(await db.get('track', 'mutation'), mutation);
+      expect(await db.get('pin', 'track:mutation'), {
+        'type': 'track',
+        'id': 'mutation',
+      });
+    },
+  );
+
+  test('large tombstone deltas prune direct pins in one batch', () async {
+    const deletedCount = 1200;
+    await db.transaction(() async {
+      for (var i = 0; i <= deletedCount; i++) {
+        final id = '$i';
+        await db.put('track', id, Track(id: id, title: id).toJson());
+        await db.put('pin', 'legacy:$id', PinSelection('track', id).toJson());
+      }
+    });
+    await db.applyLibrary({
+      'cursor': 1,
+      'reset': false,
+      'deleted_track_ids': [for (var i = 0; i < deletedCount; i++) '$i'],
+    });
+    expect(await db.list('pin'), [
+      const PinSelection('track', '$deletedCount').toJson(),
+    ]);
+    expect((await db.list('track')).single['id'], '$deletedCount');
+  });
+
+  test('acknowledged track delete removes only its direct pins', () async {
+    await db.applyLibrary({
+      'cursor': 1,
+      'tracks': [const Track(id: 't', title: 'T', revision: 1).toJson()],
+      'playlists': [const Playlist(id: 'p', name: 'Empty').toJson()],
+    });
+    for (final key in ['pin', 'track:t', '["track","t"]']) {
+      await db.put('pin', key, {'type': 'track', 'id': 't'});
+    }
+    await db.put('pin', 'unconfirmed', {'type': 'track', 'id': 'missing'});
+    await db.put('pin', 'album', {'type': 'album', 'id': 'Album'});
+    await db.put('pin', 'playlist', {'type': 'playlist', 'id': 'p'});
+    for (final kind in ['file', 'event', 'upload', 'download']) {
+      await db.put(kind, 'local', {'id': 't'});
+    }
+    final epoch = await db.libraryEpoch;
+    expect(
+      await db.deleteLibraryRecord('track', 't', expectedEpoch: epoch),
+      isTrue,
+    );
+    expect(await db.get('track', 't'), isNull);
+    expect(await db.get('deleted_track', 't'), {'id': 't', 'sequence': 1});
+    expect(await db.cursor, 1);
+    for (final key in ['pin', 'track:t', '["track","t"]']) {
+      expect(await db.get('pin', key), isNull);
+    }
+    expect(await db.get('pin', 'unconfirmed'), isNotNull);
+    expect(await db.get('pin', 'album'), {'type': 'album', 'id': 'Album'});
+    expect(await db.get('pin', 'playlist'), {'type': 'playlist', 'id': 'p'});
+    for (final kind in ['file', 'event', 'upload', 'download']) {
+      expect(await db.get(kind, 'local'), {'id': 't'});
+    }
+    expect(
+      await db.deleteLibraryRecord('playlist', 'p', expectedEpoch: epoch),
+      isTrue,
+    );
+    expect(await db.get('pin', 'playlist'), {'type': 'playlist', 'id': 'p'});
+  });
+
+  test(
+    'failed pin cleanup rolls back acknowledged delete and its barrier',
+    () async {
+      final track = const Track(id: 't', title: 'T', revision: 1).toJson();
+      await db.applyLibrary({
+        'cursor': 1,
+        'tracks': [track],
+      });
+      await db.put('pin', 'pin', {'type': 'track', 'id': 't'});
+      await db.customStatement('''
+      CREATE TRIGGER reject_pin_deletion BEFORE DELETE ON documents
+      WHEN OLD.kind = 'pin'
+      BEGIN SELECT RAISE(ABORT, 'reject pin deletion'); END
+    ''');
+      final epoch = await db.libraryEpoch;
+      await expectLater(
+        db.deleteLibraryRecord('track', 't', expectedEpoch: epoch),
+        throwsA(isA<Exception>()),
+      );
+      expect(await db.get('track', 't'), track);
+      expect(await db.get('pin', 'pin'), {'type': 'track', 'id': 't'});
+      expect(await db.get('deleted_track', 't'), isNull);
+      expect(await db.deletionSequence, 0);
+      expect(await db.cursor, 1);
+    },
+  );
+
+  for (final reset in [false, true]) {
+    test(
+      'older tombstone preserves newer track and pin (reset=$reset)',
+      () async {
+        await db.applyLibrary({
+          'cursor': 1,
+          'tracks': [const Track(id: 't', title: 'T', revision: 1).toJson()],
+        });
+        await db.put('pin', 'track:t', {'type': 'track', 'id': 't'});
+        final mutation = const Track(
+          id: 't',
+          title: 'Concurrent mutation',
+          revision: 3,
+        ).toJson();
+        expect(
+          await db.publishLibraryRecord(
+            'track',
+            mutation,
+            expectedEpoch: await db.libraryEpoch,
+          ),
+          isTrue,
+        );
+        await db.applyLibrary({
+          'cursor': 2,
+          'reset': reset,
+          'tracks': [],
+          'deleted_track_ids': ['t'],
+        });
+        expect(await db.get('track', 't'), mutation);
+        expect(await db.get('pin', 'track:t'), {'type': 'track', 'id': 't'});
+        expect(await db.cursor, 2);
+      },
+    );
+  }
+
+  test(
+    'pin cleanup safely matches JSON string IDs and ignores malformed pins',
+    () async {
+      const id = r'''a'"?$''';
+      await db.applyLibrary({
+        'cursor': 1,
+        'tracks': [const Track(id: id, title: 'Quoted ID').toJson()],
+      });
+      await db.put('pin', 'legacy', {'type': 'track', 'id': id});
+      await db.put('pin', 'non-string', {'type': 'track', 'id': 42});
+      await db.customStatement(
+        'INSERT INTO documents(kind,id,body) VALUES(?,?,?)',
+        ['pin', 'invalid-json', 'not JSON'],
+      );
+      await db.applyLibrary({
+        'cursor': 2,
+        'deleted_track_ids': [id],
+      });
+      expect(await db.get('pin', 'legacy'), isNull);
+      await db.applyLibrary({'cursor': 3, 'reset': true});
+      expect(await db.get('pin', 'non-string'), {'type': 'track', 'id': 42});
+      final rawPin = await db
+          .customSelect(
+            "SELECT body FROM documents WHERE kind='pin' AND id='invalid-json'",
+          )
+          .getSingle();
+      expect(rawPin.read<String>('body'), 'not JSON');
+    },
+  );
+
   test(
     'lower-cursor reset replaces the old timeline, not local data',
     () async {
@@ -78,9 +331,14 @@ void main() {
       );
       await db.deleteLibraryRecord('track', 't', expectedEpoch: oldEpoch);
       await db.deleteLibraryRecord('playlist', 'p', expectedEpoch: oldEpoch);
-      for (final kind in ['file', 'pin', 'event', 'upload', 'download']) {
+      for (final kind in ['file', 'event', 'upload', 'download']) {
         await db.put(kind, 'local', {'id': 'local'});
       }
+      for (final id in ['t', 'gone', 'newer', 'historical']) {
+        await db.put('pin', 'track:$id', {'type': 'track', 'id': id});
+      }
+      await db.put('pin', 'album', {'type': 'album', 'id': 'Album'});
+      await db.put('pin', 'playlist', {'type': 'playlist', 'id': 'p'});
       final restored = const Track(
         id: 't',
         title: 'Restored',
@@ -103,9 +361,15 @@ void main() {
       expect(await db.list('playlist'), [playlist]);
       expect(await db.list('deleted_track'), isEmpty);
       expect(await db.list('deleted_playlist'), isEmpty);
-      for (final kind in ['file', 'pin', 'event', 'upload', 'download']) {
+      for (final kind in ['file', 'event', 'upload', 'download']) {
         expect(await db.get(kind, 'local'), {'id': 'local'});
       }
+      expect(await db.get('pin', 'track:t'), {'type': 'track', 'id': 't'});
+      for (final id in ['gone', 'newer', 'historical']) {
+        expect(await db.get('pin', 'track:$id'), isNull);
+      }
+      expect(await db.get('pin', 'album'), {'type': 'album', 'id': 'Album'});
+      expect(await db.get('pin', 'playlist'), {'type': 'playlist', 'id': 'p'});
       // Both stale writes and revision-less DELETE responses are fenced.
       expect(
         await db.publishLibraryRecord('track', {
@@ -118,6 +382,11 @@ void main() {
         await db.deleteLibraryRecord('playlist', 'p', expectedEpoch: oldEpoch),
         isFalse,
       );
+      expect(
+        await db.deleteLibraryRecord('track', 't', expectedEpoch: oldEpoch),
+        isFalse,
+      );
+      expect(await db.get('pin', 'track:t'), {'type': 'track', 'id': 't'});
       expect(await db.list('track'), [restored]);
       expect(await db.list('playlist'), [playlist]);
       expect(
@@ -139,6 +408,8 @@ void main() {
           'cursor': 10,
           'tracks': [track],
         });
+        await db.put('pin', 'track:t', {'type': 'track', 'id': 't'});
+        await db.put('pin', 'historical', {'type': 'track', 'id': 'missing'});
         await expectLater(
           db.applyLibrary({
             'cursor': 2,
@@ -154,6 +425,11 @@ void main() {
         expect(await db.cursor, 10);
         expect(await db.libraryEpoch, 0);
         expect(await db.list('track'), [track]);
+        expect(await db.get('pin', 'track:t'), {'type': 'track', 'id': 't'});
+        expect(await db.get('pin', 'historical'), {
+          'type': 'track',
+          'id': 'missing',
+        });
       },
     );
   }
@@ -253,7 +529,7 @@ void main() {
   for (final reset in [false, true]) {
     for (final malformed in malformedRecords.entries) {
       test(
-        'invalid ${malformed.key} rolls back records and cursor (reset=$reset)',
+        'invalid ${malformed.key} rolls back records, pins and cursor (reset=$reset)',
         () async {
           final track = const Track(id: 'a', title: 'Original').toJson();
           final playlist = const Playlist(
@@ -266,6 +542,8 @@ void main() {
             'tracks': [track],
             'playlists': [playlist],
           });
+          await db.put('pin', 'track:a', {'type': 'track', 'id': 'a'});
+          await db.put('pin', 'historical', {'type': 'track', 'id': 'missing'});
           final (kind, invalidFields) = malformed.value;
           final tracks = [
             {...track, 'title': 'Updated'},
@@ -294,6 +572,11 @@ void main() {
           expect(await db.cursor, 1);
           expect(await db.list('track'), [track]);
           expect(await db.list('playlist'), [playlist]);
+          expect(await db.get('pin', 'track:a'), {'type': 'track', 'id': 'a'});
+          expect(await db.get('pin', 'historical'), {
+            'type': 'track',
+            'id': 'missing',
+          });
         },
       );
     }
