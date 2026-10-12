@@ -57,6 +57,39 @@ do not access a host session bus or wallet. Actual desktop icon rendering and
 focus behavior still need manual confirmation; Windows/macOS native builds were
 not rerun for this change. Restart Yun to replace an already-created tray icon.
 
+## Desktop startup window geometry
+
+Initial desktop windows now use a preferred 1280×720 size capped to 90% of the
+primary monitor's usable work area in logical pixels. Windows/macOS fit the
+outer frame; GTK reserves 48 logical pixels for its header/titlebar. X11,
+Windows and macOS center within that same work area. Wayland receives only a
+size request and retains compositor-controlled placement. No fixed minimum or
+maximum size is imposed, and later tray/Dock restores do not reset geometry.
+
+Dart defers the first frame during the bounded, best-effort configuration.
+Windows/Linux retain their native first-frame reveal; macOS starts its engine
+with a transparent window and reveals after the first rasterized frame, with
+an independent eight-second native visibility fallback. Native initial sizes
+are also fitted, so plugin failures retain usable defaults. A timed-out display
+lookup cannot resize the window after startup.
+
+Local validation passed formatting, analysis, all 1,299 Flutter tests (19 skips),
+and the Linux release build. The 33 new startup regressions also verify frame
+deferral/reveal ordering and recovery from errors or timeouts.
+
+Automated geometry/channel regressions cover logical DPI scaling, small screens,
+taskbar offsets, negative coordinates, GTK decorations, missing/invalid work-area
+data, Wayland size-only requests, plugin failures and late results. These tests
+mock native channels; they do not establish actual window-manager behavior.
+Manual acceptance remains required on Windows, macOS, X11 and Wayland:
+- Launch on a small laptop display at 100%, 150% and 200% scaling; verify the
+  titlebar, bottom player and window edges remain visible from the first reveal.
+- Move the taskbar/dock to different edges, and test mixed-DPI multi-monitor
+  arrangements including negative coordinates. Initial placement targets primary;
+  Wayland's compositor decides placement.
+- Resize/move, then hide/restore via tray or Dock; preserve the user's geometry.
+- Confirm sizing failures still reveal the library or its startup recovery screen.
+
 ## Desktop minimize-to-tray follow-up
 
 **All nine hosted CI jobs passed** for integrated code commit `e260abf`:

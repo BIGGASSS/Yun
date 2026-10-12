@@ -57,7 +57,26 @@ static void my_application_activate(GApplication* application) {
   if (icon != nullptr) {
     gtk_window_set_icon(window, icon);
   }
-  gtk_window_set_default_size(window, 1280, 720);
+  gint width = 1280;
+  gint height = 720;
+  GdkDisplay* display = gtk_widget_get_display(GTK_WIDGET(window));
+  GdkMonitor* monitor = gdk_display_get_primary_monitor(display);
+  if (monitor == nullptr && gdk_display_get_n_monitors(display) > 0) {
+    monitor = gdk_display_get_monitor(display, 0);
+  }
+  if (monitor != nullptr) {
+    GdkRectangle work_area;
+    gdk_monitor_get_workarea(monitor, &work_area);
+    if (work_area.width > 0 && work_area.height > 0) {
+      // GDK work areas are logical pixels. Leave room for the header/titlebar
+      // within the 90% outer-window budget, without imposing minimum sizes.
+      width = MAX(1, MIN(width, static_cast<gint>(work_area.width * 0.9)));
+      height =
+          MAX(1, MIN(height, static_cast<gint>(work_area.height * 0.9) - 48));
+    }
+  }
+  gtk_window_set_default_size(window, width, height);
+  // Leave placement to the window manager/compositor, especially on Wayland.
 
   g_autoptr(FlDartProject) project = fl_dart_project_new();
   fl_dart_project_set_dart_entrypoint_arguments(
@@ -72,7 +91,8 @@ static void my_application_activate(GApplication* application) {
   gtk_widget_show(GTK_WIDGET(view));
   gtk_container_add(GTK_CONTAINER(window), GTK_WIDGET(view));
 
-  // Show the window when Flutter renders.
+  // Dart defers the first frame while configuring the window; only show it
+  // when that configured Flutter frame arrives.
   // Requires the view to be realized so we can start rendering.
   g_signal_connect_swapped(view, "first-frame", G_CALLBACK(first_frame_cb),
                            self);

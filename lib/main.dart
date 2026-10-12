@@ -10,15 +10,14 @@ import 'core/desktop_controller.dart';
 import 'services/desktop_host.dart';
 import 'services/collection_settings_store.dart';
 import 'services/desktop_settings_store.dart';
+import 'services/desktop_window_startup.dart';
 import 'services/native_desktop_host.dart';
 import 'services/playback_settings_store.dart';
 import 'ui/app.dart';
 import 'ui/theme.dart';
 
-void main() {
-  WidgetsFlutterBinding.ensureInitialized();
-  runApp(const YunBootstrap());
-}
+Future<void> main() =>
+    launchWithDesktopWindow(() => runApp(const YunBootstrap()));
 
 /// Owns the account controller and checkpoints history on lifecycle transitions.
 /// Backgrounding does not stop music. OS process termination can still lose
