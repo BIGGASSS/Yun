@@ -148,41 +148,55 @@ class TrackTile extends StatelessWidget {
   final ValueChanged<bool?>? onSelectionChanged;
 
   @override
-  Widget build(BuildContext context) => SelectedBuilder(
-    listenable: app.playback,
-    select: () => selected == null && app.playback.currentTrack?.id == track.id,
-    builder: (context, current, _) => ListTile(
-      selected: selected ?? current,
-      leading: selected == null
-          ? TrackArtwork(app: app, track: track)
-          : Checkbox(
-              value: selected,
-              onChanged: onSelectionChanged,
-              semanticLabel: 'Select ${track.title}',
+  Widget build(BuildContext context) {
+    final menu = TrackMenu(app: app, track: track);
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onSecondaryTapUp: (details) =>
+          menu.showAt(context, details.globalPosition),
+      onLongPressStart: (details) =>
+          menu.showAt(context, details.globalPosition),
+      child: SelectedBuilder(
+        listenable: app.playback,
+        select: () =>
+            selected == null && app.playback.currentTrack?.id == track.id,
+        builder: (context, current, _) => ListTile(
+          selected: selected ?? current,
+          leading: selected == null
+              ? TrackArtwork(app: app, track: track)
+              : Checkbox(
+                  value: selected,
+                  onChanged: onSelectionChanged,
+                  semanticLabel: 'Select ${track.title}',
+                ),
+          title: Text(
+            '${number == null ? '' : '$number. '}${track.title}',
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
+          ),
+          subtitle: DownloadProgressBuilder(
+            app: app,
+            track: track,
+            builder: (context, progress) => Text(
+              '${track.artist.isEmpty ? 'Unknown artist' : track.artist} · ${downloadLabel(progress)}',
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
             ),
-      title: Text(
-        '${number == null ? '' : '$number. '}${track.title}',
-        maxLines: 2,
-        overflow: TextOverflow.ellipsis,
-      ),
-      subtitle: DownloadProgressBuilder(
-        app: app,
-        track: track,
-        builder: (context, progress) => Text(
-          '${track.artist.isEmpty ? 'Unknown artist' : track.artist} · ${downloadLabel(progress)}',
-          maxLines: 2,
-          overflow: TextOverflow.ellipsis,
+          ),
+          onTap: selected == null
+              ? onTap ??
+                    () => runUiAction(
+                      context,
+                      () => app.play(track, queue: queue),
+                    )
+              : onSelectionChanged == null
+              ? null
+              : () => onSelectionChanged!(!selected!),
+          trailing: trailing ?? menu,
         ),
       ),
-      onTap: selected == null
-          ? onTap ??
-                () => runUiAction(context, () => app.play(track, queue: queue))
-          : onSelectionChanged == null
-          ? null
-          : () => onSelectionChanged!(!selected!),
-      trailing: trailing ?? TrackMenu(app: app, track: track),
-    ),
-  );
+    );
+  }
 }
 
 /// Byte ticks rebuild only the indicator belonging to the changed track.
@@ -220,52 +234,68 @@ class TrackMenu extends StatelessWidget {
   final AppController app;
   final Track track;
 
+  Future<void> showAt(BuildContext context, Offset globalPosition) async {
+    final overlay =
+        Navigator.of(context).overlay!.context.findRenderObject()! as RenderBox;
+    final position = overlay.globalToLocal(globalPosition);
+    final value = await showMenu<String>(
+      context: context,
+      position: RelativeRect.fromRect(
+        Rect.fromLTWH(position.dx, position.dy, 0, 0),
+        Offset.zero & overlay.size,
+      ),
+      items: _items(),
+    );
+    if (value != null && context.mounted) _onSelected(context, value);
+  }
+
+  void _onSelected(
+    BuildContext context,
+    String value,
+  ) => runUiAction(context, () async {
+    switch (value) {
+      case 'next':
+        await app.queueNext(track);
+      case 'playlist':
+        await addTrackToPlaylist(context, app, track);
+      case 'download':
+        await app.pinTrack(track.id, pinned: !app.isPinned('track', track.id));
+      case 'edit':
+        await showDialog<void>(
+          context: context,
+          builder: (_) => MetadataDialog(app: app, track: track),
+        );
+      case 'delete':
+        if (await confirmAction(
+          context,
+          title: 'Delete track?',
+          message:
+              '“${track.title}” will be removed from your library and playlists on all devices.',
+        )) {
+          await app.deleteTrack(track.id);
+        }
+    }
+  });
+
+  List<PopupMenuEntry<String>> _items() => [
+    const PopupMenuItem(value: 'next', child: Text('Play next')),
+    const PopupMenuItem(value: 'playlist', child: Text('Add to playlist')),
+    PopupMenuItem(
+      value: 'download',
+      child: Text(
+        app.isPinned('track', track.id) ? 'Unpin download' : 'Keep offline',
+      ),
+    ),
+    const PopupMenuItem(value: 'edit', child: Text('Edit metadata & artwork')),
+    const PopupMenuDivider(),
+    const PopupMenuItem(value: 'delete', child: Text('Delete from library')),
+  ];
+
   @override
   Widget build(BuildContext context) => PopupMenuButton<String>(
     tooltip: 'Options for ${track.title}',
-    onSelected: (value) => runUiAction(context, () async {
-      switch (value) {
-        case 'next':
-          await app.queueNext(track);
-        case 'playlist':
-          await addTrackToPlaylist(context, app, track);
-        case 'download':
-          await app.pinTrack(
-            track.id,
-            pinned: !app.isPinned('track', track.id),
-          );
-        case 'edit':
-          await showDialog<void>(
-            context: context,
-            builder: (_) => MetadataDialog(app: app, track: track),
-          );
-        case 'delete':
-          if (await confirmAction(
-            context,
-            title: 'Delete track?',
-            message:
-                '“${track.title}” will be removed from your library and playlists on all devices.',
-          )) {
-            await app.deleteTrack(track.id);
-          }
-      }
-    }),
-    itemBuilder: (_) => [
-      const PopupMenuItem(value: 'next', child: Text('Play next')),
-      const PopupMenuItem(value: 'playlist', child: Text('Add to playlist')),
-      PopupMenuItem(
-        value: 'download',
-        child: Text(
-          app.isPinned('track', track.id) ? 'Unpin download' : 'Keep offline',
-        ),
-      ),
-      const PopupMenuItem(
-        value: 'edit',
-        child: Text('Edit metadata & artwork'),
-      ),
-      const PopupMenuDivider(),
-      const PopupMenuItem(value: 'delete', child: Text('Delete from library')),
-    ],
+    onSelected: (value) => _onSelected(context, value),
+    itemBuilder: (_) => _items(),
   );
 }
 
