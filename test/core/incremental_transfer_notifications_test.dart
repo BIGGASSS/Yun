@@ -432,7 +432,12 @@ void main() {
       sizeBytes: bytes.length,
       sha256: track.sha256,
     );
-    final cached = await File('${root.path}/old.audio').writeAsBytes(bytes);
+    final key = sha256
+        .convert(utf8.encode(jsonEncode(['https://yun.test', 'u'])))
+        .toString();
+    final audio = await Directory('${root.path}/accounts/$key/audio')
+        .create(recursive: true);
+    final cached = await File('${audio.path}/old.audio').writeAsBytes(bytes);
     await db.put('track', old.id, old.toJson());
     await db.put('file', old.id, {
       'id': old.id,
@@ -467,6 +472,9 @@ void main() {
     expect(value.localPath(old.id), isNull);
     expect(value.localPath(track.id), isNotNull);
     expect(value.downloadedTrackIds, {track.id});
-    expect(db.reads['file'], 2); // Full read + reconciliation, not completion.
+    expect(await cached.exists(), isFalse);
+    // Full read + reconciliation + authoritative cleanup preview/revalidation.
+    // Completion still publishes only its delta, without a full inventory read.
+    expect(db.reads['file'], 4);
   });
 }
