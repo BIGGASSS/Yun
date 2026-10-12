@@ -146,7 +146,7 @@ reconciles hidden state through native focus events. Touch/web never construct
 this adapter. Retry retains interception until old-account shutdown completes.
 
 ## Models
-Track: id/title/artist/album/albumArtist/trackNumber/discNumber/durationMs/sizeBytes/sha256/mimeType/hasArtwork/revision/createdAt; `Duration duration`.
+Track: id/title/artist/album/albumArtist/trackNumber/discNumber/durationMs/sizeBytes/bitrateKbps/sha256/mimeType/hasArtwork/revision/createdAt; `Duration duration`. Nullable `bitrateKbps` is server-extracted audio kilobits/sec; `estimatedBitrateKbps` derives a legacy file-size/duration fallback (includes tag/container overhead).
 Playlist: id/name/revision/entries/updatedAt. PlaylistEntry: id/trackId; constructors and JSON converters supplied.
 UploadJob: id/localPath/filename/sizeBytes/offset/remoteId/status/error; `double progress`. Status string: queued/uploading/completing/done/failed/cancelled.
 ServerStats: listenedMs/playCount/topTracks/topArtists/topAlbums/history (typed models); JSON converters. Account and pin/job persistence are account-scoped.

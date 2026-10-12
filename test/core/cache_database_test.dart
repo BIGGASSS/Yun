@@ -453,10 +453,60 @@ void main() {
     expect(await db.cursor, 1);
     expect((await db.list('track')).single['id'], 'a');
   });
+  test(
+    'cached bitrate survives snapshots, updates, and explicit clearing',
+    () async {
+      final records = [
+        {
+          'id': 'legacy',
+          'title': 'Legacy',
+          'size_bytes': 4800000,
+          'duration_ms': 300000,
+        },
+        {'id': 'unknown', 'title': 'Unknown', 'bitrate_kbps': null},
+        const Track(
+          id: 'known',
+          title: 'Known',
+          bitrateKbps: 320,
+          sizeBytes: 12000000,
+          durationMs: 300000,
+        ).toJson(),
+      ];
+      await db.applyLibrary({'cursor': 1, 'reset': true, 'tracks': records});
+      final cached = await db.list('track');
+      expect(cached, records);
+      expect(cached.first.containsKey('bitrate_kbps'), isFalse);
+      expect(cached[1].containsKey('bitrate_kbps'), isTrue);
+      final tracks = cached.map(Track.fromJson).toList();
+      expect(tracks.map((track) => track.bitrateKbps), [null, null, 320]);
+      expect(tracks.map((track) => track.estimatedBitrateKbps), [
+        128,
+        null,
+        320,
+      ]);
+
+      for (final (cursor, bitrate) in [(2, 192), (3, null)]) {
+        await db.applyLibrary({
+          'cursor': cursor,
+          'tracks': [
+            {...records.last, 'bitrate_kbps': bitrate, 'revision': cursor},
+          ],
+        });
+        final updated = (await db.get('track', 'known'))!;
+        expect(updated['bitrate_kbps'], bitrate);
+        expect(Track.fromJson(updated).bitrateKbps, bitrate);
+        expect(Track.fromJson(updated).estimatedBitrateKbps, 320);
+        expect(await db.get('track', 'legacy'), records.first);
+        expect(await db.cursor, cursor);
+      }
+    },
+  );
+
   final malformedRecords = <String, (String, Map<String, dynamic>)>{
     'track title': ('track', {'title': 42}),
     'track artist': ('track', {'artist': []}),
     'track duration': ('track', {'duration_ms': 'invalid'}),
+    'track bitrate': ('track', {'bitrate_kbps': '320'}),
     'playlist name': ('playlist', {'name': 42}),
     'playlist revision': ('playlist', {'revision': 'invalid'}),
     'playlist entry id': (

@@ -311,9 +311,9 @@ pub(crate) async fn complete(
             (None, None)
         };
         let revision = bump(&mut tx, &auth.user).await?;
-        sqlx::query("INSERT INTO tracks(id,user_id,title,artist,album,album_artist,track_number,disc_number,duration_ms,size_bytes,sha256,mime_type,artwork_path,artwork_mime,artwork_size_bytes,audio_path,revision,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
+        sqlx::query("INSERT INTO tracks(id,user_id,title,artist,album,album_artist,track_number,disc_number,duration_ms,bitrate_kbps,size_bytes,sha256,mime_type,artwork_path,artwork_mime,artwork_size_bytes,audio_path,revision,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
             .bind(&track_id).bind(&auth.user).bind(metadata.title).bind(metadata.artist).bind(metadata.album).bind(metadata.album_artist).bind(metadata.track_number).bind(metadata.disc_number)
-            .bind(metadata.duration_ms).bind(upload.size_bytes).bind(metadata.sha256).bind(metadata.mime_type).bind(artwork_path).bind(artwork_mime).bind(artwork_size).bind(audio_path).bind(revision).bind(now()).execute(&mut *tx).await?;
+            .bind(metadata.duration_ms).bind(metadata.bitrate_kbps).bind(upload.size_bytes).bind(metadata.sha256).bind(metadata.mime_type).bind(artwork_path).bind(artwork_mime).bind(artwork_size).bind(audio_path).bind(revision).bind(now()).execute(&mut *tx).await?;
         track_id
     };
     sqlx::query("UPDATE uploads SET completed_track_id=?,updated_at=? WHERE user_id=? AND id=?")

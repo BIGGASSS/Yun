@@ -87,6 +87,27 @@ and `dc up -d --wait server caddy`. Migrations are forward-only: rollback requir
 the matching old image **and** pre-upgrade backup, not just an older executable.
 Do not run multiple origin replicas against the same data directory.
 
+## Bitrate backfill for older tracks
+
+With the rebuilt server image installed, use the same stopped-server admin
+workflow (the command needs the existing data volume, not client audio files):
+
+```sh
+dc stop server
+dc run --rm --no-deps server backfill-bitrates
+# For lower I/O concurrency: append --batch-size 16 --concurrency 1
+dc start server
+dc ps
+```
+
+Check the summary/warnings before restarting. A nonzero exit means some files
+could not be read; other completed batches are saved. Repair missing/corrupt
+originals if possible and rerun the command to retry still-null bitrates. Known
+bitrates and deleted tracks are untouched. Interruption is safe to resume by
+rerunning; updates and sync revisions commit per batch. Clients replace estimates
+with cached server values on their next library sync. See the
+[server command details](../server/README.md#backfill-bitrate-for-older-tracks).
+
 ## Offline backup
 
 ```sh

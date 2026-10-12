@@ -8,8 +8,8 @@ import '../core/fakes.dart';
 import 'player_test_app.dart';
 
 const _tracks = [
-  Track(id: 'alpha', title: 'Alpha', artist: 'Artist A'),
-  Track(id: 'beta', title: 'Beta', artist: 'Artist B'),
+  Track(id: 'alpha', title: 'Alpha', artist: 'Artist A', bitrateKbps: 320),
+  Track(id: 'beta', title: 'Beta', artist: 'Artist B', bitrateKbps: 192),
 ];
 
 class _TrackApp extends PlayerTestApp {
@@ -151,6 +151,17 @@ void main() {
         );
 
         for (final track in _tracks) {
+          final row = find.widgetWithText(TrackTile, track.title);
+          final bitrate = find.descendant(
+            of: row,
+            matching: find.text('· ${track.bitrateKbps} kbps'),
+          );
+          final availability = find.descendant(
+            of: row,
+            matching: find.byIcon(Icons.cloud_outlined),
+          );
+          expect(bitrate, findsOneWidget);
+          expect(availability, findsOneWidget);
           final point = await _openMenu(tester, track, opening);
           _expectOptions();
           final menu = tester.getRect(
@@ -167,6 +178,8 @@ void main() {
           expect(customTaps, 0);
           expect(engine.opens, 1);
           await _dismissMenu(tester);
+          expect(bitrate, findsOneWidget);
+          expect(availability, findsOneWidget);
           expect(app.played, isEmpty);
           expect(customTaps, 0);
           expect(app.queued, isEmpty);

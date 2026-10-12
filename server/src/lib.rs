@@ -1,5 +1,6 @@
 mod admission;
 mod auth;
+mod bitrate_backfill;
 mod error;
 mod events;
 mod library;
@@ -16,6 +17,7 @@ use axum::{
     extract::DefaultBodyLimit,
     routing::{get, patch, post, put},
 };
+pub use bitrate_backfill::{BackfillOptions, BackfillReport};
 pub use error::ApiError;
 use sqlx::{
     SqlitePool,
@@ -129,6 +131,14 @@ impl AppState {
     }
     pub async fn cleanup(&self) -> anyhow::Result<()> {
         uploads::cleanup(self).await
+    }
+    /// Offline, resumable bitrate maintenance. Stop the serving process before
+    /// opening its data directory; successful batches atomically update sync revisions.
+    pub async fn backfill_bitrates(
+        &self,
+        options: BackfillOptions,
+    ) -> anyhow::Result<BackfillReport> {
+        bitrate_backfill::run(self, options).await
     }
     pub async fn close(&self) {
         self.0.pool.close().await;

@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../core/app_controller.dart';
 import '../core/collection_settings_controller.dart';
 import 'collection_controls.dart';
+import 'track_widgets.dart';
 import 'widgets.dart';
 
 /// Capture identity, not just collection IDs (which can coincide across users).
@@ -720,11 +721,9 @@ class _PlaylistsScreenState extends State<PlaylistsScreen> {
         maxLines: 2,
         overflow: TextOverflow.ellipsis,
       ),
-      subtitle: Text(
-        track?.artist ?? 'Removed from library',
-        maxLines: 1,
-        overflow: TextOverflow.ellipsis,
-      ),
+      subtitle: track == null
+          ? const Text('Removed from library')
+          : TrackInfo(track: track, maxArtistLines: 1),
       onTap: _saving || track == null
           ? null
           : () => _guard(
@@ -957,11 +956,7 @@ class _AddTracksDialogState extends State<_AddTracksDialog> {
                           maxLines: 2,
                           overflow: TextOverflow.ellipsis,
                         ),
-                        subtitle: Text(
-                          track.artist,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                        ),
+                        subtitle: TrackInfo(track: track, maxArtistLines: 1),
                         value: _selected.contains(track.id),
                         onChanged: (_) => setState(() {
                           if (!_selected.add(track.id)) {

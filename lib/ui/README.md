@@ -35,6 +35,10 @@ the specified major. Core dependencies must also be installed before running
   trays keep the window visible, retain the preference, and expose a dismissible
   error. Controls are platform-gated even at narrow desktop / wide mobile sizes.
   Bootstrap supplies the optional `YunApp.desktop` controller.
+- Track rows show audio bitrate in kbps alongside artist and availability.
+  Legacy tracks fall back to a clearly marked (~) file-size/duration estimate;
+  missing duration/size leaves bitrate hidden. The shared info also appears in
+  playlists, the track picker, download activity, and the playback queue.
 - Library search, albums/artists, metadata and immediate artwork replacement.
   Track sorting and checkbox multiselection support filtered select-all, bulk
   playback, playlist addition, offline pinning and confirmed deletion.

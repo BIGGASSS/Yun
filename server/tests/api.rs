@@ -254,6 +254,74 @@ fn event(device: &str, session: &str, track: &str, start: i64, ms: i64) -> Value
 }
 
 #[tokio::test]
+async fn wav_audio_bitrate_is_persisted_and_preserved_in_track_responses() {
+    let h = Harness::new().await;
+    let pool = sqlx::sqlite::SqlitePoolOptions::new()
+        .connect_with(
+            sqlx::sqlite::SqliteConnectOptions::new().filename(h.dir.path().join("yun.sqlite3")),
+        )
+        .await
+        .unwrap();
+    // At 8 Hz, mono 16-bit PCM is below 1 kbps. Lofty reports zero,
+    // which must remain unknown rather than being stored as a nonpositive bitrate.
+    let mut slow_wav = wav(1);
+    slow_wav[24..28].copy_from_slice(&8u32.to_le_bytes());
+    slow_wav[28..32].copy_from_slice(&16u32.to_le_bytes());
+    for (bytes, bitrate_kbps) in [(wav(1), json!(128)), (slow_wav, Value::Null)] {
+        let track = h.upload(h.a(), &bytes).await;
+        let tid = track["id"].as_str().unwrap();
+        assert_eq!(track.get("bitrate_kbps"), Some(&bitrate_kbps));
+        let stored: Option<i64> = sqlx::query_scalar("SELECT bitrate_kbps FROM tracks WHERE id=?")
+            .bind(tid)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(stored, bitrate_kbps.as_i64());
+        for query in ["", "?paged=true", "?cursor=0"] {
+            let (code, library) = json_request(
+                &h.app,
+                "GET",
+                &format!("/api/v1/library{query}"),
+                Some(h.a()),
+                json!({}),
+            )
+            .await;
+            assert_eq!(code, StatusCode::OK, "{library}");
+            let synced = library["tracks"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|row| row["id"] == track["id"])
+                .unwrap();
+            assert_eq!(synced, &track);
+        }
+        let (code, edited) = json_request(
+            &h.app,
+            "PATCH",
+            &format!("/api/v1/tracks/{tid}"),
+            Some(h.a()),
+            json!({"revision":track["revision"],"title":"Edited title"}),
+        )
+        .await;
+        assert_eq!(code, StatusCode::OK, "{edited}");
+        assert_eq!(edited["title"], "Edited title");
+        assert_eq!(edited.get("bitrate_kbps"), Some(&bitrate_kbps));
+        let (code, delta) = json_request(
+            &h.app,
+            "GET",
+            &format!("/api/v1/library?cursor={}", track["revision"]),
+            Some(h.a()),
+            json!({}),
+        )
+        .await;
+        assert_eq!(code, StatusCode::OK, "{delta}");
+        assert_eq!(delta["tracks"], json!([edited.clone()]));
+        assert_eq!(h.upload(h.a(), &bytes).await, edited);
+    }
+    pool.close().await;
+}
+
+#[tokio::test]
 async fn legacy_library_requests_succeed_when_small_and_require_upgrade_when_large() {
     let h = Harness::new().await;
     let (code, playlist) = json_request(
@@ -1577,6 +1645,8 @@ async fn tags_artwork_and_malformed_payload_limits() {
     assert_eq!(track["title"], "Embedded title");
     assert_eq!(track["artist"], "Embedded artist");
     assert_eq!(track["track_number"], 7);
+    // Embedded tags and artwork must not contribute to the audio bitrate.
+    assert_eq!(track["bitrate_kbps"], 128);
     assert_eq!(track["has_artwork"], true);
     let path = format!("/api/v1/tracks/{}/artwork", track["id"].as_str().unwrap());
     let (code, headers, body) = raw(&h.app, "GET", &path, Some(h.a()), &[], vec![]).await;
@@ -1620,19 +1690,18 @@ async fn tags_artwork_and_malformed_payload_limits() {
         .0,
         StatusCode::BAD_REQUEST
     );
-    assert_eq!(
-        raw(
-            &h.app,
-            "PUT",
-            &path,
-            Some(h.a()),
-            &[("if-match", &revision)],
-            png.clone()
-        )
-        .await
-        .0,
-        StatusCode::OK
-    );
+    let (code, _, body) = raw(
+        &h.app,
+        "PUT",
+        &path,
+        Some(h.a()),
+        &[("if-match", &revision)],
+        png.clone(),
+    )
+    .await;
+    assert_eq!(code, StatusCode::OK);
+    let updated: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(updated["bitrate_kbps"], 128);
     assert_eq!(
         raw(
             &h.app,

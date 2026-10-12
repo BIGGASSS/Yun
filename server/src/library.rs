@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::{FromRow, Row, SqliteConnection};
 use std::collections::HashMap;
 
-pub(crate) const TRACK_COLUMNS: &str = "id,title,artist,album,album_artist,track_number,disc_number,duration_ms,size_bytes,sha256,mime_type,(artwork_path IS NOT NULL) AS has_artwork,revision,created_at";
+pub(crate) const TRACK_COLUMNS: &str = "id,title,artist,album,album_artist,track_number,disc_number,duration_ms,bitrate_kbps,size_bytes,sha256,mime_type,(artwork_path IS NOT NULL) AS has_artwork,revision,created_at";
 #[derive(Serialize, FromRow, Debug)]
 pub struct Track {
     pub id: String,
@@ -19,6 +19,7 @@ pub struct Track {
     pub track_number: Option<i64>,
     pub disc_number: Option<i64>,
     pub duration_ms: i64,
+    pub bitrate_kbps: Option<i64>,
     pub size_bytes: i64,
     pub sha256: String,
     pub mime_type: String,
