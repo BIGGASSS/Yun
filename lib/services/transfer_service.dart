@@ -8,9 +8,11 @@ import '../models/models.dart';
 import 'api_client.dart';
 import 'cache_database.dart';
 import 'download_buffer.dart';
+import 'download_cleanup.dart';
 import 'download_receiver.dart';
 import 'download_verification.dart';
 
+export 'download_cleanup.dart' show UnusedDownloadPreview;
 export 'download_verification.dart';
 
 /// Pin selections are durable references, not independent copies of audio.
@@ -148,6 +150,8 @@ class TransferService {
     this.onFileChanged,
     this.onDownloaded,
     this.onVerificationChanged,
+    this.onCleanupChanged,
+    this.currentTrackId,
     DownloadFileVerifier Function()? verificationWorkerFactory,
     DownloadReceiver? downloadReceiver,
     Directory? importsDirectory,
@@ -352,6 +356,11 @@ class TransferService {
 
   final Future<void> Function(Track)? onDownloaded;
   final void Function()? onVerificationChanged;
+  final void Function()? onCleanupChanged;
+
+  /// Live playback identity, including a paused/selected track. Cleanup samples
+  /// this again immediately before unlinking, not just when confirmation opens.
+  final String? Function()? currentTrackId;
   final DownloadFileVerifier Function() _verificationWorkerFactory;
   final DownloadReceiver _downloadReceiver;
   final Map<String, DownloadProgress> _downloads = {};
@@ -562,11 +571,126 @@ class TransferService {
   }
 
   Future<void> _invalidateFile(String id, Map<String, dynamic> record) async {
+    // Unknown metadata does not make an external path or symlink ours to delete.
+    if (!_downloadCleanup.canManageRecordedPath(record['path'])) return;
     // Remove the playable reference before attempting cleanup or replacement.
     await database.remove('file', id);
     _publishFile(id, null);
-    final file = File(record['path'] as String);
-    if (await file.exists()) await file.delete();
+    _downloadCleanup.deleteOwnedRecordedFile(record['path'] as String);
+  }
+
+  late final _downloadCleanup = DownloadCleanup(
+    database: database,
+    directory: directory,
+    references: pinReferences,
+    isClosed: () => _closed,
+    currentTrackId: currentTrackId,
+    currentOwner: () {
+      final account = api.session?.account;
+      return account == null ? null : (account.server, account.userId);
+    },
+  );
+  Future<void>? _cleanupRunning;
+
+  /// Preview scans and purges are serialized with downloads and verification.
+  bool get cleaningDownloads => _cleanupRunning != null;
+
+  /// Interrupted reclamation/work is retained for a later no-op refresh retry.
+  bool get hasPendingReconciliation => _nextReconciliation != null;
+
+  Future<T> _cleanDownloads<T>(Future<T> Function() action) {
+    if (_closed) return Future.error(TransferCancelled());
+    if (_downloadsRunning != null ||
+        _verificationRunning != null ||
+        _cleanupRunning != null) {
+      return Future.error(
+        StateError('Wait for downloads and verification to finish'),
+      );
+    }
+    final completed = Completer<void>();
+    _cleanupRunning = completed.future;
+    (onCleanupChanged ?? onDownloadChanged ?? onChanged)();
+    return () async {
+      try {
+        return await action();
+      } on DownloadCleanupCancelled {
+        throw TransferCancelled();
+      } finally {
+        _cleanupRunning = null;
+        completed.complete();
+        if (!_closed) (onCleanupChanged ?? onDownloadChanged ?? onChanged)();
+        unawaited(
+          _resumeReconciliations().catchError((Object e) => onError(e)),
+        );
+      }
+    }();
+  }
+
+  /// Compute local-only totals without changing files, records or progress.
+  /// Keep this exact value for confirmation; caller-created summaries cannot
+  /// authorize deletion, nor can previews from a previous account/service.
+  Future<UnusedDownloadPreview> previewUnusedDownloads({
+    String? protectedTrackId,
+  }) => _cleanDownloads(
+    () => _downloadCleanup.preview(protectedTrackId: protectedTrackId),
+  );
+
+  /// Remove only unchanged, still-unselected candidates from this preview.
+  /// Returns actual removals, which may be smaller than the reviewed totals.
+  Future<UnusedDownloadPreview> purgeUnusedDownloads(
+    UnusedDownloadPreview preview, {
+    String? protectedTrackId,
+  }) => _cleanDownloads(() async {
+    final result = await _downloadCleanup.purge(
+      preview,
+      protectedTrackId: protectedTrackId,
+    );
+    _publishCleanup(result);
+    if (_closed) throw TransferCancelled();
+    return result.summary;
+  });
+
+  void _publishCleanup(DownloadCleanupResult result) {
+    for (final id in result.fileIds) {
+      _publishFile(id, null);
+    }
+    if (result.downloadIds.isNotEmpty) {
+      for (final id in result.downloadIds) {
+        _downloads.remove(id);
+        _runningDownloadIds.remove(id);
+        _downloadBatchIds.remove(id);
+        _completedDownloadBatchIds.remove(id);
+        _requestedRedownloads.remove(id);
+      }
+      _downloadSectionsRevision++;
+      (onDownloadChanged ?? onChanged)();
+    }
+    final previous = _verificationProgress;
+    if (previous == null) return;
+    final retained = previous.invalidTrackIds
+        .where(
+          (id) =>
+              !result.downloadIds.contains(id) &&
+              (result.trackIds.contains(id) ||
+                  result.protectedIds.contains(id)),
+        )
+        .toList();
+    if (retained.length == previous.invalidTrackIds.length) return;
+    _verificationProgress = DownloadVerificationProgress(
+      status: previous.status,
+      totalFiles: previous.totalFiles,
+      checkedFiles: previous.checkedFiles,
+      validFiles: previous.validFiles,
+      invalidFiles: previous.invalidFiles,
+      skippedFiles: previous.skippedFiles,
+      processedBytes: previous.processedBytes,
+      totalBytes: previous.totalBytes,
+      hashedBytes: previous.hashedBytes,
+      elapsed: previous.elapsed,
+      invalidTrackIds: List.unmodifiable(retained),
+      error: retained.isEmpty ? null : previous.error,
+    );
+    onVerificationChanged?.call();
   }
 
   DownloadVerificationProgress? _verificationProgress;
@@ -580,6 +704,9 @@ class TransferService {
   /// One scan per account. Navigation does not own or cancel this operation.
   Future<void> verifyDownloads() {
     if (_closed) return Future.error(TransferCancelled());
+    if (_cleanupRunning != null) {
+      return Future.error(StateError('Wait for download cleanup to finish'));
+    }
     if (_verificationRunning != null) return _verificationRunning!;
     final completed = Completer<void>();
     _verificationRunning = completed.future;
@@ -614,6 +741,7 @@ class TransferService {
   Future<void> _resumeReconciliations() {
     if (_closed ||
         _verificationRunning != null ||
+        _cleanupRunning != null ||
         _nextReconciliation == null) {
       return Future.value();
     }
@@ -741,11 +869,7 @@ class TransferService {
           // The invalid reference is already quarantined. Failure to delete
           // leftover bytes does not allow playback or prevent other checks.
           try {
-            final file = File(record['path'] as String);
-            if (await FileSystemEntity.type(file.path, followLinks: false) ==
-                FileSystemEntityType.file) {
-              await file.delete();
-            }
+            _downloadCleanup.deleteOwnedRecordedFile(record['path'] as String);
           } on FileSystemException {
             lastError =
                 'A corrupt file was quarantined but could not be removed.';
@@ -795,6 +919,9 @@ class TransferService {
     List<PinSelection> pins,
   ) async {
     if (_closed) throw TransferCancelled();
+    if (_cleanupRunning != null) {
+      throw StateError('Wait for download cleanup to finish');
+    }
     if (_verificationRunning != null) return;
     final known = {for (final track in tracks) track.id: track};
     for (final id in _verificationProgress?.invalidTrackIds ?? <String>[]) {
@@ -1235,6 +1362,9 @@ class TransferService {
     if (_verificationRunning != null) {
       return _verificationRunning!.then((_) => _resumeReconciliations());
     }
+    if (_cleanupRunning != null) {
+      return _cleanupRunning!.then((_) => _resumeReconciliations());
+    }
     return _downloadsRunning ??= _drainReconciliations();
   }
 
@@ -1243,10 +1373,17 @@ class TransferService {
     try {
       while (!_closed &&
           _verificationRunning == null &&
+          _cleanupRunning == null &&
           _nextReconciliation != null) {
         final selection = _nextReconciliation!;
         _nextReconciliation = null;
-        await _reconcile(selection);
+        try {
+          await _reconcile(selection);
+        } catch (_) {
+          // Retain interrupted cleanup/work for the next no-op refresh/retry.
+          _nextReconciliation ??= selection;
+          rethrow;
+        }
       }
       pausedForVerification =
           !_closed &&
@@ -1277,25 +1414,8 @@ class TransferService {
     bool obsolete() => _closed || !identical(selection, _latestSelection);
     await directory.create(recursive: true);
     if (obsolete()) return;
-    for (final record in await database.list('download')) {
-      if (obsolete()) return;
-      final id = record['id'] as String;
-      if (!refs.containsKey(id) && record['repair_required'] != true) {
-        await database.remove('download', id);
-      }
-    }
+    final savedDownloads = await database.list('download');
     if (obsolete()) return;
-    final removedProgress = _downloads.entries.any(
-      (entry) => !refs.containsKey(entry.key) && !entry.value.repairRequired,
-    );
-    _downloads.removeWhere(
-      (id, progress) => !refs.containsKey(id) && !progress.repairRequired,
-    );
-    _runningDownloadIds.retainAll(_downloads.keys);
-    if (removedProgress) {
-      _downloadSectionsRevision++;
-      (onDownloadChanged ?? onChanged)();
-    }
     for (final track in tracks.where((t) => refs.containsKey(t.id))) {
       if (!_downloads.containsKey(track.id)) {
         _progress(track, DownloadStatus.queued, 0);
@@ -1305,36 +1425,67 @@ class TransferService {
       for (final record in await database.list('file'))
         record['id'] as String: record,
     };
-    // Repairs remove the playable database reference but retain the old audio
-    // until replacement succeeds. Reclaim those bytes on deselection too,
-    // including when the repair was interrupted by an account close or restart.
-    final selectedFiles = {
-      for (final id in refs.keys) ...[
-        p.join(directory.path, '${Uri.encodeComponent(id)}.audio'),
-        p.join(directory.path, '${Uri.encodeComponent(id)}.audio.part'),
-      ],
-      for (final record in files.values)
-        if (refs.containsKey(record['id'])) record['path'] as String,
-    }.map((path) => p.normalize(p.absolute(path))).toSet();
-    await for (final file in directory.list()) {
-      if (obsolete()) return;
-      if (file is File &&
-          (file.path.endsWith('.audio') || file.path.endsWith('.audio.part')) &&
-          !selectedFiles.contains(p.normalize(file.absolute.path))) {
-        await file.delete();
+    if (obsolete()) return;
+    // Do not reload the library or open extra transactions on ordinary download
+    // passes. Only a possible reclamation needs the authoritative scan/guards.
+    if (_downloadCleanup.hasUnusedCandidates(
+      files.values.toList(),
+      savedDownloads,
+      refs.keys.toSet(),
+    )) {
+      try {
+        final preview = await _downloadCleanup.preview(
+          additionalProtectedIds: refs.keys.toSet(),
+        );
+        if (obsolete()) return;
+        final reclaimed = await _downloadCleanup.purge(
+          preview,
+          additionalProtectedIds: refs.keys.toSet(),
+          keepLiveRepairs: true,
+          canContinue: () => !obsolete(),
+        );
+        for (final id in reclaimed.fileIds) {
+          files.remove(id);
+        }
+        _publishCleanup(reclaimed);
+        if (reclaimed.needsRetry) {
+          // Preserve the pending selection for a later no-op refresh, rather
+          // than silently losing reclamation after a temporary storage failure.
+          throw FileSystemException(
+            'Unused downloaded audio could not be removed',
+          );
+        }
+      } on DownloadCleanupCancelled {
+        if (_closed) return;
+        rethrow;
       }
+    }
+    if (obsolete()) return;
+    // Queued progress for tracks never started may exist only in memory. Do not
+    // remove durable unsafe records or paused playback via this cheap path.
+    final durableIds = {for (final record in savedDownloads) record['id']};
+    final ephemeral = _downloads.entries
+        .where(
+          (entry) =>
+              !entry.value.repairRequired &&
+              !refs.containsKey(entry.key) &&
+              currentTrackId?.call() != entry.key &&
+              !files.containsKey(entry.key) &&
+              !durableIds.contains(entry.key),
+        )
+        .map((entry) => entry.key)
+        .toList();
+    if (ephemeral.isNotEmpty) {
+      for (final id in ephemeral) {
+        _downloads.remove(id);
+      }
+      _downloadSectionsRevision++;
+      (onDownloadChanged ?? onChanged)();
     }
     for (final record in files.values) {
       if (obsolete()) return;
       final id = record['id'] as String;
-      if (!refs.containsKey(id)) {
-        final file = File(record['path'] as String);
-        final exists = await file.exists();
-        if (obsolete()) return;
-        if (exists) await file.delete();
-        await database.remove('file', id);
-        _publishFile(id, null);
-      } else if (record['references'] != refs[id]) {
+      if (refs.containsKey(id) && record['references'] != refs[id]) {
         await database.put('file', id, {...record, 'references': refs[id]});
       }
     }
@@ -1606,6 +1757,7 @@ class TransferService {
       ?_uploadsRunning,
       ?_downloadsRunning,
       ?_verificationRunning,
+      ?_cleanupRunning,
       ..._importsRunning.map(
         (f) => f.then<void>((_) {}, onError: (Object _, StackTrace _) {}),
       ),

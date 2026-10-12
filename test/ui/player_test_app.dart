@@ -35,6 +35,8 @@ class PlayerTestApp extends ChangeNotifier implements AppController {
   @override
   bool get redownloadingCorruptedFiles => false;
   @override
+  bool get cleaningDownloads => false;
+  @override
   final artworkChanges = ChangeNotifier();
   @override
   int get downloadSectionsRevision => 0;

@@ -2,11 +2,21 @@
 
 ## Downloads
 
-Download tracks, albums, or playlists explicitly. When connected, playlist selections follow server changes. Overlapping selections share one copy. Originals are never evicted silently.
+Download tracks, albums, or playlists explicitly. When connected, playlist selections follow server changes. Overlapping selections share one copy. Selected downloads are not evicted to make room.
+
+“Keep offline” is not a separate permanent archive. After sync confirms a server-side track deletion, its direct track selection is removed and unreferenced downloaded audio is reclaimed. Album and playlist selections remain. A disconnected client keeps its last known library until it can sync; an empty or failed request is not proof of deletion. Listening history and pending events survive cleanup.
 
 Artwork has a separate, bounded 1 GiB cache per account. Artwork currently on screen is protected from speculative eviction. If artwork doesn't fit, placeholders are shown instead of repeatedly downloading and evicting it. A new foreground request or artwork revision can retry after a capacity miss.
 
 Selected uploads are first copied into account-private staging storage (up to 1 GiB per file by default). Successful or cancelled jobs delete only these staged copies, never your originals. Budget staging space on top of downloads. Transfers run while the app is running and resume later; the app doesn't promise OS-scheduled transfers after it exits.
+
+## Purge unused downloads
+
+In **Downloads**, choose **Purge unused downloads** to preview the file count and space recoverable from unselected audio and interrupted partial files. Confirm **Purge** to remove them, or cancel to leave them unchanged. **Clear All** in Activity only dismisses completed entries; it does not remove audio.
+
+Purge works offline using the last synced library and never contacts the server or starts downloads. Selected downloads, the current track (even when paused), artwork, uploads, source originals, and pending listening history are protected. Wait for active downloads or verification to finish before purging.
+
+Confirmation rechecks selections and file identity. Newly selected, replaced, or newly created files are not deleted, so the actual freed space may be smaller than the preview. Previews cannot be reused after signing out or switching accounts. Purge does not remove music from your server library.
 
 ## Playback and sign-out
 

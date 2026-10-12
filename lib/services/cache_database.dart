@@ -132,8 +132,34 @@ class CacheDatabase extends GeneratedDatabase {
     await put('meta', 'deletion_sequence', {'value': sequence});
     await put('deleted_$kind', id, {'id': id, 'sequence': sequence});
     await remove(kind, id);
+    if (kind == 'track') await _removeAbsentTrackPins(ids: {id});
     return true;
   });
+
+  // Pin document IDs have used multiple formats; match the selection's body.
+  // Only authoritative deletions call this, never cache reads or empty deltas.
+  Future<void> _removeAbsentTrackPins({Set<String>? ids}) => customStatement(
+    r'''
+      DELETE FROM documents AS pin
+      WHERE pin.kind = 'pin'
+        AND CASE WHEN json_valid(pin.body) THEN
+          json_extract(pin.body, '$.type') = 'track'
+          AND json_type(pin.body, '$.id') = 'text'
+          AND (? IS NULL OR json_extract(pin.body, '$.id') IN (
+            SELECT value FROM json_each(?)
+          ))
+          AND NOT EXISTS (
+            SELECT 1 FROM documents AS track
+            WHERE track.kind = 'track'
+              AND track.id = json_extract(pin.body, '$.id')
+          )
+        ELSE 0 END
+    ''',
+    [
+      ids == null ? null : jsonEncode(ids.toList()),
+      ids == null ? null : jsonEncode(ids.toList()),
+    ],
+  );
 
   /// [confirmedDeletionSequence] is captured before requesting this snapshot,
   /// so it cannot clear barriers created while the request was in flight.
@@ -153,6 +179,7 @@ class CacheDatabase extends GeneratedDatabase {
         "DELETE FROM documents WHERE kind IN ('track','playlist','deleted_track','deleted_playlist')",
       );
     }
+    final removedTrackIds = <String>{};
     for (final key in ['track', 'playlist']) {
       final incomingIds = <String>{};
       for (final dynamic value in response['${key}s'] as List? ?? []) {
@@ -189,6 +216,7 @@ class CacheDatabase extends GeneratedDatabase {
         final current = await get(key, id as String);
         if ((current?['revision'] as num? ?? -1) <= cursor) {
           await remove(key, id);
+          if (key == 'track') removedTrackIds.add(id);
         }
         final deleted = await get('deleted_$key', id);
         if (deleted != null &&
@@ -196,6 +224,14 @@ class CacheDatabase extends GeneratedDatabase {
           await remove('deleted_$key', id);
         }
       }
+    }
+    if (response['reset'] == true) {
+      // Sweep historical dangling selections too, but only after the final
+      // library is installed (including a lower-cursor timeline replacement).
+      await _removeAbsentTrackPins();
+    } else if (removedTrackIds.isNotEmpty) {
+      // One pin scan for the entire delta, not one JSON scan per tombstone.
+      await _removeAbsentTrackPins(ids: removedTrackIds);
     }
     await put('meta', 'cursor', {'value': cursor});
   });

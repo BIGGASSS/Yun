@@ -21,8 +21,55 @@ class _DownloadsApp extends PlayerTestApp {
   @override
   bool get isAuthenticated => authenticated;
   bool authenticated = true, offline = false, repairing = false;
+  bool syncing = false, cleaning = false;
+  Account currentAccount = const Account(
+    server: 'https://music.example.test',
+    userId: 'user',
+    username: 'Listener',
+  );
   int verifyCalls = 0, cancelVerificationCalls = 0, repairCalls = 0;
+  int previewCalls = 0, purgeCalls = 0;
   DownloadVerificationProgress? verification;
+  UnusedDownloadPreview unusedPreview = const UnusedDownloadPreview(
+    fileCount: 3,
+    totalBytes: 3 * 1024 * 1024,
+  );
+  UnusedDownloadPreview removedDownloads = const UnusedDownloadPreview(
+    fileCount: 2,
+    totalBytes: 1024 * 1024,
+  );
+  UnusedDownloadPreview? purgedPreview;
+  Future<UnusedDownloadPreview> Function()? onPreview;
+  Future<UnusedDownloadPreview> Function(UnusedDownloadPreview)? onPurge;
+
+  @override
+  Account get account => currentAccount;
+  @override
+  bool get busy => syncing;
+  @override
+  bool get cleaningDownloads => cleaning;
+
+  @override
+  Future<UnusedDownloadPreview> previewUnusedDownloads() async {
+    previewCalls++;
+    return onPreview == null ? unusedPreview : await onPreview!();
+  }
+
+  @override
+  Future<UnusedDownloadPreview> purgeUnusedDownloads(
+    UnusedDownloadPreview preview,
+  ) async {
+    purgeCalls++;
+    purgedPreview = preview;
+    cleaning = true;
+    downloadChanges.notifyListeners();
+    try {
+      return onPurge == null ? removedDownloads : await onPurge!(preview);
+    } finally {
+      cleaning = false;
+      downloadChanges.notifyListeners();
+    }
+  }
 
   @override
   bool get isOffline => offline;
@@ -255,6 +302,8 @@ void main() {
   }
 
   Finder clearButton() => find.widgetWithText(TextButton, 'Clear All');
+  Finder purgeButton() =>
+      find.widgetWithText(OutlinedButton, 'Purge unused downloads');
 
   Finder completionProgress() => find.byWidgetPredicate(
     (widget) =>
@@ -567,10 +616,407 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
+  downloadsTest(
+    'purge works offline with a preview and actual removed summary',
+    (tester) async {
+      final app = await open(tester);
+      app.offline = true;
+      app.notifyListeners();
+      await tester.pump();
+      expect(tester.widget<OutlinedButton>(purgeButton()).onPressed, isNotNull);
+      await tester.tap(purgeButton());
+      await tester.pumpAndSettle();
+
+      expect(app.previewCalls, 1);
+      expect(app.purgeCalls, 0);
+      expect(find.text('Purge unused downloads?'), findsOneWidget);
+      expect(find.textContaining('3 files · 3.0 MB'), findsOneWidget);
+      expect(
+        find.textContaining('Only unselected audio and partial files'),
+        findsOneWidget,
+      );
+      expect(
+        find.textContaining(
+          'Selected music, current playback, your server library, history, and uploads stay unchanged',
+        ),
+        findsOneWidget,
+      );
+      expect(find.textContaining('last synced library'), findsOneWidget);
+      expect(tester.widget<OutlinedButton>(purgeButton()).onPressed, isNull);
+      await tester.tap(find.widgetWithText(FilledButton, 'Purge'));
+      await tester.pumpAndSettle();
+
+      expect(app.purgeCalls, 1);
+      expect(identical(app.purgedPreview, app.unusedPreview), isTrue);
+      expect(find.byType(AlertDialog), findsNothing);
+      expect(
+        find.text('Removed 2 unused files · 1.0 MB freed.'),
+        findsOneWidget,
+      );
+      expect(tester.widget<OutlinedButton>(purgeButton()).onPressed, isNotNull);
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  downloadsTest('cancelling an offline purge leaves downloads intact', (
+    tester,
+  ) async {
+    final app = await open(tester);
+    app.offline = true;
+    final selected = List.of(app.pins);
+    final downloaded = app.downloadedTrackIds;
+    final history = Map.of(app.progress);
+    await tester.tap(purgeButton());
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(TextButton, 'Cancel'));
+    await tester.pumpAndSettle();
+
+    expect(app.previewCalls, 1);
+    expect(app.purgeCalls, 0);
+    expect(app.pins, selected);
+    expect(app.downloadedTrackIds, downloaded);
+    expect(app.progress, history);
+    expect(app.clearCalls, 0);
+    expect(app.retryCalls, 0);
+    expect(app.playback.currentTrack, isNull);
+    expect(app.uploads, isEmpty);
+    expect(find.byType(AlertDialog), findsNothing);
+    expect(find.byType(SnackBar), findsNothing);
+    expect(tester.widget<OutlinedButton>(purgeButton()).onPressed, isNotNull);
+    expect(tester.takeException(), isNull);
+  });
+
+  downloadsTest(
+    'zero unused downloads offline shows a snackbar without a dialog',
+    (tester) async {
+      final app = await open(tester);
+      app.offline = true;
+      app.unusedPreview = const UnusedDownloadPreview(
+        fileCount: 0,
+        totalBytes: 0,
+      );
+      await tester.tap(purgeButton());
+      await tester.pumpAndSettle();
+
+      expect(app.previewCalls, 1);
+      expect(app.purgeCalls, 0);
+      expect(find.byType(AlertDialog), findsNothing);
+      expect(find.text('No unused downloads to purge.'), findsOneWidget);
+      expect(app.downloadedTrackIds, {'done', 'unpinned'});
+      expect(tester.widget<OutlinedButton>(purgeButton()).onPressed, isNotNull);
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  for (final blocked in <(String, void Function(_DownloadsApp))>[
+    ('signed out', (app) => app.authenticated = false),
+    ('busy', (app) => app.syncing = true),
+    ('purging', (app) => app.cleaning = true),
+    (
+      'downloading',
+      (app) => app.setProgress('pending', DownloadStatus.downloading),
+    ),
+    (
+      'verifying a transfer',
+      (app) => app.setProgress('pending', DownloadStatus.verifying),
+    ),
+    (
+      'preparing verification',
+      (app) => app.setVerification(_verification(VerificationStatus.preparing)),
+    ),
+    (
+      'running verification',
+      (app) => app.setVerification(_verification(VerificationStatus.running)),
+    ),
+  ]) {
+    downloadsTest('purge is disabled while ${blocked.$1}', (tester) async {
+      final app = await open(tester);
+      blocked.$2(app);
+      app.notifyListeners();
+      await tester.pump();
+      expect(tester.widget<OutlinedButton>(purgeButton()).onPressed, isNull);
+      await tester.tap(purgeButton());
+      await tester.pump();
+      expect(app.previewCalls, 0);
+      expect(app.purgeCalls, 0);
+      expect(find.byType(AlertDialog), findsNothing);
+      expect(tester.takeException(), isNull);
+    });
+  }
+
+  downloadsTest(
+    'purge availability ticks do not rebuild the download inventory',
+    (tester) async {
+      final app = await open(tester);
+      final activity = find.byKey(const PageStorageKey('download-activity'));
+      final inventory = tester.widget(activity);
+      app.setProgress('pending', DownloadStatus.downloading, received: 50);
+      await tester.pump();
+      expect(tester.widget<OutlinedButton>(purgeButton()).onPressed, isNull);
+      expect(identical(tester.widget(activity), inventory), isTrue);
+
+      final disabledAction = tester.widget(purgeButton());
+      app.setProgress('pending', DownloadStatus.downloading, received: 75);
+      app.setVerification(_verification(VerificationStatus.running));
+      await tester.pump();
+      expect(identical(tester.widget(purgeButton()), disabledAction), isTrue);
+      expect(identical(tester.widget(activity), inventory), isTrue);
+
+      app.setProgress('pending', DownloadStatus.queued);
+      await tester.pump();
+      expect(tester.widget<OutlinedButton>(purgeButton()).onPressed, isNull);
+      app.setVerification(_verification(VerificationStatus.completed));
+      await tester.pumpAndSettle();
+      expect(tester.widget<OutlinedButton>(purgeButton()).onPressed, isNotNull);
+      expect(identical(tester.widget(activity), inventory), isTrue);
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  downloadsTest(
+    'purge cannot start twice during preview, confirmation or removal',
+    (tester) async {
+      final app = await open(tester);
+      final preview = Completer<UnusedDownloadPreview>();
+      final removal = Completer<UnusedDownloadPreview>();
+      app.onPreview = () => preview.future;
+      app.onPurge = (_) => removal.future;
+      final start = tester.widget<OutlinedButton>(purgeButton()).onPressed!;
+      start();
+      start();
+      await tester.pumpAndSettle();
+      expect(app.previewCalls, 1);
+      expect(tester.widget<OutlinedButton>(purgeButton()).onPressed, isNull);
+      expect(find.byType(AlertDialog), findsNothing);
+
+      preview.complete(app.unusedPreview);
+      await tester.pumpAndSettle();
+      expect(find.byType(AlertDialog), findsOneWidget);
+      expect(tester.widget<OutlinedButton>(purgeButton()).onPressed, isNull);
+      start();
+      expect(app.previewCalls, 1);
+      await tester.tap(find.widgetWithText(FilledButton, 'Purge'));
+      await tester.pumpAndSettle();
+      expect(app.purgeCalls, 1);
+      expect(app.cleaningDownloads, isTrue);
+      expect(tester.widget<OutlinedButton>(purgeButton()).onPressed, isNull);
+
+      // The local guard must still cover the pending call if a core notification
+      // clears its cleaning flag before the UI receives the result.
+      app.cleaning = false;
+      app.downloadChanges.notifyListeners();
+      await tester.pump();
+      start();
+      expect(app.previewCalls, 1);
+      expect(app.purgeCalls, 1);
+      expect(tester.widget<OutlinedButton>(purgeButton()).onPressed, isNull);
+      removal.complete(app.removedDownloads);
+      await tester.pumpAndSettle();
+      expect(tester.widget<OutlinedButton>(purgeButton()).onPressed, isNotNull);
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  for (final change in ['switch accounts', 'sign out']) {
+    downloadsTest('purge does not run if you $change during confirmation', (
+      tester,
+    ) async {
+      final app = await open(tester);
+      await tester.tap(purgeButton());
+      await tester.pumpAndSettle();
+      if (change == 'switch accounts') {
+        app.currentAccount = const Account(
+          server: 'https://music.example.test',
+          userId: 'other-user',
+          username: 'Other listener',
+        );
+      } else {
+        app.authenticated = false;
+      }
+      app.notifyListeners();
+      await tester.pump();
+      await tester.tap(find.widgetWithText(FilledButton, 'Purge'));
+      await tester.pumpAndSettle();
+
+      expect(app.previewCalls, 1);
+      expect(app.purgeCalls, 0);
+      expect(app.downloadedTrackIds, {'done', 'unpinned'});
+      expect(find.byType(AlertDialog), findsNothing);
+      expect(find.byType(SnackBar), findsNothing);
+      expect(tester.takeException(), isNull);
+    });
+  }
+
+  downloadsTest('an account switch during preview does not open confirmation', (
+    tester,
+  ) async {
+    final app = await open(tester);
+    final preview = Completer<UnusedDownloadPreview>();
+    app.onPreview = () => preview.future;
+    await tester.tap(purgeButton());
+    await tester.pump();
+    app.currentAccount = const Account(
+      server: 'https://other.example.test',
+      userId: 'user',
+      username: 'Listener',
+    );
+    app.notifyListeners();
+    preview.complete(app.unusedPreview);
+    await tester.pumpAndSettle();
+    expect(find.byType(AlertDialog), findsNothing);
+    expect(app.purgeCalls, 0);
+    expect(tester.widget<OutlinedButton>(purgeButton()).onPressed, isNotNull);
+    expect(tester.takeException(), isNull);
+  });
+
+  downloadsTest('a download starting during confirmation prevents purge', (
+    tester,
+  ) async {
+    final app = await open(tester);
+    await tester.tap(purgeButton());
+    await tester.pumpAndSettle();
+    app.setProgress('pending', DownloadStatus.downloading, received: 50);
+    await tester.pump();
+    await tester.tap(find.widgetWithText(FilledButton, 'Purge'));
+    await tester.pumpAndSettle();
+    expect(app.purgeCalls, 0);
+    expect(tester.widget<OutlinedButton>(purgeButton()).onPressed, isNull);
+    expect(tester.takeException(), isNull);
+  });
+
+  for (final stage in ['preview', 'purge']) {
+    downloadsTest(
+      '$stage errors use the UI snackbar and reset the purge guard',
+      (tester) async {
+        final app = await open(tester);
+        if (stage == 'preview') {
+          app.onPreview = () async => throw StateError('Storage unavailable');
+        } else {
+          app.onPurge = (_) async => throw StateError('Storage unavailable');
+        }
+        await tester.tap(purgeButton());
+        await tester.pumpAndSettle();
+        if (stage == 'purge') {
+          await tester.tap(find.widgetWithText(FilledButton, 'Purge'));
+          await tester.pumpAndSettle();
+        }
+        expect(find.text('Bad state: Storage unavailable'), findsOneWidget);
+        expect(find.byType(AlertDialog), findsNothing);
+        expect(app.cleaningDownloads, isFalse);
+        expect(
+          tester.widget<OutlinedButton>(purgeButton()).onPressed,
+          isNotNull,
+        );
+
+        app.onPreview = null;
+        app.unusedPreview = const UnusedDownloadPreview(
+          fileCount: 0,
+          totalBytes: 0,
+        );
+        await tester.tap(purgeButton());
+        await tester.pumpAndSettle();
+        expect(app.previewCalls, 2);
+        expect(
+          tester.widget<OutlinedButton>(purgeButton()).onPressed,
+          isNotNull,
+        );
+        expect(tester.takeException(), isNull);
+      },
+    );
+  }
+
+  for (final stage in ['preview', 'purge']) {
+    downloadsTest('finishing $stage after leaving the screen is safe', (
+      tester,
+    ) async {
+      final app = await open(tester);
+      final result = Completer<UnusedDownloadPreview>();
+      if (stage == 'preview') {
+        app.onPreview = () => result.future;
+      } else {
+        app.onPurge = (_) => result.future;
+      }
+      await tester.tap(purgeButton());
+      await tester.pumpAndSettle();
+      if (stage == 'purge') {
+        await tester.tap(find.widgetWithText(FilledButton, 'Purge'));
+        await tester.pumpAndSettle();
+      }
+      await tester.pumpWidget(const MaterialApp(home: Text('Other screen')));
+      await tester.pumpAndSettle();
+      result.complete(app.unusedPreview);
+      await tester.pumpAndSettle();
+      expect(find.byType(AlertDialog), findsNothing);
+      expect(find.byType(SnackBar), findsNothing);
+      expect(app.purgeCalls, stage == 'purge' ? 1 : 0);
+      expect(tester.takeException(), isNull);
+    });
+  }
+
+  for (final settings in [
+    (const Size(320, 568), 1.0),
+    (const Size(320, 1000), 2.0),
+  ]) {
+    downloadsTest(
+      'purge confirmation fits ${settings.$1} at text scale ${settings.$2}',
+      (tester) async {
+        final app = await open(
+          tester,
+          size: settings.$1,
+          textScale: settings.$2,
+        );
+        app.offline = true;
+        app.unusedPreview = const UnusedDownloadPreview(
+          fileCount: 1,
+          totalBytes: 1536,
+        );
+        app.removedDownloads = const UnusedDownloadPreview(
+          fileCount: 1,
+          totalBytes: 1024,
+        );
+        await tester.ensureVisible(purgeButton());
+        await tester.pumpAndSettle();
+        await tester.tap(purgeButton());
+        await tester.pumpAndSettle();
+        expect(find.textContaining('1 file · 1.5 KB'), findsOneWidget);
+        expect(tester.takeException(), isNull);
+        await tester.tap(find.widgetWithText(FilledButton, 'Purge'));
+        await tester.pumpAndSettle();
+        expect(app.purgeCalls, 1);
+        expect(
+          find.text('Removed 1 unused file · 1.0 KB freed.'),
+          findsOneWidget,
+        );
+        expect(tester.takeException(), isNull);
+      },
+    );
+  }
+
   Finder verifyButton() =>
       find.widgetWithText(OutlinedButton, 'Verify downloads');
   Finder repairButton() =>
       find.widgetWithText(OutlinedButton, 'Redownload corrupted files');
+
+  downloadsTest('verification and repair wait for local cleanup', (
+    tester,
+  ) async {
+    final app = await open(tester);
+    app.setVerification(_verification(VerificationStatus.completed));
+    await tester.pump();
+    expect(tester.widget<OutlinedButton>(verifyButton()).onPressed, isNotNull);
+    expect(tester.widget<OutlinedButton>(repairButton()).onPressed, isNotNull);
+    app.cleaning = true;
+    app.downloadChanges.notifyListeners();
+    await tester.pump();
+    expect(tester.widget<OutlinedButton>(verifyButton()).onPressed, isNull);
+    expect(tester.widget<OutlinedButton>(repairButton()).onPressed, isNull);
+    app.cleaning = false;
+    app.downloadChanges.notifyListeners();
+    await tester.pump();
+    expect(tester.widget<OutlinedButton>(verifyButton()).onPressed, isNotNull);
+    expect(tester.widget<OutlinedButton>(repairButton()).onPressed, isNotNull);
+    expect(tester.takeException(), isNull);
+  });
 
   downloadsTest('verification works offline and cannot be started twice', (
     tester,
