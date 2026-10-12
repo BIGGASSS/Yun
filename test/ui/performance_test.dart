@@ -289,36 +289,109 @@ void main() {
     },
   );
 
-  testWidgets('standalone download labels follow broad pin/cache changes', (
+  testWidgets(
+    'standalone download indicators follow pin/cache and byte changes',
+    (tester) async {
+      final app = _App(FakeEngine());
+      try {
+        await tester.pumpWidget(
+          MaterialApp(
+            home: Scaffold(
+              body: TrackTile(app: app, track: app.library.first),
+            ),
+          ),
+        );
+        expect(find.byIcon(Icons.cloud_outlined), findsOneWidget);
+        expect(find.byTooltip('Available online'), findsOneWidget);
+        expect(find.textContaining('Available online'), findsNothing);
+        expect(find.text('Unknown artist'), findsOneWidget);
+        // Pin/cache snapshots arrive on the app notifier, not byte progress.
+        app.progress['a'] = const DownloadProgress(
+          trackId: 'a',
+          totalBytes: 100,
+          status: DownloadStatus.queued,
+        );
+        app.changed();
+        await tester.pump();
+        expect(find.textContaining('Queued ·'), findsOneWidget);
+        expect(find.byIcon(Icons.cloud_outlined), findsNothing);
+        app.progress['a'] = const DownloadProgress(
+          trackId: 'a',
+          totalBytes: 100,
+          receivedBytes: 100,
+          status: DownloadStatus.downloaded,
+        );
+        app.downloadChanges.notifyListeners();
+        await tester.pump();
+        final downloadedIcon = find.byIcon(Icons.offline_pin_outlined);
+        expect(downloadedIcon, findsOneWidget);
+        expect(tester.widget<Icon>(downloadedIcon).semanticLabel, 'Downloaded');
+        expect(find.byTooltip('Downloaded'), findsOneWidget);
+        expect(find.textContaining('Downloaded'), findsNothing);
+        expect(find.byIcon(Icons.cloud_outlined), findsNothing);
+        app.progress.clear();
+        app.changed();
+        await tester.pump();
+        expect(find.byIcon(Icons.cloud_outlined), findsOneWidget);
+        expect(find.byIcon(Icons.offline_pin_outlined), findsNothing);
+        expect(find.textContaining('Available online'), findsNothing);
+      } finally {
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.runAsync(app.shutdown);
+        app.dispose();
+      }
+    },
+  );
+
+  testWidgets('availability icons fit long artists at narrow large text', (
     tester,
   ) async {
     final app = _App(FakeEngine());
+    const track = Track(
+      id: 'long',
+      title: 'Track title',
+      artist: 'An artist name that is much too long to fit in a narrow window',
+    );
+    tester.view.physicalSize = const Size(320, 568);
+    tester.view.devicePixelRatio = 1;
+    tester.platformDispatcher.textScaleFactorTestValue = 2;
     try {
       await tester.pumpWidget(
         MaterialApp(
           home: Scaffold(
-            body: TrackTile(app: app, track: app.library.first),
+            body: TrackTile(app: app, track: track),
           ),
         ),
       );
-      expect(find.textContaining('Available online'), findsOneWidget);
-      // Pin/cache snapshots arrive on the app notifier, not byte progress.
-      app.progress['a'] = const DownloadProgress(
-        trackId: 'a',
-        totalBytes: 100,
-        status: DownloadStatus.queued,
-      );
-      app.changed();
-      await tester.pump();
-      expect(find.textContaining('Queued ·'), findsOneWidget);
-      app.progress.clear();
-      app.changed();
-      await tester.pump();
-      expect(find.textContaining('Available online'), findsOneWidget);
+      for (final status in [
+        DownloadStatus.availableOnline,
+        DownloadStatus.downloaded,
+      ]) {
+        app.progress[track.id] = DownloadProgress(
+          trackId: track.id,
+          totalBytes: 100,
+          status: status,
+        );
+        app.downloadChanges.notifyListeners();
+        await tester.pump();
+        expect(find.text(track.artist), findsOneWidget);
+        expect(
+          find.byIcon(
+            status == DownloadStatus.downloaded
+                ? Icons.offline_pin_outlined
+                : Icons.cloud_outlined,
+          ),
+          findsOneWidget,
+        );
+        expect(tester.takeException(), isNull);
+      }
     } finally {
       await tester.pumpWidget(const SizedBox.shrink());
       await tester.runAsync(app.shutdown);
       app.dispose();
+      tester.view.resetPhysicalSize();
+      tester.view.resetDevicePixelRatio();
+      tester.platformDispatcher.clearTextScaleFactorTestValue();
     }
   });
 

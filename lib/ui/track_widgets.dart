@@ -123,8 +123,76 @@ String downloadLabel(DownloadProgress progress) => switch (progress.status) {
   DownloadStatus.verifying => 'Verifying download',
   DownloadStatus.failed =>
     'Download failed · ${formatBytes(progress.receivedBytes)} / ${formatBytes(progress.totalBytes)}',
-  DownloadStatus.downloaded => 'Downloaded · Offline',
+  DownloadStatus.downloaded => 'Downloaded',
 };
+
+/// Shared per-track metadata for library, playlist, download, and queue rows.
+class TrackInfo extends StatelessWidget {
+  const TrackInfo({
+    super.key,
+    required this.track,
+    this.status,
+    this.maxArtistLines = 2,
+    this.compact = false,
+  });
+
+  final Track track;
+  final Widget? status;
+  final int maxArtistLines;
+
+  /// Keep metadata to two single-line rows for the fixed-height playback queue.
+  final bool compact;
+
+  @override
+  Widget build(BuildContext context) {
+    final reported = track.bitrateKbps;
+    final estimated = reported == null || reported <= 0;
+    final bitrate = estimated ? track.estimatedBitrateKbps : reported;
+    final artist = Text(
+      track.artist.isEmpty ? 'Unknown artist' : track.artist,
+      maxLines: compact ? 1 : maxArtistLines,
+      overflow: TextOverflow.ellipsis,
+    );
+    final rate = bitrate == null
+        ? null
+        : Tooltip(
+            message: estimated
+                ? 'Estimated average bitrate from file size and duration'
+                : 'Audio bitrate',
+            excludeFromSemantics: true,
+            child: Text(
+              '· ${estimated ? '~' : ''}$bitrate kbps',
+              maxLines: compact ? 1 : null,
+              overflow: compact ? TextOverflow.ellipsis : null,
+              semanticsLabel:
+                  '${estimated ? 'Estimated bitrate' : 'Bitrate'}: $bitrate kilobits per second',
+            ),
+          );
+    if (compact) {
+      return Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          artist,
+          if (rate != null || status != null)
+            Row(
+              children: [
+                if (rate != null) Flexible(child: rate),
+                if (rate != null && status != null) const SizedBox(width: 6),
+                if (status != null) Flexible(child: status!),
+              ],
+            ),
+        ],
+      );
+    }
+    return Wrap(
+      spacing: 6,
+      runSpacing: 2,
+      crossAxisAlignment: WrapCrossAlignment.center,
+      children: [artist, ?rate, ?status],
+    );
+  }
+}
 
 class TrackTile extends StatelessWidget {
   const TrackTile({
@@ -168,11 +236,24 @@ class TrackTile extends StatelessWidget {
       subtitle: DownloadProgressBuilder(
         app: app,
         track: track,
-        builder: (context, progress) => Text(
-          '${track.artist.isEmpty ? 'Unknown artist' : track.artist} · ${downloadLabel(progress)}',
-          maxLines: 2,
-          overflow: TextOverflow.ellipsis,
-        ),
+        builder: (context, progress) {
+          final icon = switch (progress.status) {
+            DownloadStatus.availableOnline => Icons.cloud_outlined,
+            DownloadStatus.downloaded => Icons.offline_pin_outlined,
+            _ => null,
+          };
+          final label = downloadLabel(progress);
+          return TrackInfo(
+            track: track,
+            status: icon == null
+                ? Text('· $label', maxLines: 2, overflow: TextOverflow.ellipsis)
+                : Tooltip(
+                    message: label,
+                    excludeFromSemantics: true,
+                    child: Icon(icon, size: 16, semanticLabel: label),
+                  ),
+          );
+        },
       ),
       onTap: selected == null
           ? onTap ??

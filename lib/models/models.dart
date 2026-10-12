@@ -32,6 +32,7 @@ class Track {
     this.discNumber,
     this.durationMs = 0,
     this.sizeBytes = 0,
+    this.bitrateKbps,
     this.sha256 = '',
     this.mimeType = 'audio/mpeg',
     this.hasArtwork = false,
@@ -40,9 +41,22 @@ class Track {
   });
   final String id, title, artist, album, albumArtist, sha256, mimeType;
   final int? trackNumber, discNumber;
+
+  /// Audio bitrate in kilobits per second, when supplied by the server.
+  final int? bitrateKbps;
   final int durationMs, sizeBytes, revision, createdAt;
   final bool hasArtwork;
   Duration get duration => Duration(milliseconds: durationMs);
+
+  /// Legacy fallback includes container/tag overhead, so the UI marks it estimated.
+  int? get estimatedBitrateKbps {
+    if (sizeBytes <= 0) return null;
+    final duration = durationMs;
+    if (duration <= 0) return null;
+    final bitrate = (sizeBytes * 8 / duration).round();
+    return bitrate > 0 ? bitrate : null;
+  }
+
   factory Track.fromJson(Map<String, dynamic> j) => Track(
     id: j['id'] as String,
     title: j['title'] as String? ?? '',
@@ -53,6 +67,7 @@ class Track {
     discNumber: (j['disc_number'] as num?)?.toInt(),
     durationMs: _int(j['duration_ms']),
     sizeBytes: _int(j['size_bytes']),
+    bitrateKbps: (j['bitrate_kbps'] as num?)?.toInt(),
     sha256: j['sha256'] as String? ?? '',
     mimeType: j['mime_type'] as String? ?? 'audio/mpeg',
     hasArtwork: j['has_artwork'] == true,
@@ -69,6 +84,7 @@ class Track {
     'disc_number': discNumber,
     'duration_ms': durationMs,
     'size_bytes': sizeBytes,
+    'bitrate_kbps': bitrateKbps,
     'sha256': sha256,
     'mime_type': mimeType,
     'has_artwork': hasArtwork,

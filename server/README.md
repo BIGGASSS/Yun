@@ -104,7 +104,7 @@ Direct HTTP is allowed only with explicit `--insecure-loopback` on a loopback bi
 * Completion requires every byte. Content is SHA-256 hashed and sniffed, not
   trusted from filename/MIME. Supported containers: MP3, AAC/ADTS, MP4/M4A,
   FLAC, Ogg Vorbis, Ogg Opus, WAV, AIFF. Lofty extracts title, artist, album,
-  album artist, track/disc number, duration, and embedded artwork. Missing title
+  album artist, track/disc number, duration, audio bitrate, and embedded artwork. Missing title
   falls back to filename stem; other missing text is empty.
 * Before committing a new track, a hard link to its immutable original and any
   extracted artwork are fsynced into the media directory. The upload source is
@@ -171,6 +171,39 @@ Direct HTTP is allowed only with explicit `--insecure-loopback` on a loopback bi
   Totals/top lists use the same selection. Album grouping uses album artist,
   falling back to track artist. Metadata shown in history is current retained track
   metadata, not a frozen snapshot of text at playback time.
+
+## Backfill bitrate for older tracks
+
+Stop the serving process first, then run:
+
+```sh
+./target/release/yun-server --data-dir ./yun-data backfill-bitrates
+# Optional lower-throughput settings:
+./target/release/yun-server --data-dir ./yun-data backfill-bitrates --batch-size 16 --concurrency 1
+```
+
+The command reads audio properties from live originals whose `bitrate_kbps` is
+null. Existing values and deleted tracks are skipped. It does not rehash or
+rewrite audio, process tags/artwork, or replace manually edited metadata. The
+normal bounded Lofty parser is reused, without tag/cover-art processing.
+
+Defaults are **32 tracks per batch** (allowed 1–128) and **2 simultaneous parsers**
+(allowed 1–2). File I/O happens outside database transactions; each batch commits
+its bitrate updates and per-account/track library revisions atomically. Clients
+receive and cache the values on their next sync after the server is restarted.
+Variable-bitrate tracks report an audio-only average, not a constant encoder rate.
+
+Progress/warnings identify tracks that cannot be measured. The final summary
+reports scanned, updated, unavailable, failed, and skipped counts. Unreadable or
+invalid files remain null, and any such failures produce a nonzero exit status
+**after** other batches finish. A valid file for which Lofty cannot determine a
+positive bitrate counts as unavailable, not a command failure. Clients retain
+estimates where possible for any still-null values.
+
+It is safe to interrupt and rerun: completed batches remain saved, unfinished
+transactions roll back, and reruns retry only still-null live tracks. There is
+no startup scan or background job. Restart the server after maintenance; the
+usual data-directory lock prevents running this command beside a serving process.
 
 ## Backup and restore
 

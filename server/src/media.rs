@@ -13,7 +13,7 @@ use axum::{
 };
 use lofty::{
     config::{GlobalOptions, ParseOptions, ParsingMode, apply_global_options},
-    file::{AudioFile, FileType, TaggedFileExt},
+    file::{AudioFile, FileType, TaggedFile, TaggedFileExt},
     prelude::{Accessor, ItemKey},
     probe::Probe,
 };
@@ -39,6 +39,7 @@ pub(crate) struct Metadata {
     pub track_number: Option<i64>,
     pub disc_number: Option<i64>,
     pub duration_ms: i64,
+    pub bitrate_kbps: Option<i64>,
     pub sha256: String,
     pub mime_type: &'static str,
     pub artwork: Option<(Vec<u8>, &'static str)>,
@@ -93,57 +94,10 @@ pub(crate) fn parse(path: &FsPath, filename: &str) -> Result<Metadata, ApiError>
         digest.update(&buffer[..n]);
     }
     file.seek(SeekFrom::Start(0))?;
-    apply_global_options(
-        GlobalOptions::new()
-            .allocation_limit(16 * 1024 * 1024)
-            .use_custom_resolvers(false)
-            .preserve_format_specific_items(false),
-    );
-    let failed = Arc::new(AtomicBool::new(false));
-    let reader = BufReader::new(LimitedReader {
-        file,
-        length,
-        failed: failed.clone(),
-        remaining: length
-            .saturating_mul(3)
-            .saturating_add(16 * 1024 * 1024)
-            .min(128 * 1024 * 1024),
-        deadline,
-    });
-    let parsed = Probe::new(reader)
-        .guess_file_type()
-        .map_err(|_| ApiError::bad("unrecognized audio"))?
-        .options(
-            ParseOptions::new()
-                .parsing_mode(ParsingMode::Strict)
-                .max_junk_bytes(1024),
-        )
-        .read()
-        .map_err(|_| ApiError::bad("invalid, unsupported, or oversized audio metadata"))?;
-    if failed.load(Ordering::Relaxed) || Instant::now() > deadline {
-        return Err(ApiError::bad("truncated audio or parser budget exceeded"));
-    }
-    let mime_type = match parsed.file_type() {
-        FileType::Mpeg => "audio/mpeg",
-        FileType::Aac => "audio/aac",
-        FileType::Mp4 => "audio/mp4",
-        FileType::Flac => "audio/flac",
-        FileType::Opus | FileType::Vorbis => "audio/ogg",
-        FileType::Wav => "audio/wav",
-        FileType::Aiff => "audio/aiff",
-        _ => return Err(ApiError::bad("unsupported audio format")),
-    };
+    let (parsed, mime_type) = parse_audio(file, length, deadline, ParseOptions::new())?;
     let properties = parsed.properties();
     let duration_ms = properties.duration().as_millis() as i64;
-    if duration_ms <= 0
-        || duration_ms > 7 * 24 * 3600 * 1000
-        || properties.sample_rate().unwrap_or(0) == 0
-        || properties.channels().unwrap_or(0) == 0
-    {
-        return Err(ApiError::bad(
-            "invalid audio properties (duration must be at most 7 days)",
-        ));
-    }
+    let bitrate_kbps = properties.audio_bitrate().filter(|v| *v > 0).map(i64::from);
     let tag = parsed.primary_tag().or_else(|| parsed.first_tag());
     let clean =
         |value: String| -> String { value.chars().filter(|c| *c != '\0').take(1024).collect() };
@@ -191,10 +145,98 @@ pub(crate) fn parse(path: &FsPath, filename: &str) -> Result<Metadata, ApiError>
         track_number: number(tag.and_then(|t| t.track())),
         disc_number: number(tag.and_then(|t| t.disk())),
         duration_ms,
+        bitrate_kbps,
         sha256: hex::encode(digest.finalize()),
         mime_type,
         artwork,
     })
+}
+
+/// Read only the audio properties, without hashing the file or processing tags/artwork.
+pub(crate) fn read_bitrate(path: &FsPath) -> Result<Option<i64>, ApiError> {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let file = std::fs::File::open(path)?;
+    let length = file.metadata()?.len();
+    let (parsed, _) = parse_audio(
+        file,
+        length,
+        deadline,
+        ParseOptions::new()
+            .read_tags(false)
+            .read_cover_art(false)
+            .read_properties(true),
+    )?;
+    Ok(parsed
+        .properties()
+        .audio_bitrate()
+        .filter(|v| *v > 0)
+        .map(i64::from))
+}
+
+fn parse_audio(
+    file: std::fs::File,
+    length: u64,
+    deadline: Instant,
+    mut options: ParseOptions,
+) -> Result<(TaggedFile, &'static str), ApiError> {
+    // Uploads pass the original hashing deadline; all callers share these parser limits.
+    apply_global_options(
+        GlobalOptions::new()
+            .allocation_limit(16 * 1024 * 1024)
+            .use_custom_resolvers(false)
+            .preserve_format_specific_items(false),
+    );
+    let failed = Arc::new(AtomicBool::new(false));
+    let reader = BufReader::new(LimitedReader {
+        file,
+        length,
+        failed: failed.clone(),
+        remaining: length
+            .saturating_mul(3)
+            .saturating_add(16 * 1024 * 1024)
+            .min(128 * 1024 * 1024),
+        deadline,
+    });
+    let parsed = Probe::new(reader)
+        .guess_file_type()
+        .map_err(|_| ApiError::bad("unrecognized audio"))?
+        .options(
+            options
+                .parsing_mode(ParsingMode::Strict)
+                .max_junk_bytes(1024),
+        )
+        .read()
+        .map_err(|_| ApiError::bad("invalid, unsupported, or oversized audio metadata"))?;
+    if failed.load(Ordering::Relaxed) || Instant::now() > deadline {
+        return Err(ApiError::bad("truncated audio or parser budget exceeded"));
+    }
+    let mime_type = validate_audio(&parsed)?;
+    Ok((parsed, mime_type))
+}
+
+fn validate_audio(parsed: &TaggedFile) -> Result<&'static str, ApiError> {
+    let mime_type = match parsed.file_type() {
+        FileType::Mpeg => "audio/mpeg",
+        FileType::Aac => "audio/aac",
+        FileType::Mp4 => "audio/mp4",
+        FileType::Flac => "audio/flac",
+        FileType::Opus | FileType::Vorbis => "audio/ogg",
+        FileType::Wav => "audio/wav",
+        FileType::Aiff => "audio/aiff",
+        _ => return Err(ApiError::bad("unsupported audio format")),
+    };
+    let properties = parsed.properties();
+    let duration_ms = properties.duration().as_millis() as i64;
+    if duration_ms <= 0
+        || duration_ms > 7 * 24 * 3600 * 1000
+        || properties.sample_rate().unwrap_or(0) == 0
+        || properties.channels().unwrap_or(0) == 0
+    {
+        return Err(ApiError::bad(
+            "invalid audio properties (duration must be at most 7 days)",
+        ));
+    }
+    Ok(mime_type)
 }
 pub(crate) fn validate_image(data: &[u8]) -> Result<&'static str, ApiError> {
     if data.is_empty() || data.len() > MAX_ARTWORK {
@@ -494,7 +536,147 @@ pub(crate) async fn audio(
 
 #[cfg(test)]
 mod tests {
-    use super::range;
+    use super::{parse, range, read_bitrate};
+    use std::path::Path;
+
+    fn wav(sample_rate: u32) -> Vec<u8> {
+        let length = sample_rate * 2;
+        let mut bytes = Vec::with_capacity(length as usize + 44);
+        bytes.extend(b"RIFF");
+        bytes.extend((length + 36).to_le_bytes());
+        bytes.extend(b"WAVEfmt ");
+        bytes.extend(16u32.to_le_bytes());
+        bytes.extend(1u16.to_le_bytes());
+        bytes.extend(1u16.to_le_bytes());
+        bytes.extend(sample_rate.to_le_bytes());
+        bytes.extend(length.to_le_bytes());
+        bytes.extend(2u16.to_le_bytes());
+        bytes.extend(16u16.to_le_bytes());
+        bytes.extend(b"data");
+        bytes.extend(length.to_le_bytes());
+        bytes.resize(length as usize + 44, 0);
+        bytes
+    }
+
+    #[test]
+    fn read_bitrate_matches_upload_for_supported_fixtures() {
+        let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+        for filename in [
+            "tone.mp3",
+            "tone.flac",
+            "tone.m4a",
+            "tone.ogg",
+            "tone.opus",
+            "tone.aac",
+            "tone.aiff",
+        ] {
+            let path = fixtures.join(filename);
+            let upload = parse(&path, filename).unwrap();
+            assert!(upload.bitrate_kbps.is_some_and(|v| v > 0), "{filename}");
+            assert_eq!(
+                read_bitrate(&path).unwrap(),
+                upload.bitrate_kbps,
+                "{filename}"
+            );
+        }
+    }
+
+    #[test]
+    fn read_bitrate_matches_upload_for_tagged_wav_without_changing_file() {
+        use lofty::{
+            config::WriteOptions,
+            picture::{MimeType, Picture, PictureType},
+            prelude::{Accessor, TagExt},
+            tag::{Tag, TagType},
+        };
+        use sha2::{Digest, Sha256};
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tagged.wav");
+        std::fs::write(&path, wav(8000)).unwrap();
+        let mut image = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::new_rgb8(2, 2)
+            .write_to(&mut image, image::ImageFormat::Png)
+            .unwrap();
+        let png = image.into_inner();
+        let mut tag = Tag::new(TagType::Id3v2);
+        tag.set_title("Embedded title".into());
+        tag.set_artist("Embedded artist".into());
+        tag.push_picture(Picture::new_unchecked(
+            PictureType::CoverFront,
+            Some(MimeType::Png),
+            None,
+            png.clone(),
+        ));
+        tag.save_to_path(&path, WriteOptions::default()).unwrap();
+        let original = std::fs::read(&path).unwrap();
+        let upload = parse(&path, "tagged.wav").unwrap();
+        assert_eq!(upload.title, "Embedded title");
+        assert_eq!(upload.artist, "Embedded artist");
+        assert_eq!(upload.artwork, Some((png, "image/png")));
+        assert_eq!(upload.sha256, hex::encode(Sha256::digest(&original)));
+        assert_eq!(upload.bitrate_kbps, Some(128));
+        assert_eq!(read_bitrate(&path).unwrap(), upload.bitrate_kbps);
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+    }
+
+    #[test]
+    fn read_bitrate_skips_invalid_tag_contents() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("invalid-tag.wav");
+        let mut bytes = wav(8000);
+        // Invalid tag content, but a structurally valid, even-sized RIFF chunk.
+        let invalid_tag = b"invalid ID3 tag!";
+        bytes.extend(b"id3 ");
+        bytes.extend((invalid_tag.len() as u32).to_le_bytes());
+        bytes.extend(invalid_tag);
+        let riff_length = bytes.len() as u32 - 8;
+        bytes[4..8].copy_from_slice(&riff_length.to_le_bytes());
+        std::fs::write(&path, &bytes).unwrap();
+        assert!(parse(&path, "invalid-tag.wav").is_err());
+        assert_eq!(read_bitrate(&path).unwrap(), Some(128));
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+    }
+
+    #[test]
+    fn read_bitrate_keeps_unknown_bitrate_as_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("slow.wav");
+        // Mono 16-bit PCM at 8 Hz is below 1 kbps, which Lofty reports as zero.
+        std::fs::write(&path, wav(8)).unwrap();
+        assert_eq!(parse(&path, "slow.wav").unwrap().bitrate_kbps, None);
+        assert_eq!(read_bitrate(&path).unwrap(), None);
+    }
+
+    #[test]
+    fn read_bitrate_rejects_invalid_and_missing_audio() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("invalid.wav");
+        assert!(read_bitrate(&path).is_err());
+        assert!(parse(&path, "invalid.wav").is_err());
+
+        let mut truncated = wav(8000);
+        truncated.truncate(50);
+        let mut no_sample_rate = wav(8000);
+        no_sample_rate[24..28].copy_from_slice(&0u32.to_le_bytes());
+        let mut no_channels = wav(8000);
+        no_channels[22..24].copy_from_slice(&0u16.to_le_bytes());
+        let mut too_short = wav(8000);
+        too_short[24..28].copy_from_slice(&u32::MAX.to_le_bytes());
+        for bytes in [
+            Vec::new(),
+            b"not audio".to_vec(),
+            truncated,
+            no_sample_rate,
+            no_channels,
+            too_short,
+        ] {
+            std::fs::write(&path, bytes).unwrap();
+            assert!(read_bitrate(&path).is_err());
+            assert!(parse(&path, "invalid.wav").is_err());
+        }
+    }
+
     #[test]
     fn byte_ranges() {
         for (input, expected) in [

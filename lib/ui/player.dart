@@ -1024,30 +1024,20 @@ class _QueueListState extends State<_QueueList> {
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
             ),
-            subtitle: Row(
-              children: [
-                Expanded(
-                  child: Text(
-                    entry.track.artist,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                ),
-                if (status != null) ...[
-                  const SizedBox(width: 8),
-                  Flexible(
-                    child: Tooltip(
+            subtitle: TrackInfo(
+              track: entry.track,
+              compact: true,
+              status: status == null
+                  ? null
+                  : Tooltip(
                       message: status,
                       child: Text(
                         status,
-                        maxLines: 2,
+                        maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                         style: Theme.of(context).textTheme.labelSmall,
                       ),
                     ),
-                  ),
-                ],
-              ],
             ),
             onTap: () => runUiAction(
               context,

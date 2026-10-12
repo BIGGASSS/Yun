@@ -1,6 +1,6 @@
 use clap::{Parser, Subcommand};
 use std::{io::Read, net::SocketAddr, path::PathBuf, time::Duration};
-use yun_server::{AppState, Config};
+use yun_server::{AppState, BackfillOptions, Config};
 
 #[derive(Parser)]
 #[command(version, about = "Yun personal music server")]
@@ -40,6 +40,15 @@ enum Command {
         username: String,
         #[arg(long)]
         password_stdin: bool,
+    },
+    /// Read missing audio bitrates from stored originals. Stop the server first; safe to rerun.
+    BackfillBitrates {
+        /// Tracks per atomic commit. No database transaction is held during audio parsing.
+        #[arg(long, default_value_t = 32, value_parser = clap::value_parser!(u16).range(1..=128))]
+        batch_size: u16,
+        /// Simultaneous audio parsers (also bounded by existing parser limits).
+        #[arg(long, default_value_t = 2, value_parser = clap::value_parser!(u8).range(1..=2))]
+        concurrency: u8,
     },
     /// Offline backup: stop the server first. Destination must not exist.
     Backup { destination: PathBuf },
@@ -93,6 +102,27 @@ async fn main() -> anyhow::Result<()> {
         } => {
             yun_server::reset_password(&state, &username, &password(password_stdin)?).await?;
             println!("Password reset; all sessions revoked for {username}");
+        }
+        Command::BackfillBitrates {
+            batch_size,
+            concurrency,
+        } => {
+            let report = state
+                .backfill_bitrates(BackfillOptions {
+                    batch_size,
+                    concurrency,
+                })
+                .await?;
+            println!(
+                "Bitrate backfill: {} scanned, {} updated, {} unavailable, {} failed, {} skipped",
+                report.scanned, report.updated, report.unavailable, report.failed, report.skipped
+            );
+            if report.failed > 0 {
+                state.close().await;
+                anyhow::bail!(
+                    "some audio files could not be read; completed batches are saved. See warnings, repair the files, and rerun"
+                );
+            }
         }
         Command::Backup { destination } => {
             state.backup(&destination).await?;

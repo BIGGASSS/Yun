@@ -16,14 +16,15 @@ All routes except health/login/refresh require `Authorization: Bearer <access_to
 - GET /api/v1/uploads/{id} -> {id,offset,size_bytes,filename}
 - PATCH /api/v1/uploads/{id} raw bytes, Upload-Offset header -> {id,offset}; max chunk 4MiB, 409 offset mismatch. Offset reflects durable bytes.
 - DELETE /api/v1/uploads/{id} -> 204
-- POST /api/v1/uploads/{id}/complete -> Track (deduplicate within account by sha256; validate supported audio, extract tags/duration/artwork, immutable original)
+- POST /api/v1/uploads/{id}/complete -> Track (deduplicate within account by sha256; validate supported audio, extract tags/duration/bitrate/artwork, immutable original)
 - POST /api/v1/playlists {name} -> Playlist
 - PUT /api/v1/playlists/{id} {revision,name,entries:[{id,track_id}]} -> Playlist; 409 stale revision; entry IDs unique, repeated track IDs allowed
 - DELETE /api/v1/playlists/{id}?revision=N -> 204; 409 stale revision
 - POST /api/v1/listening-events {events:[Event]} -> {acknowledged_ids:[id]}; max 500; atomic validated batch; duplicate event IDs never increase totals
 - GET /api/v1/stats?from=<ms>&to=<ms> -> {listened_ms,play_count,top_tracks:[{id,title,artist,listened_ms,play_count}],top_artists:[{name,listened_ms,play_count}],top_albums:[{name,artist,listened_ms,play_count}],history:[{session_id,track_id,title,artist,started_at,listened_ms,counted_play}]}; range defaults all, from inclusive/to exclusive, history newest 100; top lists capped 50. One counted play per device/session when cumulative real playback time reaches min(30000,duration_ms/2); include partial listening time. Stats are personal and not stats.fm integration.
 
-Track = {id,title,artist,album,album_artist,track_number,disc_number,duration_ms,size_bytes,sha256,mime_type,has_artwork,revision,created_at}
+Track = {id,title,artist,album,album_artist,track_number,disc_number,duration_ms,size_bytes,bitrate_kbps,sha256,mime_type,has_artwork,revision,created_at}
+`bitrate_kbps` is the audio bitrate in kilobits per second (positive integer or null), extracted on upload or by the offline `backfill-bitrates` admin command. Backfilled tracks and their account receive new library revisions for incremental sync. Existing tracks may have null, and older servers omit it. Clients may display an explicitly marked estimate from file size and duration when it is unknown; this includes container/tag overhead.
 Playlist = {id,name,revision,entries:[{id,track_id}],updated_at}
 Event = {id,device_id,session_id,track_id,started_at,ended_at,listened_ms,timezone_offset_minutes}; segment duration >0 and <=60s, listened_ms <= elapsed wall time + small tolerance. Client persists segments every ~10s and on transitions, counts via monotonic clock only while actually playing (not buffering). Future timestamps beyond tolerance rejected; offline past events accepted. Device belongs to authenticated account. Original events retained; aggregates rebuildable. When a track is deleted, delayed events may reference its retained tombstone owned by the same account.
 

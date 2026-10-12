@@ -332,6 +332,7 @@ class DownloadsScreen extends StatelessWidget {
           subtitle: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
+              TrackInfo(track: track),
               Text(downloadLabel(progress)),
               if (progress.status == DownloadStatus.downloading ||
                   progress.status == DownloadStatus.verifying)
