@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -244,6 +245,60 @@ void main() {
     await tester.pumpAndSettle();
     expect(tester.takeException(), isNull);
   });
+
+  for (final platform in [TargetPlatform.android, TargetPlatform.iOS]) {
+    testWidgets(
+      'mobile library search loses focus on outside tap ($platform)',
+      (tester) async {
+        debugDefaultTargetPlatformOverride = platform;
+        final app = _TestApp(signedIn: true);
+        try {
+          await size(tester, const Size(390, 844));
+          await tester.pumpWidget(YunApp(controller: app));
+          await tester.pumpAndSettle();
+
+          final search = find.byType(TextField);
+          expect(search, findsOneWidget);
+
+          Future<FocusNode> focusedSearch() async {
+            await tester.tap(search);
+            await tester.pump();
+            final focus = tester.widget<TextField>(search).focusNode!;
+            expect(focus.hasFocus, isTrue);
+            return focus;
+          }
+
+          // View chips are same-page chrome; tapping them must dismiss focus.
+          var focus = await focusedSearch();
+          await tester.tap(find.widgetWithText(ChoiceChip, 'Albums'));
+          await tester.pump();
+          expect(focus.hasFocus, isFalse);
+
+          // Tap below the field (list/empty chrome) must dismiss focus too.
+          focus = await focusedSearch();
+          final searchBox = tester.getRect(search);
+          await tester.tapAt(
+            Offset(searchBox.center.dx, searchBox.bottom + 100),
+          );
+          await tester.pump();
+          expect(focus.hasFocus, isFalse);
+
+          // Still on Library — no nav destination switch required.
+          expect(find.byType(NavigationBar), findsOneWidget);
+          expect(
+            tester
+                .widget<NavigationBar>(find.byType(NavigationBar))
+                .selectedIndex,
+            0,
+          );
+          expect(tester.takeException(), isNull);
+        } finally {
+          app.dispose();
+          debugDefaultTargetPlatformOverride = null;
+        }
+      },
+    );
+  }
 
   testWidgets('legacy repeated entries remain ordered but cannot be repeated', (
     tester,
