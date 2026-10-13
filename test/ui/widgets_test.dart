@@ -7,6 +7,11 @@ void main() {
   test('duration and byte formatting are deterministic', () {
     expect(formatDuration(const Duration(seconds: 65)), '1:05');
     expect(formatDuration(const Duration(hours: 2, seconds: 9)), '2:00:09');
+    expect(formatTotalDuration(Duration.zero), '0s');
+    expect(formatTotalDuration(const Duration(seconds: 45)), '45s');
+    expect(formatTotalDuration(const Duration(minutes: 14)), '14m');
+    expect(formatTotalDuration(const Duration(hours: 2, minutes: 14)), '2h 14m');
+    expect(formatTotalDuration(const Duration(hours: 3)), '3h');
     expect(formatBytes(2048), '2.0 KB');
     expect(formatDate(DateTime(2025, 3, 4)), '2025-03-04');
   });

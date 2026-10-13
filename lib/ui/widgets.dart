@@ -110,6 +110,18 @@ String formatDuration(Duration duration) {
   return '${minutes ~/ 60 > 0 ? '${minutes ~/ 60}:' : ''}${minutes ~/ 60 > 0 ? (minutes % 60).toString().padLeft(2, '0') : minutes}:${(seconds % 60).toString().padLeft(2, '0')}';
 }
 
+/// Compact human-readable total for library/playlist sums, e.g. `2h 14m`.
+String formatTotalDuration(Duration duration) {
+  final seconds = duration.inSeconds.clamp(0, 999999999);
+  if (seconds < 60) return '${seconds}s';
+  final hours = seconds ~/ 3600;
+  final minutes = (seconds % 3600) ~/ 60;
+  if (hours > 0) {
+    return minutes > 0 ? '${hours}h ${minutes}m' : '${hours}h';
+  }
+  return '${minutes}m';
+}
+
 String formatBytes(int bytes) {
   if (bytes < 1024) return '$bytes B';
   if (bytes < 1024 * 1024) return '${(bytes / 1024).toStringAsFixed(1)} KB';

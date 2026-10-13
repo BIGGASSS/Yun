@@ -262,6 +262,11 @@ Future<void> _selectAll(WidgetTester tester) async {
 }
 
 void main() {
+
+  _libraryTest('shows total library duration in the heading', (tester, app) async {
+    expect(find.text('4 tracks · 1s'), findsOneWidget);
+  });
+
   _libraryTest('library and group sort choices survive restarting the screen', (
     tester,
     app,

@@ -93,6 +93,10 @@ class Track {
   };
 }
 
+Duration sumTrackDurations(Iterable<Track> tracks) => Duration(
+  milliseconds: tracks.fold<int>(0, (sum, track) => sum + track.durationMs),
+);
+
 class PlaylistEntry {
   const PlaylistEntry({required this.id, required this.trackId});
   final String id, trackId;
