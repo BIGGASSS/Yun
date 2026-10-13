@@ -240,6 +240,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
                     controller: _search,
                     focusNode: widget.searchFocus,
                     textInputAction: TextInputAction.search,
+                    onTapOutside: (_) => widget.searchFocus.unfocus(),
                     onChanged: (_) => setState(() {}),
                     decoration: InputDecoration(
                       hintText: 'Search tracks, albums, artists',
