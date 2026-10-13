@@ -10,7 +10,10 @@ void main() {
     expect(formatTotalDuration(Duration.zero), '0s');
     expect(formatTotalDuration(const Duration(seconds: 45)), '45s');
     expect(formatTotalDuration(const Duration(minutes: 14)), '14m');
-    expect(formatTotalDuration(const Duration(hours: 2, minutes: 14)), '2h 14m');
+    expect(
+      formatTotalDuration(const Duration(hours: 2, minutes: 14)),
+      '2h 14m',
+    );
     expect(formatTotalDuration(const Duration(hours: 3)), '3h');
     expect(formatBytes(2048), '2.0 KB');
     expect(formatDate(DateTime(2025, 3, 4)), '2025-03-04');

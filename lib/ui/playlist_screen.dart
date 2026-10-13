@@ -6,7 +6,6 @@ import 'collection_controls.dart';
 import 'track_widgets.dart';
 import 'widgets.dart';
 
-
 Duration _playlistDuration(AppController app, Playlist playlist) =>
     sumTrackDurations([
       for (final entry in playlist.entries)
