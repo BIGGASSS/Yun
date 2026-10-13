@@ -208,7 +208,8 @@ class _LibraryScreenState extends State<LibraryScreen> {
               children: [
                 SectionHeading(
                   'Library',
-                  subtitle: '${app.tracks.length} tracks',
+                  subtitle:
+                      '${app.tracks.length} tracks · ${formatTotalDuration(sumTrackDurations(app.tracks))}',
                   actions: [
                     FilledButton.tonalIcon(
                       onPressed: app.isAuthenticated && visible.isNotEmpty

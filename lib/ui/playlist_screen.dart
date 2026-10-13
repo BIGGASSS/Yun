@@ -6,6 +6,12 @@ import 'collection_controls.dart';
 import 'track_widgets.dart';
 import 'widgets.dart';
 
+Duration _playlistDuration(AppController app, Playlist playlist) =>
+    sumTrackDurations([
+      for (final entry in playlist.entries)
+        if (app.trackById(entry.trackId) case final Track track) track,
+    ]);
+
 /// Capture identity, not just collection IDs (which can coincide across users).
 class _PlaylistScope {
   _PlaylistScope(this.app)
@@ -445,7 +451,7 @@ class _PlaylistsScreenState extends State<PlaylistsScreen> {
                   ),
                   title: Text(playlist.name),
                   subtitle: Text(
-                    '${playlist.entries.length} entries${app.isPinned('playlist', playlist.id) ? ' · Kept offline' : ''}',
+                    '${playlist.entries.length} entries · ${formatTotalDuration(_playlistDuration(app, playlist))}${app.isPinned('playlist', playlist.id) ? ' · Kept offline' : ''}',
                   ),
                   trailing: const Icon(Icons.chevron_right_rounded),
                   onTap: _saving ? null : () => _open(scope, playlist.id),
@@ -545,7 +551,7 @@ class _PlaylistsScreenState extends State<PlaylistsScreen> {
         SectionHeading(
           playlist.name,
           subtitle:
-              '${playlist.entries.length} entries · ${reorder ? 'Drag to reorder' : 'Sorted view; order unchanged'}',
+              '${playlist.entries.length} entries · ${formatTotalDuration(sumTrackDurations(queue))} · ${reorder ? 'Drag to reorder' : 'Sorted view; order unchanged'}',
           actions: [
             FilledButton.tonalIcon(
               onPressed: _saving || queue.isEmpty

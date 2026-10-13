@@ -238,6 +238,16 @@ Finder _dialogText(String text) =>
     find.descendant(of: find.byType(AlertDialog), matching: find.text(text));
 
 void main() {
+  _test('shows total playlist duration on list and detail', (
+    tester,
+    app,
+  ) async {
+    // 3 resolved tracks: 3000+1000+2000 ms = 6s; missing entry skipped.
+    expect(find.text('4 entries · 6s'), findsOneWidget);
+    await _open(tester);
+    expect(find.text('4 entries · 6s · Drag to reorder'), findsOneWidget);
+  });
+
   _test(
     'playlist overview, entries and picker restore independent sort choices',
     (tester, app) async {
