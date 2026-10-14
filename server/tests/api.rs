@@ -1233,6 +1233,24 @@ async fn durable_resumable_upload_dedup_audio_ranges_and_isolation() {
     assert_eq!(code, StatusCode::OK);
     assert!(body.is_empty());
     assert_eq!(headers["content-length"], bytes.len().to_string());
+    // RFC 9110 section 14.2: Range is only defined for GET. HEAD must report
+    // the full representation, even for malformed or unsatisfiable ranges.
+    for value in ["bytes=0-9", "bytes=999999-", "garbage"] {
+        let (code, headers, body) = raw(
+            &h.app,
+            "HEAD",
+            &audio,
+            Some(h.a()),
+            &[("range", value), ("if-range", etag)],
+            vec![],
+        )
+        .await;
+        assert_eq!(code, StatusCode::OK);
+        assert!(body.is_empty());
+        assert_eq!(headers["content-length"], bytes.len().to_string());
+        assert_eq!(headers["etag"], etag);
+        assert!(!headers.contains_key("content-range"));
+    }
     for value in [
         "bytes=999999-",
         "bytes=2-1",

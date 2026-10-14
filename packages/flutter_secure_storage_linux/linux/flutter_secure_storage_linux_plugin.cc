@@ -28,26 +28,38 @@ void write(const gchar *key, const gchar *value)
   keyring.addItem(key, value);
 }
 
-FlValue *read(const gchar *key)
+static FlValue *jsonRead(nlohmann::json data, const gchar *key)
 {
-  auto str = keyring.getItem(key);
-  if (str == "")
+  const auto value = data[key];
+  if (!value.is_string())
   {
     return nullptr;
   }
-  return fl_value_new_string(str.c_str());
+  // An empty stored string is a value, not an absent key. getItem() uses an
+  // empty-string sentinel and cannot preserve that distinction for Flutter.
+  return fl_value_new_string(value.get<std::string>().c_str());
 }
 
-FlValue *readAll()
+FlValue *read(const gchar *key)
 {
-  FlValue *result = fl_value_new_map();
-  nlohmann::json data = keyring.readFromKeyring();
+  return jsonRead(keyring.readFromKeyring(), key);
+}
+
+static FlValue *jsonToMap(const nlohmann::json &data)
+{
+  // JSON conversion can throw; keep partial results owned during unwinding.
+  g_autoptr(FlValue) result = fl_value_new_map();
   for (auto each : data.items())
   {
     fl_value_set_string_take(result, each.key().c_str(),
                              fl_value_new_string(std::string(each.value()).c_str()));
   }
-  return result;
+  return g_steal_pointer(&result);
+}
+
+FlValue *readAll()
+{
+  return jsonToMap(keyring.readFromKeyring());
 }
 
 FlValue* containsKey(const gchar* key) {
@@ -55,16 +67,13 @@ FlValue* containsKey(const gchar* key) {
   return fl_value_new_bool(data.contains(key));
 }
 
-// Called when a method call is received from Flutter.
-static void flutter_secure_storage_linux_plugin_handle_method_call(
-    FlutterSecureStorageLinuxPlugin *self, FlMethodCall *method_call)
+// Separate response construction so malformed calls are testable without a
+// Flutter engine or access to the user's wallet.
+static FlMethodResponse *create_method_response(const gchar *method, FlValue *args)
 {
   g_autoptr(FlMethodResponse) response = nullptr;
 
-  const gchar *method = fl_method_call_get_name(method_call);
-  FlValue *args = fl_method_call_get_args(method_call);
-
-  if (fl_value_get_type(args) != FL_VALUE_TYPE_MAP)
+  if (args == nullptr || fl_value_get_type(args) != FL_VALUE_TYPE_MAP)
   {
     response = FL_METHOD_RESPONSE(fl_method_error_response_new(
         "Bad arguments", "args given to function is not a map", nullptr));
@@ -74,9 +83,11 @@ static void flutter_secure_storage_linux_plugin_handle_method_call(
     FlValue *key = fl_value_lookup_string(args, "key");
     FlValue *value = fl_value_lookup_string(args, "value");
     const gchar *keyString =
-        key == nullptr ? nullptr : fl_value_get_string(key);
+        key != nullptr && fl_value_get_type(key) == FL_VALUE_TYPE_STRING
+            ? fl_value_get_string(key) : nullptr;
     const gchar *valueString =
-        value == nullptr ? nullptr : fl_value_get_string(value);
+        value != nullptr && fl_value_get_type(value) == FL_VALUE_TYPE_STRING
+            ? fl_value_get_string(value) : nullptr;
 
     try
     {
@@ -167,8 +178,17 @@ static void flutter_secure_storage_linux_plugin_handle_method_call(
       response = FL_METHOD_RESPONSE(fl_method_error_response_new(
           "StorageError", safe, nullptr));
     }
-    fl_method_call_respond(method_call, response, nullptr);
   }
+  return g_steal_pointer(&response);
+}
+
+// Every call, including non-map arguments, receives exactly one response.
+static void flutter_secure_storage_linux_plugin_handle_method_call(
+    FlutterSecureStorageLinuxPlugin *self, FlMethodCall *method_call)
+{
+  g_autoptr(FlMethodResponse) response = create_method_response(
+      fl_method_call_get_name(method_call), fl_method_call_get_args(method_call));
+  fl_method_call_respond(method_call, response, nullptr);
 }
 
 static void flutter_secure_storage_linux_plugin_dispose(GObject *object)

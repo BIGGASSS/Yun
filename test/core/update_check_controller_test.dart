@@ -140,6 +140,45 @@ void main() {
       expect(controller.completedChecks, 1);
     });
 
+    for (final fails in [false, true]) {
+      test(
+        'disposing during a ${fails ? 'failed' : 'successful'} check is safe',
+        () async {
+          final checker = _FakeChecker(
+            payload: _newerPayload,
+            error: fails ? StateError('offline') : null,
+          );
+          checker.inFlight.add(Completer<void>());
+          final controller = _controllerWith(checker);
+          var notifications = 0;
+          controller.addListener(() => notifications++);
+          final pending = controller.check();
+          controller.dispose();
+          checker.inFlight.single.complete();
+          await pending;
+          await controller.check();
+          expect(await controller.openReleasePage(), isFalse);
+          expect(checker.calls, 1);
+          expect(notifications, 1);
+          expect(controller.availableUpdate, isNull);
+        },
+      );
+    }
+
+    test('a listener retry shares the request being announced', () async {
+      final checker = _FakeChecker(payload: _newerPayload);
+      final controller = _controllerWith(checker);
+      Future<void>? nested;
+      controller.addListener(() {
+        if (controller.isChecking) nested = controller.check();
+      });
+      final pending = controller.check();
+      expect(identical(nested, pending), isTrue);
+      await pending;
+      expect(checker.calls, 1);
+      controller.dispose();
+    });
+
     test('each manual check re-queries GitHub', () async {
       final checker = _FakeChecker(payload: _newerPayload);
       final controller = _controllerWith(checker);

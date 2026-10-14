@@ -632,6 +632,9 @@ class _DownloadReceiveWorker {
         headers: input.headers,
         sendTimeout: input.sendTimeout,
         receiveTimeout: input.receiveTimeout,
+        // This URL is an authenticated endpoint, not a redirect capability.
+        // HttpClient can forward Authorization to a different port/subdomain.
+        followRedirects: false,
         validateStatus: (_) => true,
       ),
     );

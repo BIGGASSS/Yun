@@ -121,8 +121,7 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertEqual([(source, local) for source, local, _ in records],
                          [("action.yaml", "action.yml"), ("setup.sh", "setup.sh"),
                           ("LICENSE", "LICENSE")])
-        # Undo only the documented nested-pin patch. This permits Dependabot cache
-        # updates while detecting any other upstream content changes offline.
+        # Undo only the documented patches, retaining original-byte provenance.
         original_action, patches = re.subn(
             r"(?m)^(      uses: actions/cache)@[0-9a-f]{40} +# +\S[^\n]*$",
             r"\1@v5", action,
@@ -135,6 +134,17 @@ class WorkflowPolicyTests(unittest.TestCase):
                     provenance,
                 )
                 contents = original_action.encode() if local == "action.yml" else (vendor / local).read_bytes()
+                if local == "setup.sh":
+                    patched = contents.decode()
+                    self.assertEqual(patched.count('curl --fail '), 2)
+                    patched = patched.replace('curl --fail ', 'curl ')
+                    verification = (
+                        '\t# Verify the manifest\'s digest before any archive member reaches the SDK cache.\n'
+                        '\tbash "$(dirname -- "${BASH_SOURCE[0]}")/verify-download.sh" \\\n'
+                        '\t\t"$archive_local" "$(echo "$VERSION_MANIFEST" | jq -r \'.sha256\')"\n'
+                    )
+                    self.assertEqual(patched.count(verification), 1)
+                    contents = patched.replace(verification, '').encode()
                 self.assertEqual(hashlib.sha256(contents).hexdigest(), digest)
         license_text = (vendor / "LICENSE").read_text()
         self.assertIn("The MIT License (MIT)", license_text)

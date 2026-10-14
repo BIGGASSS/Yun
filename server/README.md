@@ -99,7 +99,7 @@ Direct HTTP is allowed only with explicit `--insecure-loopback` on a loopback bi
   uncommitted bytes. Retrying from an old offset returns 409; query GET to resume.
 * An interrupted write may leave a file tail beyond the SQL offset. The next
   PATCH truncates that tail before writing. The filesystem writer retains the
-  mutation lock even if its HTTP future is cancelled, preventing a retry from
+  per-upload lock even if its HTTP future is cancelled, preventing a retry from
   racing an in-flight write. Partial uploads survive process restarts.
 * Completion requires every byte. Content is SHA-256 hashed and sniffed, not
   trusted from filename/MIME. Supported containers: MP3, AAC/ADTS, MP4/M4A,
@@ -130,10 +130,11 @@ Direct HTTP is allowed only with explicit `--insecure-loopback` on a loopback bi
   limit. The first valid image among the first eight embedded pictures is used;
   invalid/unsupported embedded pictures are skipped. Invalid manual images fail.
 * Audio streams from disk rather than buffering the full file. GET and HEAD
-  provide Content-Length, Accept-Ranges, and quoted SHA-256 ETag. Single normal,
-  open-ended, and suffix byte ranges return 206. Invalid/unsatisfiable or multipart
-  ranges return 416 with `Content-Range: bytes */size`. If-Range must exactly match
-  the strong ETag; weak tags, dates, or mismatches produce the whole representation.
+  provide Content-Length, Accept-Ranges, and quoted SHA-256 ETag. For GET, single
+  normal, open-ended, and suffix byte ranges return 206. Invalid/unsatisfiable or
+  multipart ranges return 416 with `Content-Range: bytes */size`. If-Range must
+  exactly match the strong ETag; weak tags, dates, or mismatches produce the whole
+  representation. HEAD ignores Range and reports the full representation's length.
 
 ### Revisions, playlists, and events
 
@@ -233,7 +234,7 @@ cargo test --locked
 cargo clippy --locked --all-targets --all-features -- -D warnings
 ```
 
-Nine end-to-end Axum integration tests plus range unit tests cover real SQLite and
+Axum integration tests and unit tests cover real SQLite and
 filesystem operations: auth/expiry/rotation races/revocation/hash storage/rate
 limits, account isolation across all resources, durable resumed writes and
 uncommitted tails, concurrent chunk/playlist writes, repeat completion, quota
@@ -272,11 +273,13 @@ regeneration is optional: `bash scripts/generate-fixtures.sh` (requires FFmpeg).
   allocations (which occur before response admission), response write deadlines,
   or total process memory. Proxy connection/write/idle limits remain necessary;
   copying/buffering proxies or custom transports must enforce their own bounds.
-* Full library responses have no pagination because the v1 contract has none.
-  Stats recompute via SQL windows over the account's events, so queries get slower
-  with a very large history. A materialized/rebuildable aggregate is a future
-  optimization. Events/tombstones intentionally never expire; monitor database
-  disk usage (metadata/history are not charged to the audio/artwork quota).
+* Library sync is paginated with at most 256 records per response, including
+  playlist entries. Clients must negotiate `paged=true`, merge all entry fragments,
+  and consume every continuation before saving their cursor; see [API.md](../docs/API.md).
+  Stats recompute via SQL windows over candidate sessions' complete histories, so
+  all-history queries still get slower with a very large history. Events/tombstones
+  intentionally never expire; monitor database disk usage (metadata/history are
+  not charged to the audio/artwork quota).
 * Events are client-reported personal statistics, not anti-fraud telemetry; unique
   IDs prevent replay inflation, but the server cannot prove a client really played
   audio or detect fabricated nonduplicate segments.

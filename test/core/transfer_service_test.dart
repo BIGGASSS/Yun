@@ -96,6 +96,56 @@ void main() {
     await db.close();
     await root.delete(recursive: true);
   });
+  for (final id in ['folder/../other?revision=0#fragment', '', '.', '..']) {
+    test('download endpoint safely handles track ID "$id"', () async {
+      final requests = <RequestOptions>[];
+      dio.httpClientAdapter = FakeAdapter((options, _) {
+        requests.add(options);
+        return ResponseBody.fromString('', 403);
+      });
+      final track = Track(id: id, title: 'Track', sizeBytes: 6);
+      await transfers.reconcile([track], [], [PinSelection('track', id)]);
+      if (id.isEmpty || id == '.' || id == '..') {
+        expect(requests, isEmpty);
+      } else {
+        final uri = requests.single.uri;
+        expect(uri.pathSegments, ['api', 'v1', 'tracks', id, 'audio']);
+        expect(uri.query, isEmpty);
+        expect(uri.fragment, isEmpty);
+      }
+      expect(transfers.progressFor(id)!.status, DownloadStatus.failed);
+      expect(await db.get('file', id), isNull);
+    });
+  }
+
+  test('injected downloads disable authenticated redirects', () async {
+    var requests = 0;
+    dio.httpClientAdapter = FakeAdapter((options, _) {
+      requests++;
+      expect(options.followRedirects, isFalse);
+      return ResponseBody.fromString(
+        '',
+        302,
+        headers: {
+          'location': ['https://other.invalid/audio'],
+        },
+      );
+    });
+    const track = Track(id: 'redirected', title: 'Redirected', sizeBytes: 6);
+    await transfers.reconcile(
+      [track],
+      [],
+      [const PinSelection('track', 'redirected')],
+    );
+    expect(requests, 1);
+    expect(transfers.progressFor(track.id)!.status, DownloadStatus.failed);
+    expect(await db.get('file', track.id), isNull);
+    expect(
+      await File(p.join(root.path, '${track.id}.audio.part')).exists(),
+      isFalse,
+    );
+  });
+
   test('pin membership indexes preserve overlapping selections and deduplicate entries', () {
     const tracks = [
       Track(

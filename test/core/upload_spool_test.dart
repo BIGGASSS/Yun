@@ -54,6 +54,100 @@ void main() {
   Future<File> source([String name = 'original song.wav']) =>
       File(p.join(root.path, name)).writeAsBytes([1, 2, 3, 4]);
 
+  test('upload endpoints keep remote IDs within one path segment', () async {
+    const remoteId = '../tracks/victim?revision=0#fragment';
+    final original = await source();
+    final job = (await transfers.enqueueUpload(
+      'encoded',
+      original.path,
+    )).copyWith(remoteId: remoteId);
+    await db.put('upload', job.id, job.toJson());
+    final requests = <RequestOptions>[];
+    dio.httpClientAdapter = FakeAdapter((options, _) {
+      requests.add(options);
+      if (options.uri.pathSegments.last == 'complete') {
+        return jsonResponse(const Track(id: 'track', title: 'Song').toJson());
+      }
+      return jsonResponse({'offset': options.method == 'PATCH' ? 4 : 0});
+    });
+    await transfers.runUploads();
+    expect(errors, isEmpty);
+    await db.put('upload_cancel', job.id, {
+      'id': job.id,
+      'remote_id': remoteId,
+    });
+    await transfers.runUploads();
+    expect(requests.map((request) => request.method), [
+      'GET',
+      'PATCH',
+      'POST',
+      'DELETE',
+    ]);
+    for (final request in requests) {
+      expect(request.uri.pathSegments, [
+        'api',
+        'v1',
+        'uploads',
+        remoteId,
+        if (request.method == 'POST') 'complete',
+      ]);
+      expect(request.uri.query, isEmpty);
+      expect(request.uri.fragment, isEmpty);
+    }
+  });
+
+  for (final remoteId in ['', '.', '..']) {
+    test(
+      'invalid remote upload ID "$remoteId" never selects a parent',
+      () async {
+        final original = await source();
+        final job = (await transfers.enqueueUpload(
+          'invalid',
+          original.path,
+        )).copyWith(remoteId: remoteId);
+        await db.put('upload', job.id, job.toJson());
+        await db.put('upload_cancel', job.id, {
+          'id': job.id,
+          'remote_id': remoteId,
+        });
+        var requests = 0;
+        dio.httpClientAdapter = FakeAdapter((options, _) {
+          requests++;
+          return jsonResponse({}, status: 403);
+        });
+        await transfers.runUploads();
+        expect(requests, 0);
+        expect(errors, hasLength(2));
+        expect(errors, everyElement(isArgumentError));
+        expect((await db.get('upload', job.id))!['status'], 'failed');
+        expect(await db.get('upload_cancel', job.id), isNotNull);
+      },
+    );
+  }
+
+  test('concurrent duplicate imports cannot share spool files', () async {
+    final original = await source();
+    final first = transfers.enqueueUpload('same-id', original.path);
+    final duplicate = expectLater(
+      transfers.enqueueUpload('same-id', original.path),
+      throwsStateError,
+    );
+    final job = await first;
+    await duplicate;
+    expect(await File(job.localPath).readAsBytes(), [1, 2, 3, 4]);
+    expect((await db.get('upload', job.id))!['local_path'], job.localPath);
+  });
+
+  test('failed import releases its ID for a later attempt', () async {
+    final original = await source();
+    await expectLater(
+      transfers.enqueueUpload('retry', original.path, maxBytes: 1),
+      throwsArgumentError,
+    );
+    final job = await transfers.enqueueUpload('retry', original.path);
+    expect(await File(job.localPath).readAsBytes(), [1, 2, 3, 4]);
+  });
+
   test(
     'durable copy uploads after picker source disappears, then cleans up',
     () async {

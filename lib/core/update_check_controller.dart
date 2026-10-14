@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 import 'package:url_launcher/url_launcher.dart';
 
@@ -58,15 +60,31 @@ class UpdateCheckController extends ChangeNotifier {
   int completedChecks = 0;
 
   Future<void>? _inFlight;
+  bool _disposed = false;
 
   /// Checks GitHub for a newer release. Concurrent callers share the in-flight
   /// request, and the latest result is retained between calls.
   Future<void> check() {
+    if (_disposed) return Future.value();
     final inFlight = _inFlight;
     if (inFlight != null) return inFlight;
-    final request = _check().whenComplete(() => _inFlight = null);
-    _inFlight = request;
-    return request;
+    // Install the shared future before announcing checking: listeners may
+    // synchronously request a check of their own.
+    final request = Completer<void>();
+    _inFlight = request.future;
+    unawaited(
+      _check().then<void>(
+        (_) {
+          _inFlight = null;
+          request.complete();
+        },
+        onError: (Object error, StackTrace stack) {
+          _inFlight = null;
+          request.completeError(error, stack);
+        },
+      ),
+    );
+    return request.future;
   }
 
   Future<void> _check() async {
@@ -75,28 +93,39 @@ class UpdateCheckController extends ChangeNotifier {
       _error = null;
       notifyListeners();
     }
+    if (_disposed) return;
     try {
       final update = await _checker.findUpdate(currentVersion: currentVersion);
+      if (_disposed) return;
       _availableUpdate = update;
       _status = update == null
           ? UpdateCheckStatus.upToDate
           : UpdateCheckStatus.updateAvailable;
       _error = null;
     } catch (_) {
+      if (_disposed) return;
       _availableUpdate = null;
       _status = UpdateCheckStatus.failed;
       _error = 'Could not check for updates';
     } finally {
-      completedChecks++;
-      notifyListeners();
+      if (!_disposed) {
+        completedChecks++;
+        notifyListeners();
+      }
     }
+  }
+
+  @override
+  void dispose() {
+    _disposed = true;
+    super.dispose();
   }
 
   /// Opens the release page for the available update in the system browser.
   /// Returns false when no update is available or launching fails.
   Future<bool> openReleasePage() async {
     final update = _availableUpdate;
-    if (update == null) return false;
+    if (_disposed || update == null) return false;
     final open =
         openRelease ??
         (uri) => launchUrl(uri, mode: LaunchMode.externalApplication);

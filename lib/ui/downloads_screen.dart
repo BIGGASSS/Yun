@@ -379,6 +379,7 @@ class DownloadsScreen extends StatelessWidget {
       trailing: IconButton(
         tooltip: 'Remove offline selection',
         onPressed: () => runUiAction(context, () async {
+          final account = app.account;
           if (!await confirmAction(
             context,
             title: 'Remove offline selection?',
@@ -387,6 +388,7 @@ class DownloadsScreen extends StatelessWidget {
           )) {
             return;
           }
+          if (!context.mounted || !identical(account, app.account)) return;
           switch (pin.type) {
             case 'track':
               await app.pinTrack(pin.id, pinned: false);
