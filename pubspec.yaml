@@ -37,6 +37,7 @@ dependencies:
   yun_tray_manager_linux:
     path: packages/yun_tray_manager_linux
   uuid: ^4.5.2
+  url_launcher: ^6.3.2
   window_manager: 0.5.2
 
 dependency_overrides:
