@@ -19,6 +19,7 @@ Rendered from the Flutter UI using a demo library and original sample artwork.
 - Adaptive mobile and desktop library, albums/artists/search, queue, shuffle/repeat, keyboard shortcuts, light/dark/system appearance, and metadata and artwork editing.
 - Desktop app-volume slider and mute, including compact windows and now playing. On desktop, volume, mute, shuffle, and repeat survive app restarts. Android uses system volume and remembers shuffle and repeat.
 - Desktop tray: left-click restores Yun, right-click opens Show/Quit. **Settings → Window behavior** chooses whether closing the window quits (default) or minimizes to the tray without stopping music. Android and iOS are unchanged. If the tray is unavailable, the window is never hidden.
+- Update check: on startup Yun asks the GitHub Releases API about the newest Yun release and shows a banner linking to that release's page when it is newer than the running build. **Settings → Updates** re-checks at any time and reports the result. Only the public release endpoint is contacted; the check is advisory and a failure never blocks startup.
 - Admin-created accounts, Argon2id passwords, rotating and revocable sessions, and authenticated original-file streaming with byte-range seeking.
 - File selection in the app and drag-and-drop on desktop, durable resumable uploads, embedded tags and artwork, per-account deduplication, quotas, and validation.
 - Versioned playlists with conflict detection and incremental library sync.

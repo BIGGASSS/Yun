@@ -3,6 +3,7 @@ import 'package:package_info_plus/package_info_plus.dart';
 
 import '../core/app_controller.dart';
 import '../core/desktop_controller.dart';
+import '../core/update_check_controller.dart';
 import 'widgets.dart';
 
 class SettingsScreen extends StatefulWidget {
@@ -10,11 +11,13 @@ class SettingsScreen extends StatefulWidget {
     super.key,
     required this.app,
     this.desktop,
+    this.updateCheck,
     required this.themeMode,
     required this.onThemeChanged,
   });
   final AppController app;
   final DesktopController? desktop;
+  final UpdateCheckController? updateCheck;
   final ThemeMode themeMode;
   final ValueChanged<ThemeMode> onThemeChanged;
   @override
@@ -101,6 +104,73 @@ class _WindowBehavior extends StatelessWidget {
                 onPressed: enabled ? desktop.quit : null,
                 child: const Text('Quit Yun'),
               ),
+            ],
+          ),
+        ],
+      );
+    },
+  );
+}
+
+/// Manual update check and result. The startup check shares this state;
+/// failures never block the app.
+class _UpdateSettings extends StatelessWidget {
+  const _UpdateSettings({required this.updates});
+
+  final UpdateCheckController updates;
+
+  @override
+  Widget build(BuildContext context) => ListenableBuilder(
+    listenable: updates,
+    builder: (context, _) {
+      final status = updates.status;
+      final checking = status == UpdateCheckStatus.checking;
+      final update = updates.availableUpdate;
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Text('Updates', style: Theme.of(context).textTheme.titleLarge),
+          const SizedBox(height: 12),
+          Text(switch (status) {
+            UpdateCheckStatus.idle =>
+              'Yun checks GitHub for new releases when it starts.',
+            UpdateCheckStatus.checking => 'Checking for updates…',
+            UpdateCheckStatus.updateAvailable =>
+              'Version ${update!.version} is available. '
+                  'You are running ${updates.currentVersion}.',
+            UpdateCheckStatus.upToDate =>
+              'You are running ${updates.currentVersion}, the latest '
+                  'published release.',
+            UpdateCheckStatus.failed =>
+              'Could not reach GitHub. Check your connection and try again.',
+          }),
+          const SizedBox(height: 12),
+          Wrap(
+            spacing: 12,
+            runSpacing: 12,
+            children: [
+              OutlinedButton.icon(
+                onPressed: checking ? null : updates.check,
+                icon: const Icon(Icons.refresh_rounded),
+                label: Text(checking ? 'Checking…' : 'Check for updates'),
+              ),
+              if (status == UpdateCheckStatus.updateAvailable && update != null)
+                FilledButton.icon(
+                  onPressed: () async {
+                    if (await updates.openReleasePage()) return;
+                    if (!context.mounted) return;
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(
+                        content: Text(
+                          'Could not open the release page. '
+                          'Visit ${update.releaseUrl}',
+                        ),
+                      ),
+                    );
+                  },
+                  icon: const Icon(Icons.open_in_new_rounded),
+                  label: Text('Open version ${update.version}'),
+                ),
             ],
           ),
         ],
@@ -403,6 +473,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     padding: EdgeInsets.symmetric(vertical: 24),
                     child: Divider(),
                   ),
+                  if (widget.updateCheck != null) ...[
+                    _UpdateSettings(updates: widget.updateCheck!),
+                    const Padding(
+                      padding: EdgeInsets.symmetric(vertical: 24),
+                      child: Divider(),
+                    ),
+                  ],
                   Text(
                     'Keyboard shortcuts',
                     style: Theme.of(context).textTheme.titleLarge,

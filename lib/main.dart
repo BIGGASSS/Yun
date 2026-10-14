@@ -2,15 +2,18 @@ import 'dart:async';
 import 'dart:ui' show AppExitResponse;
 
 import 'package:flutter/material.dart';
+import 'package:package_info_plus/package_info_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'core/app_controller.dart';
 import 'core/collection_settings_controller.dart';
 import 'core/desktop_controller.dart';
+import 'core/update_check_controller.dart';
 import 'services/desktop_host.dart';
 import 'services/collection_settings_store.dart';
 import 'services/desktop_settings_store.dart';
 import 'services/desktop_window_startup.dart';
+import 'services/github_update_checker.dart';
 import 'services/native_desktop_host.dart';
 import 'services/playback_settings_store.dart';
 import 'ui/app.dart';
@@ -28,6 +31,7 @@ class YunBootstrap extends StatefulWidget {
     super.key,
     this.controllerFactory,
     this.desktopHostFactory,
+    this.updateCheckerFactory,
   });
 
   /// Native boundary injected by bootstrap tests; never called on touch/web.
@@ -39,6 +43,10 @@ class YunBootstrap extends StatefulWidget {
   })?
   controllerFactory;
 
+  /// Builds the advisory startup update checker; injected by bootstrap tests.
+  /// Returning null or throwing only skips the check, never startup.
+  final Future<UpdateCheckController?> Function()? updateCheckerFactory;
+
   @override
   State<YunBootstrap> createState() => _YunBootstrapState();
 }
@@ -49,6 +57,7 @@ class _YunBootstrapState extends State<YunBootstrap> {
   Future<void>? _opening;
   SharedPreferences? _preferences;
   CollectionSettingsController? _collectionSettings;
+  UpdateCheckController? _updateCheck;
   Object? _failure;
   bool _ready = false;
   late final AppLifecycleListener _lifecycle;
@@ -111,6 +120,25 @@ class _YunBootstrapState extends State<YunBootstrap> {
     await _controller?.shutdown();
   }
 
+  /// Starts the advisory GitHub Releases check. It must never gate or fail
+  /// startup: an unavailable version, thrown factory, or failed request is
+  /// silently ignored and the UI simply keeps the last good state.
+  Future<void> _startUpdateCheck() async {
+    UpdateCheckController? updateCheck;
+    try {
+      updateCheck =
+          await (widget.updateCheckerFactory ?? _startupUpdateChecker)();
+    } catch (_) {
+      return;
+    }
+    if (!mounted || (_desktop?.isQuitting ?? false)) {
+      updateCheck?.dispose();
+      return;
+    }
+    unawaited(updateCheck?.check());
+    setState(() => _updateCheck = updateCheck);
+  }
+
   Future<void> _initialize() =>
       _opening ??= _open().whenComplete(() => _opening = null);
 
@@ -136,6 +164,8 @@ class _YunBootstrapState extends State<YunBootstrap> {
       old?.dispose();
       _controller = null;
       _desktop = null;
+      _updateCheck?.dispose();
+      _updateCheck = null;
       _preferences = await SharedPreferences.getInstance();
       final collectionStore = SharedPreferencesCollectionSettingsStore(
         _preferences!,
@@ -185,6 +215,9 @@ class _YunBootstrapState extends State<YunBootstrap> {
       }
       if (!mounted || (_desktop?.isQuitting ?? false)) return;
       await controller.initialize();
+      // Advisory and asynchronous: readiness never waits on the platform
+      // version lookup or the GitHub request.
+      unawaited(_startUpdateCheck());
       if (mounted && !(_desktop?.isQuitting ?? false)) {
         setState(() => _ready = true);
       }
@@ -196,6 +229,7 @@ class _YunBootstrapState extends State<YunBootstrap> {
   @override
   void dispose() {
     _lifecycle.dispose();
+    _updateCheck?.dispose();
     _desktop?.dispose();
     _controller?.dispose();
     super.dispose();
@@ -213,6 +247,7 @@ class _YunBootstrapState extends State<YunBootstrap> {
         controller: _controller!,
         collectionSettings: _collectionSettings,
         desktop: _desktop,
+        updateCheck: _updateCheck,
         initialThemeMode: theme,
         onThemeChanged: (mode) async {
           await _preferences?.setString('appearance.theme', mode.name);
@@ -265,5 +300,21 @@ class _YunBootstrapState extends State<YunBootstrap> {
         ),
       ),
     );
+  }
+}
+
+/// Default startup checker: Yun's published GitHub releases against the version
+/// of the running build. Only public release data is requested; no account or
+/// library information is involved. Returns null when the platform version is
+/// unavailable so the advisory check is skipped.
+Future<UpdateCheckController?> _startupUpdateChecker() async {
+  try {
+    final info = await PackageInfo.fromPlatform();
+    return UpdateCheckController(
+      checker: GitHubUpdateChecker(),
+      currentVersion: info.version,
+    );
+  } catch (_) {
+    return null;
   }
 }

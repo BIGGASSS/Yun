@@ -4,6 +4,8 @@ import 'package:flutter/services.dart';
 import '../core/app_controller.dart';
 import '../core/collection_settings_controller.dart';
 import '../core/desktop_controller.dart';
+import '../core/update_check_controller.dart';
+import '../models/app_update.dart';
 import 'downloads_screen.dart';
 import 'library_screen.dart';
 import 'player.dart';
@@ -21,12 +23,14 @@ class YunApp extends StatefulWidget {
     super.key,
     required this.controller,
     this.desktop,
+    this.updateCheck,
     this.initialThemeMode = ThemeMode.system,
     this.onThemeChanged,
     this.collectionSettings,
   });
   final AppController controller;
   final DesktopController? desktop;
+  final UpdateCheckController? updateCheck;
   final ThemeMode initialThemeMode;
   final ValueChanged<ThemeMode>? onThemeChanged;
   final CollectionSettingsController? collectionSettings;
@@ -50,6 +54,7 @@ class _YunAppState extends State<YunApp> {
       app: widget.controller,
       collectionSettings: widget.collectionSettings ?? _localSettings,
       desktop: widget.desktop,
+      updateCheck: widget.updateCheck,
       themeMode: _themeMode,
       onThemeChanged: (mode) {
         setState(() => _themeMode = mode);
@@ -66,9 +71,11 @@ class _AppShell extends StatefulWidget {
     required this.themeMode,
     required this.onThemeChanged,
     required this.collectionSettings,
+    this.updateCheck,
   });
   final AppController app;
   final DesktopController? desktop;
+  final UpdateCheckController? updateCheck;
   final ThemeMode themeMode;
   final ValueChanged<ThemeMode> onThemeChanged;
   final CollectionSettingsController collectionSettings;
@@ -83,6 +90,9 @@ class _AppShellState extends State<_AppShell> {
   final _searchFocus = FocusNode(debugLabel: 'Library search');
   List<UploadJob>? _uploadSnapshot;
   int _activeUploads = 0;
+  // The banner is dismissed per release version, so a later newer release is
+  // always announced.
+  String? _dismissedUpdateVersion;
 
   int _selectActiveUploads() {
     final uploads = widget.app.uploads;
@@ -261,6 +271,55 @@ class _AppShellState extends State<_AppShell> {
                                           ),
                                         ],
                                       ),
+                                    if (widget.updateCheck != null)
+                                      ListenableBuilder(
+                                        listenable: widget.updateCheck!,
+                                        builder: (context, _) {
+                                          final updates = widget.updateCheck!;
+                                          final update =
+                                              updates.availableUpdate;
+                                          if (updates.status !=
+                                                  UpdateCheckStatus
+                                                      .updateAvailable ||
+                                              update == null ||
+                                              update.version ==
+                                                  _dismissedUpdateVersion) {
+                                            return const SizedBox.shrink();
+                                          }
+                                          return _UpdateBanner(
+                                            currentVersion:
+                                                updates.currentVersion,
+                                            update: update,
+                                            onViewRelease: () async {
+                                              if (await updates
+                                                  .openReleasePage()) {
+                                                if (context.mounted) {
+                                                  setState(
+                                                    () =>
+                                                        _dismissedUpdateVersion =
+                                                            update.version,
+                                                  );
+                                                }
+                                                return;
+                                              }
+                                              if (!context.mounted) return;
+                                              ScaffoldMessenger.of(
+                                                context,
+                                              ).showSnackBar(
+                                                SnackBar(
+                                                  content: Text(
+                                                    'Could not open the release page. Visit ${update.releaseUrl}',
+                                                  ),
+                                                ),
+                                              );
+                                            },
+                                            onDismiss: () => setState(
+                                              () => _dismissedUpdateVersion =
+                                                  update.version,
+                                            ),
+                                          );
+                                        },
+                                      ),
                                     Expanded(
                                       child: KeyedSubtree(
                                         // Destroy account-specific transient UI when the account changes.
@@ -288,6 +347,7 @@ class _AppShellState extends State<_AppShell> {
                                           _ => SettingsScreen(
                                             app: app,
                                             desktop: widget.desktop,
+                                            updateCheck: widget.updateCheck,
                                             themeMode: widget.themeMode,
                                             onThemeChanged:
                                                 widget.onThemeChanged,
@@ -429,4 +489,46 @@ class _AppShellState extends State<_AppShell> {
       ),
     );
   }
+}
+
+/// Announces a newer GitHub release and opens its page in the browser.
+class _UpdateBanner extends StatelessWidget {
+  const _UpdateBanner({
+    required this.currentVersion,
+    required this.update,
+    required this.onViewRelease,
+    required this.onDismiss,
+  });
+
+  final String currentVersion;
+  final AppUpdate update;
+  final Future<void> Function() onViewRelease;
+  final VoidCallback onDismiss;
+
+  @override
+  Widget build(BuildContext context) => ConstrainedBox(
+    constraints: BoxConstraints(
+      maxHeight: (MediaQuery.sizeOf(context).height * .25).clamp(0, 180),
+    ),
+    child: SingleChildScrollView(
+      child: MaterialBanner(
+        forceActionsBelow: true,
+        leading: const Icon(Icons.system_update_alt_rounded),
+        content: Semantics(
+          liveRegion: true,
+          child: Text(
+            'Yun ${update.version} is available. '
+            'You are running $currentVersion.',
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: onViewRelease,
+            child: const Text('View release'),
+          ),
+          TextButton(onPressed: onDismiss, child: const Text('Dismiss')),
+        ],
+      ),
+    ),
+  );
 }
