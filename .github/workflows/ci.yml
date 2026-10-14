@@ -63,6 +63,10 @@ jobs:
       - run: python3 scripts/verify-linux-tray-linkage.py
       - run: fvm dart format --output=none --set-exit-if-changed lib test packages/yun_tray_manager_linux/lib
       - run: fvm flutter analyze
+      - name: Secure storage method-channel response regressions (no host wallet)
+        run: |
+          fvm flutter precache --linux
+          FLUTTER_ROOT="$PWD/.fvm/flutter_sdk" bash packages/flutter_secure_storage_linux/linux/test/run_method_response_tests.sh
       - run: fvm flutter test
       - run: RUN_NATIVE_PLAYBACK=1 fvm flutter test test/services/native_playback_test.dart
       - run: python3 scripts/api_smoke.py --binary "$YUN_SERVER_BINARY"

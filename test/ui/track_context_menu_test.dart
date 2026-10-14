@@ -15,6 +15,17 @@ const _tracks = [
 class _TrackApp extends PlayerTestApp {
   _TrackApp(super.engine);
 
+  Account currentAccount = const Account(
+    server: 'https://a.test',
+    userId: 'a',
+    username: 'a',
+  );
+  @override
+  Account get account => currentAccount;
+  final deleted = <String>[];
+  @override
+  Future<void> deleteTrack(String id) async => deleted.add(id);
+
   final played = <Track>[];
   final playQueues = <List<Track>?>[];
   final queued = <Track>[];
@@ -127,6 +138,48 @@ void _trackTest(
 }
 
 void main() {
+  _trackTest(
+    'rebuilt popup cannot dispatch an old selection to a new account',
+    (tester, app, engine) async {
+      await _pumpBody(tester, TrackTile(app: app, track: _tracks.first));
+      await tester.tap(find.byTooltip('Options for Alpha'));
+      await tester.pumpAndSettle();
+      app.currentAccount = const Account(
+        server: 'https://b.test',
+        userId: 'b',
+        username: 'b',
+      );
+      await _pumpBody(tester, TrackTile(app: app, track: _tracks.first));
+      await tester.tap(find.text('Keep offline'));
+      await tester.pumpAndSettle();
+      expect(app.pinCalls, isEmpty);
+    },
+  );
+
+  for (final duringConfirmation in [false, true]) {
+    _trackTest(
+      'stale track menu cannot act on another account (confirmation=$duringConfirmation)',
+      (tester, app, engine) async {
+        await _pumpBody(tester, TrackTile(app: app, track: _tracks.first));
+        await _openMenu(tester, _tracks.first, _OpeningGesture.secondaryClick);
+        if (duringConfirmation) {
+          await tester.tap(find.text('Delete from library'));
+          await tester.pumpAndSettle();
+        }
+        app.currentAccount = const Account(
+          server: 'https://b.test',
+          userId: 'b',
+          username: 'b',
+        );
+        await tester.tap(
+          find.text(duringConfirmation ? 'Delete' : 'Keep offline'),
+        );
+        await tester.pumpAndSettle();
+        expect(app.deleted, isEmpty);
+        expect(app.pinCalls, isEmpty);
+      },
+    );
+  }
   for (final opening in _OpeningGesture.values) {
     _trackTest(
       '${opening.name} opens anchored track options without activating the row',

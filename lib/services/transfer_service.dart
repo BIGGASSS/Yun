@@ -166,6 +166,7 @@ class TransferService {
                      options: Options(
                        responseType: ResponseType.stream,
                        headers: input.headers,
+                       followRedirects: false,
                      ),
                    ),
                  )),
@@ -179,6 +180,7 @@ class TransferService {
   final Directory importsDirectory;
   static const defaultMaxUploadBytes = 1024 * 1024 * 1024;
   final Set<Future<UploadJob>> _importsRunning = {};
+  final Set<String> _importIds = {};
 
   File _importFile(String id) {
     if (!RegExp(r'^[a-zA-Z0-9_-]+$').hasMatch(id)) {
@@ -207,9 +209,19 @@ class TransferService {
     int maxBytes = defaultMaxUploadBytes,
   }) {
     if (_closed) return Future.error(TransferCancelled());
+    // Reserve before any filesystem await: two imports must never open the
+    // same partial, or let one failure's rollback delete the other's commit.
+    if (!_importIds.add(id)) {
+      return Future.error(
+        StateError('Upload source is already being imported'),
+      );
+    }
     final operation = _importUpload(id, path, maxBytes);
     _importsRunning.add(operation);
-    return operation.whenComplete(() => _importsRunning.remove(operation));
+    return operation.whenComplete(() {
+      _importsRunning.remove(operation);
+      _importIds.remove(id);
+    });
   }
 
   Future<UploadJob> _importUpload(String id, String path, int maxBytes) async {
@@ -1134,7 +1146,7 @@ class TransferService {
         if (job.remoteId != null) {
           try {
             final remote = await api.request(
-              '/uploads/${job.remoteId}',
+              '/uploads/${encodeResourceId(job.remoteId!)}',
               cancelToken: token,
             );
             offset = ((remote.data as Map)['offset'] as num).toInt();
@@ -1189,7 +1201,7 @@ class TransferService {
               );
               if (bytes.isEmpty) throw StateError('Upload source truncated');
               final response = await api.request(
-                '/uploads/${job.remoteId}',
+                '/uploads/${encodeResourceId(job.remoteId!)}',
                 method: 'PATCH',
                 data: bytes,
                 headers: {
@@ -1219,7 +1231,7 @@ class TransferService {
         job = job.copyWith(status: 'completing');
         await _save(job);
         final response = await api.request(
-          '/uploads/${job.remoteId}/complete',
+          '/uploads/${encodeResourceId(job.remoteId!)}/complete',
           method: 'POST',
           cancelToken: token,
         );
@@ -1295,7 +1307,10 @@ class TransferService {
     for (final record in await database.list('upload_cancel')) {
       if (_closed) return;
       try {
-        await api.request('/uploads/${record['remote_id']}', method: 'DELETE');
+        await api.request(
+          '/uploads/${encodeResourceId(record['remote_id'] as String)}',
+          method: 'DELETE',
+        );
         await database.remove('upload_cancel', record['id'] as String);
       } on DioException catch (e) {
         if (e.response?.statusCode == 404) {
@@ -1668,7 +1683,8 @@ class TransferService {
             _checkDownloadWanted();
             await _downloadReceiver.receive(
               DownloadReceiveRequest(
-                url: '$server/api/v1/tracks/${track.id}/audio',
+                url:
+                    '$server/api/v1/tracks/${encodeResourceId(track.id)}/audio',
                 path: partial.path,
                 sha256: track.sha256,
                 offset: resume,

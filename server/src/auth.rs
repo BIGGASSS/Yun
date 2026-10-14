@@ -227,11 +227,11 @@ pub(crate) async fn login(
             id: user.clone(),
             username,
         },
-        expires_at: now() + state.0.config.access_ttl_ms,
+        expires_at: now().saturating_add(state.0.config.access_ttl_ms),
     };
     sqlx::query("INSERT INTO sessions(id,user_id,device_id,access_hash,refresh_hash,access_expires,refresh_expires) VALUES(?,?,?,?,?,?,?)")
         .bind(id()).bind(user).bind(input.device_id).bind(hash(&result.access_token)).bind(hash(&result.refresh_token))
-        .bind(result.expires_at).bind(now()+state.0.config.refresh_ttl_ms).execute(&mut *tx).await?;
+        .bind(result.expires_at).bind(now().saturating_add(state.0.config.refresh_ttl_ms)).execute(&mut *tx).await?;
     tx.commit().await?;
     Ok(Json(result))
 }
@@ -254,10 +254,10 @@ pub(crate) async fn refresh(
             id: row.get("user_id"),
             username: row.get("username"),
         },
-        expires_at: now() + state.0.config.access_ttl_ms,
+        expires_at: now().saturating_add(state.0.config.access_ttl_ms),
     };
     sqlx::query("UPDATE sessions SET access_hash=?,refresh_hash=?,access_expires=?,refresh_expires=? WHERE id=?")
-        .bind(hash(&result.access_token)).bind(hash(&result.refresh_token)).bind(result.expires_at).bind(now()+state.0.config.refresh_ttl_ms)
+        .bind(hash(&result.access_token)).bind(hash(&result.refresh_token)).bind(result.expires_at).bind(now().saturating_add(state.0.config.refresh_ttl_ms))
         .bind(row.get::<String,_>("id")).execute(&mut *tx).await?;
     tx.commit().await?;
     Ok(Json(result))

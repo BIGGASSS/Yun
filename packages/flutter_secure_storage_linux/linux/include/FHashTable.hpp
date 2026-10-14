@@ -4,7 +4,10 @@ class FHashTable {
   GHashTable *m_hashTable;
   public:
 
-  FHashTable() { m_hashTable = g_hash_table_new_full(g_str_hash, nullptr, g_free, g_free); }
+  FHashTable() { m_hashTable = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free); }
+
+  FHashTable(const FHashTable &) = delete;
+  FHashTable &operator=(const FHashTable &) = delete;
 
   GHashTable* getGHashTable(){
     return m_hashTable;

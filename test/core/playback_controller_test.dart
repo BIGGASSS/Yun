@@ -96,6 +96,16 @@ void main() {
     },
   );
 
+  test('playQueue captures input before queued commands run', () async {
+    final input = tracks.toList();
+    final pending = player.playQueue(input, index: 1);
+    input.clear();
+    await pending;
+    expect(player.queue, tracks);
+    expect(player.currentTrack, tracks[1]);
+    expect(engine.opened, '/cache/b');
+  });
+
   group('volume', () {
     test(
       'defaults do not override native volume even across track changes',
@@ -757,6 +767,108 @@ void main() {
       expect(player.index, second);
     },
   );
+
+  group('bounded shuffle Previous history', () {
+    const minimumHistory = 1000;
+
+    Future<void> expectRetainedTimeline(List<int> timeline, int limit) async {
+      final retained = timeline.sublist(max(0, timeline.length - 1 - limit));
+      for (final expected in retained.reversed.skip(1)) {
+        await player.previous();
+        expect(player.index, expected);
+      }
+      // Once retention is exhausted, Previous restarts rather than inventing
+      // an older shuffle order, even with repeat-all enabled.
+      for (var i = 0; i < 3; i++) {
+        await player.previous();
+        expect(player.index, retained.first);
+      }
+      for (final expected in retained.skip(1)) {
+        await player.next();
+        expect(player.index, expected);
+      }
+      expect(
+        player.effectiveQueue.map((entry) => entry.sourceIndex).toSet(),
+        Set<int>.from(List.generate(player.queue.length, (i) => i)),
+      );
+      expect(player.effectiveQueue, hasLength(player.queue.length));
+    }
+
+    for (final completed in [false, true]) {
+      test(
+        'repeat-all bounds history after long playback, completed=$completed',
+        () async {
+          player.setShuffle(true);
+          player.setRepeat(RepeatMode.all);
+          await player.playQueue(tracks, index: 0);
+          final timeline = [player.index];
+          for (var i = 0; i < minimumHistory * 3 + 7; i++) {
+            if (completed) {
+              engine.emit(const EngineState(completed: true));
+              // Drain without cancelling the completion command (Pause would).
+              await player.flushSettings();
+            } else {
+              await player.next();
+            }
+            expect(player.index, isNot(timeline.last));
+            timeline.add(player.index);
+            expect(player.effectiveQueue, hasLength(tracks.length));
+          }
+          await expectRetainedTimeline(timeline, minimumHistory);
+          await player.stop();
+          await player.playQueue(tracks, index: 0);
+          await player.previous();
+          expect(player.index, 0);
+        },
+      );
+    }
+
+    test(
+      'selecting an upcoming entry cannot bypass the history bound',
+      () async {
+        player.setShuffle(true);
+        player.setRepeat(RepeatMode.all);
+        await player.playQueue(tracks, index: 0);
+        final timeline = [player.index];
+        for (var i = 0; i < minimumHistory + 1; i++) {
+          await player.next();
+          timeline.add(player.index);
+        }
+        final upcoming = player.effectiveQueue
+            .skip(player.effectiveIndex + 1)
+            .toList();
+        expect(upcoming, isNotEmpty);
+        timeline.addAll(upcoming.map((entry) => entry.sourceIndex!));
+        await player.selectQueueEntry(upcoming.last);
+        await expectRetainedTimeline(timeline, minimumHistory);
+      },
+    );
+
+    test(
+      'large collections retain a complete traversal and then evict oldest',
+      () async {
+        final large = List.generate(
+          minimumHistory + 7,
+          (i) => Track(id: 'large-$i', title: 'Track $i'),
+        );
+        player.setShuffle(true);
+        player.setRepeat(RepeatMode.all);
+        await player.playQueue(large, index: 0);
+        final timeline = player.effectiveQueue
+            .map((entry) => entry.sourceIndex!)
+            .toList();
+        // Selecting past more than 1000 tracks also obeys the collection-sized
+        // allowance, rather than accidentally imposing a smaller fixed cap.
+        await player.selectQueueEntry(player.effectiveQueue.last);
+        await expectRetainedTimeline(timeline, large.length);
+        for (var i = 0; i < 3; i++) {
+          await player.next();
+          timeline.add(player.index);
+        }
+        await expectRetainedTimeline(timeline, large.length);
+      },
+    );
+  });
 
   test('controller can retry a failed engine initialization', () async {
     await player.shutdown();

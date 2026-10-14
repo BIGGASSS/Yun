@@ -165,8 +165,21 @@ class PlaybackController extends ChangeNotifier {
   bool _acceptSourceState = false;
   int _generation = 0;
   Future<void> _operations = Future.value();
-  final List<int> _shuffleHistory = [];
+  // Previous retains the newest max(1000, collection size) source transitions.
+  // This preserves a full collection traversal without letting repeat-all grow
+  // with session length. At the oldest retained entry Previous restarts it;
+  // Next still replays every rewound entry before consuming the shuffle bag.
+  // Manual occurrences have their own queue and do not consume this allowance.
+  final _shuffleHistory = ListQueue<int>();
+  int get _shuffleHistoryLimit => max(1000, _queue.length);
   final List<int> _shuffleRemaining = [];
+
+  void _rememberShuffleIndex(int sourceIndex) {
+    if (_shuffleHistory.length == _shuffleHistoryLimit) {
+      _shuffleHistory.removeFirst();
+    }
+    _shuffleHistory.addLast(sourceIndex);
+  }
 
   /// Bind recording to a normalized server/user scope, not a device or track.
   /// Without [accountKey], only the identical callback can reclaim its buffer.
@@ -527,30 +540,34 @@ class PlaybackController extends ChangeNotifier {
 
   /// Start a collection using shuffle unless a specific [index] is requested.
   /// Keep queue order and playback preferences unchanged.
-  Future<void> playQueue(List<Track> tracks, {int? index}) =>
-      _enqueuePlayback((attempt) async {
-        if (tracks.isEmpty) {
-          await _stop();
-          return;
-        }
-        if (index != null && (index < 0 || index >= tracks.length)) {
-          throw RangeError.index(index, tracks);
-        }
-        if (!await _initialize(attempt)) return;
-        if (!await _haltForTransition()) return;
-        if (!listEquals(_queue, tracks)) {
-          _queue = List.unmodifiable(tracks);
-          _sourceEntries = List.unmodifiable([
-            for (var i = 0; i < _queue.length; i++)
-              PlaybackQueueEntry._(_queue[i], sourceIndex: i),
-          ]);
-        }
-        _clearManualQueue();
-        this.index = index ?? (shuffle ? _random.nextInt(tracks.length) : 0);
-        _resetShuffle();
-        _refreshEffectiveQueue();
-        await _openCurrent();
-      }, replacesPendingInitialization: true);
+  Future<void> playQueue(List<Track> tracks, {int? index}) {
+    // Capture the user's selection before waiting behind audio/native work.
+    // The caller may edit or clear its list while this command is pending.
+    tracks = List.unmodifiable(tracks);
+    return _enqueuePlayback((attempt) async {
+      if (tracks.isEmpty) {
+        await _stop();
+        return;
+      }
+      if (index != null && (index < 0 || index >= tracks.length)) {
+        throw RangeError.index(index, tracks);
+      }
+      if (!await _initialize(attempt)) return;
+      if (!await _haltForTransition()) return;
+      if (!listEquals(_queue, tracks)) {
+        _queue = tracks;
+        _sourceEntries = List.unmodifiable([
+          for (var i = 0; i < _queue.length; i++)
+            PlaybackQueueEntry._(_queue[i], sourceIndex: i),
+        ]);
+      }
+      _clearManualQueue();
+      this.index = index ?? (shuffle ? _random.nextInt(tracks.length) : 0);
+      _resetShuffle();
+      _refreshEffectiveQueue();
+      await _openCurrent();
+    }, replacesPendingInitialization: true);
+  }
 
   /// Append an occurrence to the FIFO next-up queue without changing the
   /// collection cursor or consuming/rebuilding its shuffled continuation.
@@ -609,10 +626,12 @@ class PlaybackController extends ChangeNotifier {
             ? _shuffleHistory.length
             : upcoming >= 0
             ? order.length - 1 - upcoming
-            : _shuffleHistory.lastIndexOf(sourceIndex);
+            : order.lastIndexOf(sourceIndex);
         _shuffleHistory
           ..clear()
-          ..addAll(order.take(target));
+          ..addAll(
+            order.getRange(max(0, target - _shuffleHistoryLimit), target),
+          );
         _shuffleRemaining
           ..clear()
           ..addAll(order.skip(target + 1).toList().reversed);
@@ -636,7 +655,7 @@ class PlaybackController extends ChangeNotifier {
     final after = <PlaybackQueueEntry>[];
     if (index >= 0 && index < _queue.length) {
       if (shuffle) {
-        // Navigation retains the full repeat timeline, but source identities
+        // Navigation retains a bounded repeat timeline, but source identities
         // must be unique in the displayed queue (including after Previous).
         final seen = {index};
         after.addAll(
@@ -645,7 +664,9 @@ class PlaybackController extends ChangeNotifier {
               .map((i) => _sourceEntries[i]),
         );
         before.addAll(
-          _shuffleHistory.reversed
+          _shuffleHistory
+              .toList()
+              .reversed
               .where(seen.add)
               .toList()
               .reversed
@@ -1069,7 +1090,7 @@ class PlaybackController extends ChangeNotifier {
       target = _shuffleRemaining.isEmpty
           ? index
           : _shuffleRemaining.removeLast();
-      if (target != index) _shuffleHistory.add(index);
+      if (target != index) _rememberShuffleIndex(index);
     } else {
       target = index + 1;
       if (target >= _queue.length) {
