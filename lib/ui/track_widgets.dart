@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
@@ -320,6 +321,7 @@ class TrackMenu extends StatelessWidget {
   final Track track;
 
   Future<void> showAt(BuildContext context, Offset globalPosition) async {
+    final account = app.account;
     final overlay =
         Navigator.of(context).overlay!.context.findRenderObject()! as RenderBox;
     final position = overlay.globalToLocal(globalPosition);
@@ -331,13 +333,18 @@ class TrackMenu extends StatelessWidget {
       ),
       items: _items(),
     );
-    if (value != null && context.mounted) _onSelected(context, value);
+    if (value != null && context.mounted) {
+      _onSelected(context, value, account);
+    }
   }
 
   void _onSelected(
     BuildContext context,
     String value,
+    Account? account,
   ) => runUiAction(context, () async {
+    bool sameAccount() => context.mounted && identical(account, app.account);
+    if (!sameAccount()) return;
     switch (value) {
       case 'next':
         await app.queueNext(track);
@@ -352,11 +359,12 @@ class TrackMenu extends StatelessWidget {
         );
       case 'delete':
         if (await confirmAction(
-          context,
-          title: 'Delete track?',
-          message:
-              '“${track.title}” will be removed from your library and playlists on all devices.',
-        )) {
+              context,
+              title: 'Delete track?',
+              message:
+                  '“${track.title}” will be removed from your library and playlists on all devices.',
+            ) &&
+            sameAccount()) {
           await app.deleteTrack(track.id);
         }
     }
@@ -377,11 +385,16 @@ class TrackMenu extends StatelessWidget {
   ];
 
   @override
-  Widget build(BuildContext context) => PopupMenuButton<String>(
-    tooltip: 'Options for ${track.title}',
-    onSelected: (value) => _onSelected(context, value),
-    itemBuilder: (_) => _items(),
-  );
+  Widget build(BuildContext context) {
+    final account = app.account;
+    return PopupMenuButton<String>(
+      // Retire a pending popup callback if this row is rebuilt for a new account.
+      key: ObjectKey(account),
+      tooltip: 'Options for ${track.title}',
+      onSelected: (value) => _onSelected(context, value, account),
+      itemBuilder: (_) => _items(),
+    );
+  }
 }
 
 Future<void> addTrackToPlaylist(
@@ -486,6 +499,7 @@ class MetadataDialog extends StatefulWidget {
 class _MetadataDialogState extends State<MetadataDialog> {
   final _form = GlobalKey<FormState>();
   late Track _track;
+  late final Account? _account;
   late final Map<String, TextEditingController> _fields;
   bool _saving = false;
   String? _error;
@@ -494,6 +508,7 @@ class _MetadataDialogState extends State<MetadataDialog> {
   void initState() {
     super.initState();
     _track = widget.track;
+    _account = widget.app.account;
     _fields = {
       'title': TextEditingController(text: _track.title),
       'artist': TextEditingController(text: _track.artist),
@@ -516,26 +531,52 @@ class _MetadataDialogState extends State<MetadataDialog> {
     super.dispose();
   }
 
-  Future<void> _artwork() async {
-    final result = await FilePicker.platform.pickFiles(
-      type: FileType.custom,
-      allowedExtensions: ['jpg', 'jpeg', 'png'],
-      withData: true,
-    );
-    if (result == null || !mounted) return;
-    final file = result.files.single;
-    if (file.bytes == null || file.size > 10 * 1024 * 1024) {
-      setState(() => _error = 'Choose a JPEG or PNG no larger than 10 MB.');
-      return;
+  void _requireSameAccount() {
+    if (_account == null || !identical(_account, widget.app.account)) {
+      throw StateError('Account changed; open the track again');
     }
+  }
+
+  Future<void> _artwork() async {
+    if (_saving) return;
     setState(() {
       _saving = true;
       _error = null;
     });
     try {
+      _requireSameAccount();
+      final result = await FilePicker.platform.pickFiles(
+        type: FileType.custom,
+        allowedExtensions: ['jpg', 'jpeg', 'png'],
+        withData: false,
+        withReadStream: true,
+      );
+      if (result == null || !mounted) return;
+      _requireSameAccount();
+      final file = result.files.single;
+      const limit = 10 * 1024 * 1024;
+      const sizeError = 'Choose a JPEG or PNG no larger than 10 MB.';
+      if (file.size > limit) throw const FormatException(sizeError);
+      final stream =
+          file.readStream ??
+          (file.path == null ? null : File(file.path!).openRead());
+      if (stream == null) throw StateError('Artwork could not be read');
+      // Do not ask the picker to materialize an arbitrarily large file before
+      // enforcing the upload limit. Also bound actual bytes if its size is stale.
+      final bytes = BytesBuilder(copy: false);
+      await for (final chunk in stream) {
+        if (!mounted) return;
+        _requireSameAccount();
+        if (bytes.length + chunk.length > limit) {
+          throw const FormatException(sizeError);
+        }
+        bytes.add(chunk);
+      }
+      if (!mounted) return;
+      _requireSameAccount();
       final updated = await widget.app.setArtwork(
         _track,
-        file.bytes!,
+        bytes.takeBytes(),
         mimeType: file.extension?.toLowerCase() == 'png'
             ? 'image/png'
             : 'image/jpeg',
@@ -555,6 +596,7 @@ class _MetadataDialogState extends State<MetadataDialog> {
       _error = null;
     });
     try {
+      _requireSameAccount();
       await widget.app.updateTrack(_track, {
         for (final field in _fields.entries)
           field.key: field.key.endsWith('_number')

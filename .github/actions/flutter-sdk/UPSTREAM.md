@@ -39,13 +39,20 @@ Hashes below are of the **original bytes**, before local patches:
    `gh api repos/actions/cache/commits/v5 --jq .sha`.
    Subsequent reviewed Dependabot updates may advance these pins; `action.yml`
    is authoritative for the current cache revisions.
-3. Add this provenance document. No other upstream content changes.
+3. In `setup.sh`, add `--fail` to both curl downloads and verify the selected
+   manifest's SHA-256 before extraction using the new Yun-owned
+   `verify-download.sh`. Missing/malformed digests and mismatches fail closed.
+   Linux/Git Bash use sha256sum; macOS can use shasum. This checks download
+   integrity, not authenticity independent of the HTTPS manifest. Existing SDK
+   caches and main/master git installs are not rehashed.
+4. Add this provenance document. No other upstream content changes.
 
-`setup.sh` (including its executable mode) and `LICENSE` are unchanged. The caller
+`setup.sh` retains its executable mode; `LICENSE` is unchanged. The caller
 `../flutter/action.yml` now uses `./.github/actions/flutter-sdk`; its exact FVM
 bootstrap version, inputs, and commands remain unchanged.
 
-Runtime inspection: `action.yml` executes only the adjacent `setup.sh`. The script
+Runtime inspection: `action.yml` executes the adjacent `setup.sh`, which calls
+`verify-download.sh` before extracting release archives. The setup script
 uses runner tools and downloads Flutter release manifests/SDK archives (or clones
 Flutter for main/master); it sources no other upstream runtime files. Its only
 repository-relative data dependency is `test/releases_<os>.json` behind the `-t`
@@ -56,7 +63,9 @@ Caller-supplied version files are inputs, not missing vendored files.
 Inherited lint note: ShellCheck 0.10.0 reports SC2086 on the two unquoted
 `$GITHUB_ACTION_PATH/setup.sh` invocations in upstream `action.yaml` (the
 `Set action inputs` and `Run setup script` steps). They are preserved, not locally
-fixed or suppressed. The unchanged `setup.sh` passes ShellCheck and `bash -n`.
+fixed or suppressed. Validate both shell scripts with ShellCheck and `bash -n`.
+`python3 scripts/test-release-tooling.py` runs an offline SDK download fixture:
+valid digest succeeds; mismatched/missing digests and HTTP errors do not extract.
 
 ## Updates and verification
 
@@ -82,7 +91,8 @@ upstream vendor updates require manual review:
    rename `action.yaml` to `action.yml`. Do not copy unrelated upstream workflows.
 3. Resolve/review cache commits with `gh api repos/actions/cache/commits/v5 --jq .sha`
    (or the upstream major then in use). Apply only full-SHA nested action pins
-   with readable version comments. Review every nested `uses:` reference.
+   with readable version comments. Retain download digest verification and HTTP
+   failure handling unless upstream provides equivalents. Review every nested `uses:` reference.
 4. Update this document's commit, source links, original hashes, and patch list.
    Update the provenance regression test if the upstream file set or original
    cache reference changes. Do not change original hashes for cache-only updates.

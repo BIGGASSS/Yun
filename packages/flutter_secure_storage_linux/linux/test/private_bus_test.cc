@@ -584,10 +584,25 @@ static void scenario(gconstpointer data) {
   }
 }
 
+static void attribute_string_identity() {
+  FHashTable attributes;
+  std::string first = "account";
+  std::string second = first;
+  attributes.insert(first.c_str(), "old");
+  g_assert_true(attributes.contains(second.c_str()));
+  g_assert_cmpstr(attributes.get(second.c_str()), ==, "old");
+  attributes.insert(second.c_str(), "replacement");
+  g_assert_cmpuint(g_hash_table_size(attributes.getGHashTable()), ==, 1);
+  g_assert_cmpstr(attributes.get(first.c_str()), ==, "replacement");
+  g_assert_true(attributes.remove(second.c_str()));
+  g_assert_cmpuint(g_hash_table_size(attributes.getGHashTable()), ==, 0);
+}
+
 int main(int argc, char **argv) {
   executable = argv[0];
   if (argc == 4 && g_str_equal(argv[1], "--mock")) return serve(argv[2], argv[3]);
   g_test_init(&argc, &argv, nullptr);
+  g_test_add_func("/attributes/string-identity", attribute_string_identity);
   const char *cases[] = {"registered-plugin-kde", "registered-plugin-standard",
       "registered-existing-json", "registered-other-account", "registered-other-schema",
       "registered-corrupt-json", "kde-only", "existing-json", "both-prefer-standard", "standard-only",

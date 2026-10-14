@@ -51,6 +51,15 @@ class SessionCredentials {
       );
 }
 
+String encodeResourceId(String id) {
+  // URI parsers normalize dot segments even when ordinary delimiters are
+  // escaped. Empty/dot IDs are not resources and must never select a parent.
+  if (id.isEmpty || id == '.' || id == '..') {
+    throw ArgumentError.value(id, 'id', 'Invalid resource identifier');
+  }
+  return Uri.encodeComponent(id);
+}
+
 String normalizeServer(String value) {
   final uri = Uri.parse(value.trim());
   if (!uri.hasAuthority ||
@@ -141,6 +150,7 @@ class ApiClient {
     final response = await dio.post<dynamic>(
       '$server/api/v1/auth/login',
       data: {'username': username, 'password': password, 'device_id': deviceId},
+      options: Options(followRedirects: false),
     );
     final j = Map<String, dynamic>.from(response.data as Map);
     final user = Map<String, dynamic>.from(j['user'] as Map);
@@ -176,6 +186,7 @@ class ApiClient {
     final response = await dio.post<dynamic>(
       '${old.account.server}/api/v1/auth/refresh',
       data: {'refresh_token': old.refreshToken},
+      options: Options(followRedirects: false),
     );
     if (generation != _generation || !identical(session, old)) {
       throw StateError('Session changed');
@@ -212,6 +223,9 @@ class ApiClient {
         data: data,
         queryParameters: query,
         options: Options(
+          // Use the final configured origin, even with an injected Dio. A
+          // redirect must never forward account credentials or downgrade TLS.
+          followRedirects: false,
           method: method,
           headers: {...auth, ...?headers},
           responseType: responseType,
@@ -291,6 +305,7 @@ class ApiClient {
           '${current.account.server}/api/v1/auth/logout',
           data: {'refresh_token': current.refreshToken},
           options: Options(
+            followRedirects: false,
             headers: {'Authorization': 'Bearer ${current.accessToken}'},
           ),
         );

@@ -30,6 +30,8 @@ class LinuxTrayAvailability {
   bool _refreshing = false;
   int _revision = 0;
   Future<void>? _disposal;
+  Future<bool>? _checking;
+  Future<bool>? _pendingProbe;
 
   Future<void> initialize({
     required void Function(bool) onChanged,
@@ -114,13 +116,22 @@ class LinuxTrayAvailability {
     }());
   }
 
-  /// Always probes the bus afresh, with a deadline for the entire probe.
-  Future<bool> check() async {
-    if (_disposed) return false;
+  /// Probes afresh, sharing concurrent checks and failing closed while an
+  /// expired bus request is still outstanding. Future.timeout does not cancel
+  /// dbus requests; starting another on each poll would retain unbounded calls.
+  Future<bool> check() {
+    if (_disposed) return Future.value(false);
+    return _checking ??= _check().whenComplete(() => _checking = null);
+  }
+
+  Future<bool> _check() async {
+    if (_pendingProbe != null) return false;
     final revision = _revision;
     var available = false;
     try {
-      available = await _probe().timeout(timeout);
+      final probe = _probe().whenComplete(() => _pendingProbe = null);
+      _pendingProbe = probe;
+      available = await probe.timeout(timeout);
     } catch (error) {
       // Missing watchers are normal; getNameOwner returns null in that case.
       // Malformed properties, a disconnected bus and timeouts are diagnostics.

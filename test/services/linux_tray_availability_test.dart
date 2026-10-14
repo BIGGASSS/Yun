@@ -165,6 +165,32 @@ void main() {
     }
   });
 
+  test(
+    'expired probes do not accumulate requests or publish late success',
+    () async {
+      await ownWatcher();
+      await start(poll: const Duration(milliseconds: 30));
+      final reply = Completer<DBusValue>();
+      watcher.readValue = () => reply.future;
+      final reads = watcher.reads;
+      try {
+        final checks = List.generate(20, (_) => availability.check());
+        expect(await Future.wait(checks), everyElement(isFalse));
+        await Future<void>.delayed(const Duration(milliseconds: 350));
+        expect(await availability.check(), isFalse);
+        expect(watcher.reads, reads + 1);
+        reply.complete(const DBusBoolean(true));
+        watcher.readValue = null;
+        await Future<void>.delayed(const Duration(milliseconds: 80));
+        expect(changes, [false]);
+        watcher.value = const DBusBoolean(true);
+        await _eventually(() => changes.last);
+      } finally {
+        if (!reply.isCompleted) reply.complete(const DBusBoolean(false));
+      }
+    },
+  );
+
   test('polling detects host changes without any watcher signal', () async {
     await ownWatcher();
     await start(poll: const Duration(milliseconds: 30));

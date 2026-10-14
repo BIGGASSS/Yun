@@ -89,6 +89,7 @@ class LinuxStatusNotifierTray implements LinuxDesktopTray {
   Future<void>? _initialization;
   Future<void>? _disposal;
   Future<bool>? _checking;
+  Future<bool>? _pendingProbe;
   String? _registeredOwner;
   int _revision = 0;
   bool _ready = false;
@@ -195,10 +196,15 @@ class LinuxStatusNotifierTray implements LinuxDesktopTray {
   }
 
   Future<bool> _check() async {
+    // Dart timeouts do not cancel dbus method calls. Retain a single expired
+    // probe until it settles, rather than leaking another request every poll.
+    if (_pendingProbe != null) return false;
     final revision = _revision;
     var available = false;
     try {
-      available = await _probe(revision).timeout(timeout);
+      final probe = _probe(revision).whenComplete(() => _pendingProbe = null);
+      _pendingProbe = probe;
+      available = await probe.timeout(timeout);
     } catch (error) {
       if (!_disposed) {
         // A timed-out registration must not later mark itself successful.

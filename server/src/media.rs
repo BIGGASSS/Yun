@@ -474,10 +474,13 @@ pub(crate) async fn audio(
     drop(guard);
     let size = row.get::<i64, _>("size_bytes") as u64;
     let etag = format!("\"{}\"", row.get::<String, _>("sha256"));
+    // Range only applies to GET (RFC 9110 section 14.2). In particular, HEAD
+    // must describe the full representation, not a partial body or a 416 error.
     let requested = headers.get("range").filter(|_| {
-        headers
-            .get("if-range")
-            .is_none_or(|v| v.as_bytes() == etag.as_bytes())
+        method == Method::GET
+            && headers
+                .get("if-range")
+                .is_none_or(|v| v.as_bytes() == etag.as_bytes())
     });
     let (status, start, length) = if let Some(value) = requested {
         match value.to_str().ok().and_then(|v| range(v, size)) {

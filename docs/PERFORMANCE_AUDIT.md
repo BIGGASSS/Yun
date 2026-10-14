@@ -5,6 +5,42 @@ The original audit was read-only. The remediation below was subsequently
 implemented; the remaining sections preserve the original findings and baseline
 line references. This is not a production capacity or four-platform certification.
 
+## Shuffle Previous-history retention
+
+Repeat-all shuffle previously retained every source transition for the entire
+session, so both memory and effective-queue reconstruction grew with listening
+time. The controller now retains only the newest **max(1,000, collection size)**
+source transitions. The collection-sized allowance preserves a complete traversal
+for large collections; duplicate tracks remain distinct source occurrences.
+Ordinary shuffle ordering, repeat modes and manual queued-next occurrences are
+unchanged. Queue selection applies the same limit, including skipped entries.
+
+Previous retraces the retained order exactly. At its oldest retained entry it
+restarts that entry instead of reconstructing discarded history. The existing
+restart-after-three-seconds behavior still applies. Next replays rewound entries
+in their original order before continuing the shuffle bag. Replacing the queue,
+changing shuffle mode or stopping clears the navigation history as before.
+Manual queued-next history is separate and does not consume this allowance.
+
+History uses a deque for amortized O(1) append/oldest eviction. Previous transfers
+entries to the forward stack rather than copying an unbounded session log. For
+N collection entries and H = max(1,000, N), the combined history/forward timeline
+is at most H + N - 1 indices (zero for an empty collection), including after
+repeated Previous/Next or displayed-queue selection. Effective-queue rebuilding
+and selection therefore remain O(H + N + M), where M is the explicitly queued
+manual occurrences, independent of repeat-all session duration. This is not an
+absolute cap on user-supplied collection/manual queue sizes or a measured RSS or
+frame-time guarantee.
+
+Regression tests cover thousands of explicit and completion-driven transitions,
+retention exhaustion, exact reverse/forward replay, selection at the cap,
+collection-sized retention above 1,000 entries and stop/reset. Existing queue
+identity, duplicate/manual occurrence and repeat-boundary tests remain applicable.
+Targeted local validation: **124 playback core tests and 19 queue/player-bar UI
+tests passed**; analysis of the changed controller/tests, formatting and diff
+whitespace checks passed. These are fake-engine regression tests, not native
+playback or physical-device performance measurements.
+
 ## Download write buffering
 
 Audio reception now coalesces network fragments into a fixed 256 KiB write

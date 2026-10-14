@@ -48,6 +48,13 @@ SHA-256 of the baseline manifest:
   commands, daemon installs, or host configuration changes.
 - Preserve `KeyringLocked`, `SecretNotFound`, and generic libsecret errors;
   propagate unlock errors instead of conflating access denial with a lock.
+- `linux/include/FHashTable.hpp`: compare owned attribute keys by string value,
+  not pointer identity; repeated registration replaces the account instead of
+  accumulating duplicate attributes. Disable copying the owning table.
+- `linux/flutter_secure_storage_linux_plugin.cc`: always respond to non-map
+  arguments; reject wrong key/value types without GLib criticals. Own partial
+  `readAll` maps with an auto pointer so conversion exceptions do not leak.
+  Preserve stored empty strings in `read` instead of treating them as missing keys.
 - `pubspec.yaml`: remove the published monorepo-only `resolution: workspace`
   field so the package can be consumed as a standalone path dependency.
 
@@ -125,7 +132,7 @@ memory; the mock accepts Secret Service's plain wire-session protocol for
 testing only. The production client continues to use libsecret's session
 negotiation and a persistent default collection.
 
-27 cases cover:
+28 cases cover (including attribute string identity):
 
 - exact plugin registration order on KDE and standard services, checking the
   stored schema, account, and display label after CRUD/delete-all;
@@ -154,8 +161,22 @@ releases, not claims of running Ubuntu itself; CI's Ubuntu 22.04/24.04 jobs test
 the distribution packages. All 27 also passed with a test-only 0.20.5 build
 whose constructor was changed to preserve explicit `g-name` while leaving the
 wrapper's ignored argument unchanged, exercising the probe's other branch.
-The native suite reproduces the plugin's exact storage registration sequence,
+The private-bus suite reproduces the plugin's exact storage registration sequence,
 not Flutter engine/method-channel dispatch.
+
+A separate engine-free suite uses real Flutter value/response types and the
+plugin's response builder. It checks non-map and mistyped arguments, unknown
+methods, successful/throwing JSON map conversion, and empty-string versus missing
+key reads without any wallet access:
+
+```sh
+FLUTTER_ROOT="$PWD/.fvm/flutter_sdk" bash packages/flutter_secure_storage_linux/linux/test/run_method_response_tests.sh
+```
+
+This requires Flutter Linux x64 artifacts (`flutter precache --linux`), GTK and
+libsecret development libraries. CI runs it in the Flutter job. The method
+handler sends the constructed response unconditionally; this suite does not
+start a Flutter engine or send messages through its binary messenger.
 
 The timeout case returns the D-Bus timeout error, rather than waiting for a
 real 25-second timeout. The suite does not implement an interactive unlock

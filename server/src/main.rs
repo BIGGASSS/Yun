@@ -56,7 +56,10 @@ enum Command {
 fn password(stdin: bool) -> anyhow::Result<String> {
     let password = if stdin {
         let mut value = String::new();
-        std::io::stdin().take(1026).read_to_string(&mut value)?;
+        // Read one byte beyond the maximum password plus CRLF. Without the
+        // sentinel, an oversized input with a valid prefix is silently accepted.
+        std::io::stdin().take(1027).read_to_string(&mut value)?;
+        anyhow::ensure!(value.len() <= 1026, "password input is too long");
         value.trim_end_matches(['\r', '\n']).to_owned()
     } else {
         rpassword::prompt_password("Password (at least 12 bytes): ")?

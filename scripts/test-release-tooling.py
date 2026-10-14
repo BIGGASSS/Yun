@@ -2,6 +2,7 @@
 """Host-only tooling tests; no build artifacts, Docker daemon, or real installation."""
 import hashlib
 import io
+import json
 import os
 from pathlib import Path
 import shutil
@@ -40,6 +41,54 @@ class ReleaseToolingTests(unittest.TestCase):
             self.assertIn(f'Icon={home}/.local/opt/yun/yun.png', entry.read_text())
             if shutil.which("desktop-file-validate"):
                 subprocess.run(["desktop-file-validate", str(entry)], check=True)
+
+    def test_flutter_sdk_verifies_download_before_extracting(self):
+        with tempfile.TemporaryDirectory(prefix="yun-sdk-") as directory:
+            root = Path(directory)
+            payload = root / "source.tar.gz"
+            with tarfile.open(payload, "w:gz") as archive:
+                info = tarfile.TarInfo("flutter/bin/flutter")
+                info.mode = 0o755
+                data = b"#!/bin/sh\nexit 0\n"
+                info.size = len(data)
+                archive.addfile(info, io.BytesIO(data))
+            digest = hashlib.sha256(payload.read_bytes()).hexdigest()
+            manifest = root / "manifest.json"
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            curl = bin_dir / "curl"
+            curl.write_text("""#!/usr/bin/env python3
+import os, pathlib, sys
+source = 'MANIFEST' if sys.argv[-1].endswith('.json') else 'ARCHIVE'
+if os.environ['HTTP_ERROR'] == source and '--fail' in sys.argv:
+    sys.exit(22)
+sys.stdout.buffer.write(pathlib.Path(os.environ[source]).read_bytes())
+""")
+            curl.chmod(0o755)
+            for expected, http_error in ((digest, ''), ('0' * 64, ''),
+                                         (None, ''), (digest, 'MANIFEST'),
+                                         (digest, 'ARCHIVE')):
+                with self.subTest(digest=expected, http_error=http_error):
+                    cache = root / "cache"
+                    shutil.rmtree(cache, ignore_errors=True)
+                    manifest.write_text(json.dumps({"releases": [{
+                        "channel": "stable", "version": "1.2.3", "dart_sdk_arch": "x64",
+                        "hash": "fixture", "sha256": expected, "archive": "sdk.tar.gz",
+                    }]}))
+                    result = subprocess.run(
+                        ["bash", str(ROOT / ".github/actions/flutter-sdk/setup.sh"),
+                         "-n", "1.2.3", "-c", str(cache), "stable"],
+                        capture_output=True, text=True,
+                        env=dict(os.environ, PATH=f"{bin_dir}:{os.environ['PATH']}",
+                                 RUNNER_OS="Linux", RUNNER_ARCH="X64", RUNNER_TEMP=str(root),
+                                 RUNNER_TOOL_CACHE=str(root / "tools"), PUB_CACHE=str(root / "pub"),
+                                 MANIFEST=str(manifest), ARCHIVE=str(payload),
+                                 HTTP_ERROR=http_error,
+                                 GITHUB_ENV=os.devnull, GITHUB_PATH=os.devnull),
+                    )
+                    success = expected == digest and not http_error
+                    self.assertEqual(result.returncode == 0, success, result.stderr)
+                    self.assertEqual((cache / "flutter/bin/flutter").exists(), success)
 
     def test_archive_checksums(self):
         with tempfile.TemporaryDirectory() as directory:

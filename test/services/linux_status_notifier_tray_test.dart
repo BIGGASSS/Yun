@@ -475,6 +475,28 @@ void main() {
     },
   );
 
+  test('expired registrations stay bounded until the bus replies', () async {
+    await ownWatcher();
+    watcher.registrationGate = Completer<void>();
+    tray = createTray(
+      timeout: const Duration(milliseconds: 150),
+      poll: const Duration(milliseconds: 30),
+    );
+    await start();
+    expect(changes, [false]);
+    for (var i = 0; i < 20; i++) {
+      expect(await tray.check(), isFalse);
+    }
+    await Future<void>.delayed(const Duration(milliseconds: 250));
+    expect(watcher.registrations, hasLength(1));
+    watcher.reject = true;
+    watcher.registrationGate!.complete();
+    await Future<void>.delayed(const Duration(milliseconds: 80));
+    expect(changes, [false]);
+    watcher.reject = false;
+    await _eventually(() => changes.last);
+  });
+
   test('registration refusal and timeout never imply availability; polling retries', () async {
     watcher.reject = true;
     tray = createTray(

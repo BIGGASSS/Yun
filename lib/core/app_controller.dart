@@ -1178,7 +1178,7 @@ class AppController extends ChangeNotifier implements SystemMediaArtwork {
 
   Future<String> audioUrl(String trackId) async {
     _requireDatabase();
-    return '${account!.server}/api/v1/tracks/${Uri.encodeComponent(trackId)}/audio';
+    return '${account!.server}/api/v1/tracks/${encodeResourceId(trackId)}/audio';
   }
 
   Future<Map<String, String>> authorizationHeaders() {
@@ -1336,7 +1336,7 @@ class AppController extends ChangeNotifier implements SystemMediaArtwork {
         }
         final result = Track.fromJson(
           await _api.json(
-            '/tracks/${track.id}',
+            '/tracks/${encodeResourceId(track.id)}',
             method: 'PATCH',
             data: {...changes, 'revision': track.revision},
           ),
@@ -1357,7 +1357,7 @@ class AppController extends ChangeNotifier implements SystemMediaArtwork {
         return result;
       });
   Future<void> deleteTrack(String id) => _online((db, epoch) async {
-    await _api.request('/tracks/$id', method: 'DELETE');
+    await _api.request('/tracks/${encodeResourceId(id)}', method: 'DELETE');
     if (!await _publishDeletion(db, epoch, 'track', id)) return;
     if (_canPublish(db) && playback.currentTrack?.id == id) {
       await playback.stop();
@@ -1381,7 +1381,7 @@ class AppController extends ChangeNotifier implements SystemMediaArtwork {
     }
     final result = Track.fromJson(
       await _api.json(
-        '/tracks/${track.id}/artwork',
+        '/tracks/${encodeResourceId(track.id)}/artwork',
         method: 'PUT',
         data: bytes,
         headers: {'Content-Type': mimeType, 'If-Match': '"${track.revision}"'},
@@ -1412,7 +1412,7 @@ class AppController extends ChangeNotifier implements SystemMediaArtwork {
   }) => _online((db, epoch) async {
     final result = Playlist.fromJson(
       await _api.json(
-        '/playlists/${playlist.id}',
+        '/playlists/${encodeResourceId(playlist.id)}',
         method: 'PUT',
         data: {
           'revision': playlist.revision,
@@ -1433,7 +1433,7 @@ class AppController extends ChangeNotifier implements SystemMediaArtwork {
   });
   Future<void> deletePlaylist(Playlist playlist) => _online((db, epoch) async {
     await _api.request(
-      '/playlists/${playlist.id}',
+      '/playlists/${encodeResourceId(playlist.id)}',
       method: 'DELETE',
       query: {'revision': playlist.revision},
     );

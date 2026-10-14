@@ -14,6 +14,12 @@ class _DownloadsApp extends PlayerTestApp {
 
   final List<Track> library;
   final List<PinSelection> selections;
+  final unpinned = <String>[];
+  @override
+  Future<void> pinTrack(String id, {bool pinned = true}) async {
+    if (!pinned) unpinned.add(id);
+  }
+
   final Map<String, DownloadProgress> progress = {};
   Set<String> localIds = const {};
   int revision = 0, clearCalls = 0, retryCalls = 0, trackReads = 0;
@@ -521,6 +527,27 @@ void main() {
       await position(tester, 'Waiting song'),
       greaterThan(await position(tester, 'Pending')),
     );
+    expect(tester.takeException(), isNull);
+  });
+
+  downloadsTest('stale removal confirmation cannot unpin another account', (
+    tester,
+  ) async {
+    final app = await open(tester);
+    await tester.tap(find.text('On this device'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Manage offline selections'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('Remove offline selection').first);
+    await tester.pumpAndSettle();
+    app.currentAccount = const Account(
+      server: 'https://other.test',
+      userId: 'other',
+      username: 'other',
+    );
+    await tester.tap(find.text('Remove'));
+    await tester.pumpAndSettle();
+    expect(app.unpinned, isEmpty);
     expect(tester.takeException(), isNull);
   });
 

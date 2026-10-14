@@ -45,8 +45,11 @@ download_archive() {
 	archive_name=$(basename "$1")
 	archive_local="$RUNNER_TEMP/$archive_name"
 
-	curl --connect-timeout 15 --retry 5 "$archive_url" >"$archive_local"
+	curl --fail --connect-timeout 15 --retry 5 "$archive_url" >"$archive_local"
 
+	# Verify the manifest's digest before any archive member reaches the SDK cache.
+	bash "$(dirname -- "${BASH_SOURCE[0]}")/verify-download.sh" \
+		"$archive_local" "$(echo "$VERSION_MANIFEST" | jq -r '.sha256')"
 	mkdir -p "$2"
 
 	case "$archive_name" in
@@ -151,7 +154,7 @@ fi
 if [ "$TEST_MODE" = true ]; then
 	RELEASE_MANIFEST=$(cat "$(dirname -- "${BASH_SOURCE[0]}")/test/$MANIFEST_JSON_PATH")
 else
-	RELEASE_MANIFEST=$(curl --silent --connect-timeout 15 --retry 5 "$MANIFEST_URL")
+	RELEASE_MANIFEST=$(curl --fail --silent --connect-timeout 15 --retry 5 "$MANIFEST_URL")
 fi
 
 if [ "$CHANNEL" = "master" ] || [ "$CHANNEL" = "main" ]; then

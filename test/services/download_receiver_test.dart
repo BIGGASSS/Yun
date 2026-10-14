@@ -283,6 +283,46 @@ void main() {
     expect(await partial.readAsBytes(), bytes);
   });
 
+  test('worker rejects redirects without touching partial files', () async {
+    final destination = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    addTearDown(() => destination.close(force: true));
+    addTearDown(() => server.close(force: true));
+    final forwarded = <String?>[];
+    destination.listen((request) async {
+      forwarded.add(request.headers.value('authorization'));
+      request.response.add([1, 2, 3, 4, 5, 6]);
+      await request.response.close();
+    });
+    server.listen((request) async {
+      request.response.statusCode = HttpStatus.found;
+      request.response.headers.set(
+        'location',
+        'http://127.0.0.1:${destination.port}/audio',
+      );
+      await request.response.close();
+    });
+    await partial.writeAsBytes([9, 9]);
+    final receiver = IsolateDownloadReceiver();
+    addTearDown(receiver.close);
+    await expectLater(
+      receiver.receive(
+        input(url: 'http://127.0.0.1:${server.port}/audio'),
+        cancelToken: CancelToken(),
+        onProgress: (_) {},
+      ),
+      throwsA(
+        isA<DownloadReceiveException>().having(
+          (error) => error.statusCode,
+          'status',
+          HttpStatus.found,
+        ),
+      ),
+    );
+    expect(forwarded, isEmpty);
+    expect(await partial.readAsBytes(), [9, 9]);
+  });
+
   test('worker persists across HTTP errors and successful tracks', () async {
     final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
     addTearDown(() => server.close(force: true));
