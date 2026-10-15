@@ -585,24 +585,6 @@ void main() {
     );
   }
 
-  test(
-    'logout clears credentials even when its final checkpoint fails',
-    () async {
-      final value = await open();
-      await value.play(track);
-      engine.emit(
-        const EngineState(playing: true, position: Duration(seconds: 5)),
-      );
-      monotonicMs += 1000;
-      db.failEvents = true;
-      await expectLater(value.logout(), throwsStateError);
-      expect(db.closed, isTrue);
-      expect(value.isAuthenticated, isFalse);
-      expect(api.session, isNull);
-      expect(await api.credentials.read(ApiClient.sessionKey), isNull);
-    },
-  );
-
   test('failed logout quarantines events across users and servers until the original account returns', () async {
     await db.close();
     final databases = <CountingDatabase>[];

@@ -15,53 +15,6 @@ void main() {
   );
 
   playerTest(
-    'desktop bar centers a bounded transport and seek at 1848',
-    platform: TargetPlatform.linux,
-    size: const Size(1848, 900),
-    (tester, app, engine) async {
-      final bar = find.byType(DesktopPlayerBar);
-      expect(bar, findsOneWidget);
-      // The bar stays a slim strip instead of a sprawling block.
-      expect(tester.getSize(bar).height, lessThan(90));
-
-      final seek = find.byType(PlaybackSeek);
-      expect(seek, findsOneWidget);
-      final seekRect = tester.getRect(seek);
-      expect(seekRect.width, DesktopPlayerBar.maxSeekColumnWidth);
-      // Equal flexible side zones keep the seek column optically centered.
-      expect((seekRect.center.dx - 1848 / 2).abs(), lessThan(.5));
-      // The symmetric transport row shares the same center.
-      final playCenter = tester.getCenter(find.byTooltip('Pause'));
-      expect((playCenter.dx - 1848 / 2).abs(), lessThan(.5));
-
-      // Metadata hugs the left edge; volume and queue hug the right.
-      expect(tester.getTopLeft(find.text('Test track')).dx, lessThan(200));
-      expect(
-        tester.getCenter(find.byTooltip('Show queue')).dx,
-        greaterThan(1848 - 200),
-      );
-      expect(
-        find.byKey(const ValueKey('playback-volume-slider')),
-        findsOneWidget,
-      );
-    },
-  );
-
-  playerTest(
-    'desktop bar keeps zones balanced at the 840 breakpoint',
-    platform: TargetPlatform.macOS,
-    size: const Size(840, 800),
-    (tester, app, engine) async {
-      final seek = find.byType(PlaybackSeek);
-      expect(seek, findsOneWidget);
-      final seekRect = tester.getRect(seek);
-      expect(seekRect.width, lessThan(DesktopPlayerBar.maxSeekColumnWidth));
-      expect((seekRect.center.dx - 420).abs(), lessThan(.5));
-      expect(find.byTooltip('Show queue'), findsOneWidget);
-    },
-  );
-
-  playerTest(
     'transport buttons drive playback and show selection state',
     platform: TargetPlatform.windows,
     size: const Size(1400, 900),

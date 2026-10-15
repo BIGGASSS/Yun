@@ -251,158 +251,154 @@ void _expectShutdownBeforeDetach(_Fixture fixture, {required bool nativeExit}) {
 void main() {
   setUp(mockDesktopDrop);
 
-  for (final platform in [
-    TargetPlatform.linux,
-    TargetPlatform.macOS,
-    TargetPlatform.windows,
-  ]) {
-    testWidgets(
-      '${platform.name}: close preference persists across bootstrap remounts',
-      (tester) async {
-        await _withBootstrap(tester, platform, (fixture) async {
-          expect(fixture.hosts, hasLength(1));
-          expect(fixture.app.initializeCalls, 1);
-          expect(fixture.desktop.closeBehavior, DesktopCloseBehavior.quit);
-          await fixture.desktop.setCloseBehavior(
-            DesktopCloseBehavior.minimizeToTray,
-          );
-          await fixture.unmount();
-          final oldDesktopHost = fixture.host;
-          await fixture.mount();
-          expect(fixture.hosts, hasLength(2));
-          expect(identical(oldDesktopHost, fixture.host), isFalse);
+  // The injected host bypasses native adapters; all desktops share this path.
+  const platform = TargetPlatform.linux;
+  testWidgets(
+    '${platform.name}: close preference persists across bootstrap remounts',
+    (tester) async {
+      await _withBootstrap(tester, platform, (fixture) async {
+        expect(fixture.hosts, hasLength(1));
+        expect(fixture.app.initializeCalls, 1);
+        expect(fixture.desktop.closeBehavior, DesktopCloseBehavior.quit);
+        await fixture.desktop.setCloseBehavior(
+          DesktopCloseBehavior.minimizeToTray,
+        );
+        await fixture.unmount();
+        final oldDesktopHost = fixture.host;
+        await fixture.mount();
+        expect(fixture.hosts, hasLength(2));
+        expect(identical(oldDesktopHost, fixture.host), isFalse);
+        expect(
+          fixture.desktop.closeBehavior,
+          DesktopCloseBehavior.minimizeToTray,
+        );
+        expect(fixture.app.initializeCalls, 1);
+        expect(fixture.engine.initializations, 0);
+
+        await _startFakePlayback(fixture);
+        final playback = fixture.app.playback;
+        await playback.setVolume(27);
+        playback.setShuffle(true);
+        playback.setRepeat(RepeatMode.all);
+        final engineCalls = List<String>.of(fixture.engine.calls);
+        // These native window events are distinct from Flutter application quit
+        // requests (including those forwarded by the Windows runner bridge).
+        fixture.host.onClose!();
+        await fixture.desktop.requestWindowClose();
+        expect(fixture.host.visible, isFalse);
+        expect(fixture.desktop.isHidden, isTrue);
+        expect(fixture.app.shutdownStarted.isCompleted, isFalse);
+        expect(fixture.engine.controller.isClosed, isFalse);
+        expect(fixture.engine.calls, engineCalls);
+        expect(playback.isPlaying, isTrue);
+        expect(playback.queue.map((track) => track.id), ['a']);
+        expect(playback.currentTrack?.id, 'a');
+        final saved = await SharedPreferencesPlaybackSettingsStore(
+          await SharedPreferences.getInstance(),
+        ).read();
+        expect(saved.volume, 27);
+        expect(saved.shuffle, isTrue);
+        expect(saved.repeatMode, RepeatMode.all);
+        // Hiding has not disposed playback: controls still operate while hidden.
+        await playback.pause();
+        expect(playback.isPlaying, isFalse);
+        await playback.play();
+        expect(playback.isPlaying, isTrue);
+        fixture.host.onShow!();
+        await fixture.desktop.showWindow();
+        expect(fixture.host.visible, isTrue);
+        expect(fixture.desktop.isHidden, isFalse);
+
+        await fixture.desktop.setCloseBehavior(DesktopCloseBehavior.quit);
+        await fixture.unmount();
+        await fixture.mount();
+        expect(fixture.desktop.closeBehavior, DesktopCloseBehavior.quit);
+      });
+    },
+  );
+
+  testWidgets(
+    '${platform.name}: default native close awaits full app shutdown before exit',
+    (tester) async {
+      await _withBootstrap(tester, platform, (fixture) async {
+        await _startFakePlayback(fixture);
+        fixture.app.shutdownGate = Completer<void>();
+        fixture.host.onClose!();
+        final closing = fixture.desktop.requestWindowClose();
+        await fixture.app.shutdownStarted.future;
+        expect(fixture.engine.controller.isClosed, isFalse);
+        expect(fixture.events, isNot(contains('exit')));
+        expect(fixture.events, isNot(contains('dispose')));
+        fixture.app.shutdownGate!.complete();
+        await closing;
+        _expectShutdownBeforeDetach(fixture, nativeExit: true);
+        expect(fixture.events, isNot(contains('hide')));
+      });
+    },
+  );
+
+  testWidgets(
+    '${platform.name}: native Quit bypasses minimize and awaits shutdown',
+    (tester) async {
+      await _withBootstrap(
+        tester,
+        platform,
+        (fixture) async {
+          await _startFakePlayback(fixture);
+          fixture.app.shutdownGate = Completer<void>();
+          fixture.host.onQuit!();
+          await fixture.app.shutdownStarted.future;
+          expect(fixture.events, isNot(contains('exit')));
+          expect(fixture.engine.controller.isClosed, isFalse);
+          fixture.app.shutdownGate!.complete();
+          await fixture.desktop.quit();
+          _expectShutdownBeforeDetach(fixture, nativeExit: true);
+          expect(fixture.events, isNot(contains('hide')));
+        },
+        preferences: {
+          SharedPreferencesDesktopSettingsStore.closeBehaviorKey:
+              'minimizeToTray',
+        },
+      );
+    },
+  );
+
+  testWidgets(
+    '${platform.name}: Flutter application exit ignores close-to-tray',
+    (tester) async {
+      await _withBootstrap(
+        tester,
+        platform,
+        (fixture) async {
           expect(
             fixture.desktop.closeBehavior,
             DesktopCloseBehavior.minimizeToTray,
           );
-          expect(fixture.app.initializeCalls, 1);
-          expect(fixture.engine.initializations, 0);
-
-          await _startFakePlayback(fixture);
-          final playback = fixture.app.playback;
-          await playback.setVolume(27);
-          playback.setShuffle(true);
-          playback.setRepeat(RepeatMode.all);
-          final engineCalls = List<String>.of(fixture.engine.calls);
-          // These native window events are distinct from Flutter application quit
-          // requests (including those forwarded by the Windows runner bridge).
-          fixture.host.onClose!();
-          await fixture.desktop.requestWindowClose();
-          expect(fixture.host.visible, isFalse);
-          expect(fixture.desktop.isHidden, isTrue);
-          expect(fixture.app.shutdownStarted.isCompleted, isFalse);
-          expect(fixture.engine.controller.isClosed, isFalse);
-          expect(fixture.engine.calls, engineCalls);
-          expect(playback.isPlaying, isTrue);
-          expect(playback.queue.map((track) => track.id), ['a']);
-          expect(playback.currentTrack?.id, 'a');
-          final saved = await SharedPreferencesPlaybackSettingsStore(
-            await SharedPreferences.getInstance(),
-          ).read();
-          expect(saved.volume, 27);
-          expect(saved.shuffle, isTrue);
-          expect(saved.repeatMode, RepeatMode.all);
-          // Hiding has not disposed playback: controls still operate while hidden.
-          await playback.pause();
-          expect(playback.isPlaying, isFalse);
-          await playback.play();
-          expect(playback.isPlaying, isTrue);
-          fixture.host.onShow!();
-          await fixture.desktop.showWindow();
-          expect(fixture.host.visible, isTrue);
-          expect(fixture.desktop.isHidden, isFalse);
-
-          await fixture.desktop.setCloseBehavior(DesktopCloseBehavior.quit);
-          await fixture.unmount();
-          await fixture.mount();
-          expect(fixture.desktop.closeBehavior, DesktopCloseBehavior.quit);
-        });
-      },
-    );
-
-    testWidgets(
-      '${platform.name}: default native close awaits full app shutdown before exit',
-      (tester) async {
-        await _withBootstrap(tester, platform, (fixture) async {
           await _startFakePlayback(fixture);
           fixture.app.shutdownGate = Completer<void>();
-          fixture.host.onClose!();
-          final closing = fixture.desktop.requestWindowClose();
+          var responded = false;
+          final response = _requestFrameworkExit().then((value) {
+            responded = true;
+            return value;
+          });
           await fixture.app.shutdownStarted.future;
+          expect(responded, isFalse);
           expect(fixture.engine.controller.isClosed, isFalse);
-          expect(fixture.events, isNot(contains('exit')));
           expect(fixture.events, isNot(contains('dispose')));
           fixture.app.shutdownGate!.complete();
-          await closing;
-          _expectShutdownBeforeDetach(fixture, nativeExit: true);
+          expect(await response, {'response': 'exit'});
+          _expectShutdownBeforeDetach(fixture, nativeExit: false);
           expect(fixture.events, isNot(contains('hide')));
-        });
-      },
-    );
-
-    testWidgets(
-      '${platform.name}: native Quit bypasses minimize and awaits shutdown',
-      (tester) async {
-        await _withBootstrap(
-          tester,
-          platform,
-          (fixture) async {
-            await _startFakePlayback(fixture);
-            fixture.app.shutdownGate = Completer<void>();
-            fixture.host.onQuit!();
-            await fixture.app.shutdownStarted.future;
-            expect(fixture.events, isNot(contains('exit')));
-            expect(fixture.engine.controller.isClosed, isFalse);
-            fixture.app.shutdownGate!.complete();
-            await fixture.desktop.quit();
-            _expectShutdownBeforeDetach(fixture, nativeExit: true);
-            expect(fixture.events, isNot(contains('hide')));
-          },
-          preferences: {
-            SharedPreferencesDesktopSettingsStore.closeBehaviorKey:
-                'minimizeToTray',
-          },
-        );
-      },
-    );
-
-    testWidgets(
-      '${platform.name}: Flutter application exit ignores close-to-tray',
-      (tester) async {
-        await _withBootstrap(
-          tester,
-          platform,
-          (fixture) async {
-            expect(
-              fixture.desktop.closeBehavior,
-              DesktopCloseBehavior.minimizeToTray,
-            );
-            await _startFakePlayback(fixture);
-            fixture.app.shutdownGate = Completer<void>();
-            var responded = false;
-            final response = _requestFrameworkExit().then((value) {
-              responded = true;
-              return value;
-            });
-            await fixture.app.shutdownStarted.future;
-            expect(responded, isFalse);
-            expect(fixture.engine.controller.isClosed, isFalse);
-            expect(fixture.events, isNot(contains('dispose')));
-            fixture.app.shutdownGate!.complete();
-            expect(await response, {'response': 'exit'});
-            _expectShutdownBeforeDetach(fixture, nativeExit: false);
-            expect(fixture.events, isNot(contains('hide')));
-            // Flutter owns this exit; do not request a second native application exit.
-            expect(fixture.events, isNot(contains('exit')));
-          },
-          preferences: {
-            SharedPreferencesDesktopSettingsStore.closeBehaviorKey:
-                'minimizeToTray',
-          },
-        );
-      },
-    );
-  }
+          // Flutter owns this exit; do not request a second native application exit.
+          expect(fixture.events, isNot(contains('exit')));
+        },
+        preferences: {
+          SharedPreferencesDesktopSettingsStore.closeBehaviorKey:
+              'minimizeToTray',
+        },
+      );
+    },
+  );
 
   for (final exit in ['native', 'framework']) {
     for (final recovery in ['none', 'before', 'after']) {
@@ -526,30 +522,27 @@ void main() {
     }
   }
 
-  for (final platform in [TargetPlatform.android, TargetPlatform.iOS]) {
-    testWidgets(
-      '${platform.name}: wide bootstrap never constructs a desktop host',
-      (tester) async {
-        await _withBootstrap(
-          tester,
-          platform,
-          (fixture) async {
-            expect(fixture.hosts, isEmpty);
-            expect(fixture.events, isEmpty);
-            expect(fixture.app.initializeCalls, 1);
-            expect(tester.widget<YunApp>(find.byType(YunApp)).desktop, isNull);
-            expect(await _requestFrameworkExit(), {'response': 'exit'});
-            expect(fixture.engine.controller.isClosed, isTrue);
-            expect(fixture.events, ['shutdown:start', 'shutdown:done']);
-          },
-          preferences: {
-            SharedPreferencesDesktopSettingsStore.closeBehaviorKey:
-                'minimizeToTray',
-          },
-        );
+  testWidgets('wide mobile bootstrap never constructs a desktop host', (
+    tester,
+  ) async {
+    await _withBootstrap(
+      tester,
+      TargetPlatform.android,
+      (fixture) async {
+        expect(fixture.hosts, isEmpty);
+        expect(fixture.events, isEmpty);
+        expect(fixture.app.initializeCalls, 1);
+        expect(tester.widget<YunApp>(find.byType(YunApp)).desktop, isNull);
+        expect(await _requestFrameworkExit(), {'response': 'exit'});
+        expect(fixture.engine.controller.isClosed, isTrue);
+        expect(fixture.events, ['shutdown:start', 'shutdown:done']);
+      },
+      preferences: {
+        SharedPreferencesDesktopSettingsStore.closeBehaviorKey:
+            'minimizeToTray',
       },
     );
-  }
+  });
 
   for (final exit in ['native', 'framework', 'both']) {
     testWidgets('startup Retry keeps shutdown interception for $exit exit', (

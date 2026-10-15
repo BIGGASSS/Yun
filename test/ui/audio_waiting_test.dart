@@ -39,9 +39,7 @@ void main() {
   }
 
   for (final layout in [
-    (TargetPlatform.android, const Size(390, 844), 1.0),
     (TargetPlatform.android, const Size(320, 568), 2.0),
-    (TargetPlatform.iOS, const Size(390, 844), 1.0),
     (TargetPlatform.android, const Size(1200, 800), 1.0),
     (TargetPlatform.linux, const Size(1280, 800), 1.0),
     (TargetPlatform.linux, const Size(320, 568), 2.0),

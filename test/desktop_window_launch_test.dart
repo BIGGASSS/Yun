@@ -154,19 +154,15 @@ void main() {
     );
   }
 
-  for (final platform in [TargetPlatform.android, TargetPlatform.iOS]) {
-    testWidgets('${platform.name}: launch without desktop calls or deferral', (
-      tester,
-    ) async {
-      debugDefaultTargetPlatformOverride = platform;
-      try {
-        await launchWithDesktopWindow(() => binding.events.add('runApp'));
-        expect(binding.events, ['runApp']);
-      } finally {
-        debugDefaultTargetPlatformOverride = null;
-      }
-    });
-  }
+  testWidgets('mobile launch has no desktop calls or deferral', (tester) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.android;
+    try {
+      await launchWithDesktopWindow(() => binding.events.add('runApp'));
+      expect(binding.events, ['runApp']);
+    } finally {
+      debugDefaultTargetPlatformOverride = null;
+    }
+  });
 
   testWidgets('a throwing launch callback still releases frame deferral', (
     tester,

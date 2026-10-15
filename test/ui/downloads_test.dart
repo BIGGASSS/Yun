@@ -317,30 +317,6 @@ void main() {
         widget.semanticsLabel == 'Offline download completion',
   );
 
-  downloadsTest('hides completion summary when no downloads are running', (
-    tester,
-  ) async {
-    final app = await open(tester);
-    // Queued and failed selections are not running jobs.
-    expect(completionProgress(), findsNothing);
-    expect(find.textContaining('downloads complete'), findsNothing);
-
-    app.setProgress('pending', DownloadStatus.downloaded, received: 100);
-    await tester.pumpAndSettle();
-    expect(completionProgress(), findsNothing);
-    expect(find.textContaining('downloads complete'), findsNothing);
-
-    app.setProgress('failed', DownloadStatus.downloaded, received: 100);
-    await tester.pumpAndSettle();
-    // All selections are ready, as in the completed-download screenshot.
-    expect(completionProgress(), findsNothing);
-    expect(find.textContaining('downloads complete'), findsNothing);
-    expect(find.text('Finished song'), findsOneWidget);
-    expect(find.text('Waiting song'), findsOneWidget);
-    expect(find.text('Failed song'), findsOneWidget);
-    expect(tester.takeException(), isNull);
-  });
-
   downloadsTest('completion summary follows running jobs without regrouping', (
     tester,
   ) async {

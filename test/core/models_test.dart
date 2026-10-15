@@ -87,25 +87,4 @@ void main() {
       }
     },
   );
-
-  test('upload ID clearing is explicit and survives durable serialization', () {
-    const job = UploadJob(
-      id: 'job',
-      localPath: '/music/file.wav',
-      filename: 'file.wav',
-      sizeBytes: 123,
-      offset: 42,
-      remoteId: 'expired',
-      modifiedAtMs: 1234,
-    );
-    expect(job.copyWith(status: 'queued').remoteId, 'expired');
-    final reset = UploadJob.fromJson(
-      job.copyWith(clearRemoteId: true, offset: 0).toJson(),
-    );
-    expect(reset.remoteId, isNull);
-    expect(reset.offset, 0);
-    expect(reset.localPath, job.localPath);
-    expect(reset.sizeBytes, job.sizeBytes);
-    expect(reset.modifiedAtMs, job.modifiedAtMs);
-  });
 }

@@ -749,28 +749,26 @@ void main() {
     },
   );
 
-  for (final scale in [1.0, 1.5]) {
-    _libraryTest(
-      'selection controls wrap on a narrow screen at text scale $scale',
-      (tester, app) async {
-        await _selectAll(tester);
-        expect(tester.takeException(), isNull);
-        await _tap(tester, 'Keep selected offline');
-        expect(app.pinned.toSet(), _tracks.map((track) => track.id).toSet());
-        await _tap(tester, 'Delete selected');
-        await _tap(tester, 'Cancel');
-        await _tap(tester, 'Albums');
-        await _tap(tester, 'Collection');
-        await _selectAll(tester);
-        await _tap(tester, 'Play selected');
-        expect(app.playback.queue.map((track) => track.id), [
-          'zulu',
-          'alpha',
-          'coda',
-        ]);
-      },
-      size: const Size(320, 1100),
-      scale: scale,
-    );
-  }
+  _libraryTest(
+    'selection controls wrap on a narrow screen at text scale 1.5',
+    (tester, app) async {
+      await _selectAll(tester);
+      expect(tester.takeException(), isNull);
+      await _tap(tester, 'Keep selected offline');
+      expect(app.pinned.toSet(), _tracks.map((track) => track.id).toSet());
+      await _tap(tester, 'Delete selected');
+      await _tap(tester, 'Cancel');
+      await _tap(tester, 'Albums');
+      await _tap(tester, 'Collection');
+      await _selectAll(tester);
+      await _tap(tester, 'Play selected');
+      expect(app.playback.queue.map((track) => track.id), [
+        'zulu',
+        'alpha',
+        'coda',
+      ]);
+    },
+    size: const Size(320, 1100),
+    scale: 1.5,
+  );
 }

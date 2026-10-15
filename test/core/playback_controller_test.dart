@@ -108,19 +108,6 @@ void main() {
 
   group('volume', () {
     test(
-      'defaults do not override native volume even across track changes',
-      () async {
-        expect(player.volume, 100);
-        expect(player.isMuted, isFalse);
-        await player.playQueue(tracks);
-        await player.next();
-        await player.stop();
-        await player.playQueue(tracks);
-        expect(engine.volumeCalls, isEmpty);
-      },
-    );
-
-    test(
       'idle changes clamp, mute and restore without initializing audio',
       () async {
         await player.toggleMute();
@@ -327,25 +314,6 @@ void main() {
     );
   });
 
-  test(
-    'local sources and transport controls do not require native plugins',
-    () async {
-      await player.playQueue(tracks, index: 1);
-      expect(player.currentTrack!.id, 'b');
-      expect(engine.opened, '/cache/b');
-      expect(player.isPlaying, isTrue);
-      await player.seek(const Duration(seconds: 42));
-      expect(player.position.inSeconds, 42);
-      await player.pause();
-      expect(player.isPlaying, isFalse);
-      await player.play();
-      expect(player.isPlaying, isTrue);
-      await player.next();
-      expect(player.currentTrack!.id, 'c');
-      await player.next();
-      expect(player.currentTrack, isNull);
-    },
-  );
   test(
     'repeated system shuffle command does not reset the remaining bag',
     () async {

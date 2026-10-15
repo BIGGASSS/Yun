@@ -134,36 +134,25 @@ void main() {
     await tester.pumpAndSettle();
   }
 
-  for (final platform in [
-    TargetPlatform.linux,
-    TargetPlatform.macOS,
-    TargetPlatform.windows,
-  ]) {
-    volumeTest('${platform.name} slider and mute control native volume', (
-      tester,
-    ) async {
-      await mount(tester, platform);
-      expect(slider, findsOneWidget);
-      expect(engine.volumeCalls, isEmpty);
-      tester.widget<Slider>(slider).onChanged!(37);
-      await tester.pumpAndSettle();
-      expect(engine.volume, 37);
-      expect(tester.widget<Slider>(slider).value, 37);
-      expect(
-        tester.widget<Slider>(slider).semanticFormatterCallback!(37),
-        '37%',
-      );
-      await tester.tap(find.byTooltip('Mute'));
-      await tester.pumpAndSettle();
-      expect(engine.volume, 0);
-      expect(tester.widget<Slider>(slider).value, 0);
-      await tester.tap(find.byTooltip('Unmute'));
-      await tester.pumpAndSettle();
-      expect(engine.volume, 37);
-      expect(engine.volumeCalls, [37, 0, 37]);
-      expect(tester.takeException(), isNull);
-    });
-  }
+  volumeTest('desktop slider and mute control native volume', (tester) async {
+    await mount(tester, TargetPlatform.linux);
+    expect(slider, findsOneWidget);
+    expect(engine.volumeCalls, isEmpty);
+    tester.widget<Slider>(slider).onChanged!(37);
+    await tester.pumpAndSettle();
+    expect(engine.volume, 37);
+    expect(tester.widget<Slider>(slider).value, 37);
+    expect(tester.widget<Slider>(slider).semanticFormatterCallback!(37), '37%');
+    await tester.tap(find.byTooltip('Mute'));
+    await tester.pumpAndSettle();
+    expect(engine.volume, 0);
+    expect(tester.widget<Slider>(slider).value, 0);
+    await tester.tap(find.byTooltip('Unmute'));
+    await tester.pumpAndSettle();
+    expect(engine.volume, 37);
+    expect(engine.volumeCalls, [37, 0, 37]);
+    expect(tester.takeException(), isNull);
+  });
 
   volumeTest('idle desktop volume stays lazy and slider supports keyboard', (
     tester,

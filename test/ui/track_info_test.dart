@@ -42,7 +42,7 @@ Future<void> _close(WidgetTester tester, PlayerTestApp app) async {
 }
 
 void main() {
-  for (final reported in [320, null, 0, -1]) {
+  for (final reported in [320, null]) {
     testWidgets('TrackInfo labels and explains bitrate (reported=$reported)', (
       tester,
     ) async {

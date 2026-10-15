@@ -39,14 +39,6 @@ const _releaseUrl = 'https://github.com/BIGGASSS/Yun/releases/tag/v0.2.0';
 
 void main() {
   group('GitHubUpdateChecker', () {
-    test('asks GitHub for the latest Yun release', () async {
-      final fixture = _Fixture(payload: releasePayload(tag: 'v0.2.0'));
-      await fixture.checker.findUpdate(currentVersion: '0.1.9');
-      expect(fixture.endpoints, [
-        Uri.parse('https://api.github.com/repos/BIGGASSS/Yun/releases/latest'),
-      ]);
-    });
-
     test('uses the configured repository', () async {
       final fixture = _Fixture(
         payload: releasePayload(tag: 'v0.2.0'),
@@ -71,6 +63,9 @@ void main() {
       expect(update!.version, '0.2.0');
       expect(update.releaseUrl, _releaseUrl);
       expect(update.releaseNotes, 'Offline fixes and a quieter tray.');
+      expect(fixture.endpoints, [
+        Uri.parse('https://api.github.com/repos/BIGGASSS/Yun/releases/latest'),
+      ]);
     });
 
     test('returns null when the running version is the latest', () async {

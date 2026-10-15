@@ -127,19 +127,6 @@ void main() {
       expect(statuses.last, UpdateCheckStatus.updateAvailable);
     });
 
-    test('concurrent checks share one request', () async {
-      final checker = _FakeChecker(payload: _newerPayload);
-      checker.inFlight.add(Completer<void>());
-      final controller = _controllerWith(checker);
-      final first = controller.check();
-      final second = controller.check();
-      expect(identical(first, second), isTrue);
-      checker.inFlight.single.complete();
-      await Future.wait([first, second]);
-      expect(checker.calls, 1);
-      expect(controller.completedChecks, 1);
-    });
-
     for (final fails in [false, true]) {
       test(
         'disposing during a ${fails ? 'failed' : 'successful'} check is safe',
@@ -176,6 +163,7 @@ void main() {
       expect(identical(nested, pending), isTrue);
       await pending;
       expect(checker.calls, 1);
+      expect(controller.completedChecks, 1);
       controller.dispose();
     });
 

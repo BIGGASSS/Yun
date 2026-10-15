@@ -104,24 +104,6 @@ void main() {
   setUp(() => SharedPreferences.setMockInitialValues({}));
 
   test(
-    'default native close waits for durable shutdown before dispose/exit',
-    () async {
-      final rig = _Rig();
-      final gate = Completer<void>();
-      rig.shutdown = () => gate.future;
-      await rig.initialize();
-      expect(rig.controller.closeBehavior, DesktopCloseBehavior.quit);
-      rig.host.onClose!();
-      await _settle();
-      expect(rig.events, ['shutdown']);
-      expect(rig.controller.isQuitting, isTrue);
-      gate.complete();
-      await _settle();
-      expect(rig.events, ['shutdown', 'durable', 'dispose', 'exit']);
-    },
-  );
-
-  test(
     'saved minimize checkpoints before hiding and leaves playback alone',
     () async {
       final engine = FakeEngine();

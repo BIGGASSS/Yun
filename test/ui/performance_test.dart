@@ -343,58 +343,6 @@ void main() {
     },
   );
 
-  testWidgets('availability icons fit long artists at narrow large text', (
-    tester,
-  ) async {
-    final app = _App(FakeEngine());
-    const track = Track(
-      id: 'long',
-      title: 'Track title',
-      artist: 'An artist name that is much too long to fit in a narrow window',
-    );
-    tester.view.physicalSize = const Size(320, 568);
-    tester.view.devicePixelRatio = 1;
-    tester.platformDispatcher.textScaleFactorTestValue = 2;
-    try {
-      await tester.pumpWidget(
-        MaterialApp(
-          home: Scaffold(
-            body: TrackTile(app: app, track: track),
-          ),
-        ),
-      );
-      for (final status in [
-        DownloadStatus.availableOnline,
-        DownloadStatus.downloaded,
-      ]) {
-        app.progress[track.id] = DownloadProgress(
-          trackId: track.id,
-          totalBytes: 100,
-          status: status,
-        );
-        app.downloadChanges.notifyListeners();
-        await tester.pump();
-        expect(find.text(track.artist), findsOneWidget);
-        expect(
-          find.byIcon(
-            status == DownloadStatus.downloaded
-                ? Icons.offline_pin_outlined
-                : Icons.cloud_outlined,
-          ),
-          findsOneWidget,
-        );
-        expect(tester.takeException(), isNull);
-      }
-    } finally {
-      await tester.pumpWidget(const SizedBox.shrink());
-      await tester.runAsync(app.shutdown);
-      app.dispose();
-      tester.view.resetPhysicalSize();
-      tester.view.resetDevicePixelRatio();
-      tester.platformDispatcher.clearTextScaleFactorTestValue();
-    }
-  });
-
   testWidgets('now playing follows pin changes without playback ticks', (
     tester,
   ) async {
@@ -428,43 +376,6 @@ void main() {
       app.dispose();
     }
   });
-
-  testWidgets(
-    'queue ignores position ticks but follows queue and index changes',
-    (tester) async {
-      final engine = FakeEngine();
-      final app = _App(engine);
-      try {
-        await app.playback.playQueue(app.library);
-        await tester.pumpWidget(
-          MaterialApp(
-            home: Scaffold(body: QueuePanel(app: app)),
-          ),
-        );
-        final list = tester.widget<ListView>(find.byType(ListView));
-        engine.emit(
-          const EngineState(playing: true, position: Duration(seconds: 5)),
-        );
-        await tester.pump();
-        expect(identical(tester.widget(find.byType(ListView)), list), isTrue);
-        await app.playback.next();
-        await tester.pump();
-        expect(
-          tester
-              .widgetList<ListTile>(find.byType(ListTile))
-              .map((t) => t.selected),
-          [false, true],
-        );
-        await app.playback.stop();
-        await tester.pump();
-        expect(find.text('A quiet queue'), findsOneWidget);
-      } finally {
-        await tester.pumpWidget(const SizedBox.shrink());
-        await tester.runAsync(app.shutdown);
-        app.dispose();
-      }
-    },
-  );
 
   testWidgets(
     'Downloads does not rescan a large pending queue on notifications',

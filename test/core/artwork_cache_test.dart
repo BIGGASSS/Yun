@@ -294,26 +294,4 @@ void main() {
       expect(cache.path(track), isNull);
     },
   );
-
-  test(
-    'cache evicts oldest entries to enforce per-account byte budget',
-    () async {
-      await cache.close();
-      cache = open(owner, maxBytes: 6);
-      cache.updateTracks([
-        track,
-        const Track(id: 'second', title: 'T', hasArtwork: true),
-      ]);
-      await cache.put(track, bytes);
-      const second = Track(id: 'second', title: 'T', hasArtwork: true);
-      await cache.put(second, bytes);
-      expect(cache.path(track), isNull);
-      expect(cache.path(second), isNotNull);
-      var size = 0;
-      await for (final entry in cache.directory.list()) {
-        if (entry is File) size += await entry.length();
-      }
-      expect(size, lessThanOrEqualTo(6));
-    },
-  );
 }

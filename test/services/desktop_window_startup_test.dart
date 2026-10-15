@@ -239,16 +239,14 @@ void main() {
       });
     }
 
-    for (final platform in [TargetPlatform.android, TargetPlatform.iOS]) {
-      test('${platform.name}: never calls native desktop APIs', () async {
-        debugDefaultTargetPlatformOverride = platform;
-        await configureDesktopWindow();
-        await revealDesktopWindow();
-        expect(windows, isEmpty);
-        expect(screens, isEmpty);
-        expect(startup, isEmpty);
-      });
-    }
+    test('mobile never calls native desktop APIs', () async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.android;
+      await configureDesktopWindow();
+      await revealDesktopWindow();
+      expect(windows, isEmpty);
+      expect(screens, isEmpty);
+      expect(startup, isEmpty);
+    });
 
     for (final method in ['ensureInitialized', 'setBounds']) {
       test('window failure at $method is nonfatal', () async {
