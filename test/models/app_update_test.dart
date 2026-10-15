@@ -36,12 +36,8 @@ void main() {
 
     test('build metadata is ignored', () {
       expect(compareVersions('1.2.3+10', '1.2.3'), 0);
-      expect(compareVersions('0.1.9+10', '0.1.9'), 0);
+      expect(compareVersions('1.2.3', '1.2.3+10'), 0);
       expect(compareVersions('1.2.3+9', '1.2.4+10'), lessThan(0));
-    });
-
-    test('app build numbers parse from the version', () {
-      expect(compareVersions('0.1.9', '0.1.9+10'), 0);
     });
 
     test('unrecognized versions throw', () {

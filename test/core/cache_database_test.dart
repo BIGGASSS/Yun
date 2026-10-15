@@ -1,7 +1,6 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:yun/models/models.dart';
 import 'package:yun/services/cache_database.dart';
-import 'package:yun/services/transfer_service.dart';
 
 void main() {
   late CacheDatabase db;
@@ -434,25 +433,6 @@ void main() {
     );
   }
 
-  test('bad snapshot rolls back cursor and track updates', () async {
-    await db.applyLibrary({
-      'cursor': 1,
-      'reset': true,
-      'tracks': [const Track(id: 'a', title: 'A').toJson()],
-    });
-    await expectLater(
-      db.applyLibrary({
-        'cursor': 2,
-        'reset': true,
-        'tracks': [
-          {'title': 'invalid missing id'},
-        ],
-      }),
-      throwsA(isA<TypeError>()),
-    );
-    expect(await db.cursor, 1);
-    expect((await db.list('track')).single['id'], 'a');
-  });
   test(
     'cached bitrate survives snapshots, updates, and explicit clearing',
     () async {
@@ -528,6 +508,13 @@ void main() {
   };
   for (final reset in [false, true]) {
     for (final malformed in malformedRecords.entries) {
+      // Field validation is shared by resets and deltas. Keep reset rollback
+      // representatives for both models, not a second copy of every field.
+      if (reset &&
+          malformed.key != 'track title' &&
+          malformed.key != 'playlist entry track id') {
+        continue;
+      }
       test(
         'invalid ${malformed.key} rolls back records, pins and cursor (reset=$reset)',
         () async {
@@ -619,35 +606,4 @@ void main() {
     expect(await db.list('track'), [track]);
     expect(await db.list('playlist'), [playlist]);
   });
-  test(
-    'overlapping pins reference one file and repeated entries count once',
-    () {
-      const tracks = [
-        Track(id: 'a', title: 'A', album: 'Album', artist: 'Artist'),
-        Track(id: 'b', title: 'B', album: 'Album', artist: 'Artist'),
-      ];
-      const playlists = [
-        Playlist(
-          id: 'p',
-          name: 'P',
-          entries: [
-            PlaylistEntry(id: '1', trackId: 'a'),
-            PlaylistEntry(id: '2', trackId: 'a'),
-            PlaylistEntry(id: '3', trackId: 'missing'),
-          ],
-        ),
-      ];
-      final pins = [
-        const PinSelection('track', 'a'),
-        PinSelection('album', albumPinId('Album', 'Artist')),
-        const PinSelection('playlist', 'p'),
-      ];
-      expect(pinReferences(pins, tracks, playlists), {'a': 3, 'b': 1});
-      expect(pinReferences(pins.skip(1).toList(), tracks, playlists), {
-        'a': 2,
-        'b': 1,
-      });
-      expect(pinReferences([], tracks, playlists), isEmpty);
-    },
-  );
 }

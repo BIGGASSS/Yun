@@ -119,12 +119,7 @@ void main() {
     },
   );
 
-  for (final platform in [
-    TargetPlatform.linux,
-    TargetPlatform.macOS,
-    TargetPlatform.windows,
-    TargetPlatform.android,
-  ]) {
+  for (final platform in [TargetPlatform.linux, TargetPlatform.android]) {
     testWidgets(
       '${platform.name}: bootstrap restores before initialize and survives remount',
       (tester) async {

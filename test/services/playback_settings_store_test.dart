@@ -206,32 +206,33 @@ void main() {
       },
     );
 
-    for (final repeatMode in RepeatMode.values) {
-      for (final volume in [0.0, 37.25, 100.0]) {
-        for (final shuffle in [false, true]) {
-          test(
-            'round trip ${repeatMode.name}, volume $volume, shuffle $shuffle',
-            () async {
-              final adapter = await store();
-              final settings = PlaybackSettings(
-                volume: volume,
-                lastPositiveVolume: volume > 0 ? volume : 63.75,
-                shuffle: shuffle,
-                repeatMode: repeatMode,
-              );
-              await adapter.write(settings);
-              final restored = await (await store()).read();
-              expect(restored.toJson(), settings.toJson());
-              final preferences = await SharedPreferences.getInstance();
-              expect(preferences.getKeys(), {'playback.settings'});
-              expect(
-                jsonDecode(preferences.getString('playback.settings')!),
-                settings.toJson(),
-              );
-            },
+    // These fields serialize independently; cover their values, not a product.
+    for (final (repeatMode, volume, shuffle) in [
+      (RepeatMode.off, 0.0, false),
+      (RepeatMode.all, 37.25, true),
+      (RepeatMode.one, 100.0, false),
+    ]) {
+      test(
+        'round trip ${repeatMode.name}, volume $volume, shuffle $shuffle',
+        () async {
+          final adapter = await store();
+          final settings = PlaybackSettings(
+            volume: volume,
+            lastPositiveVolume: volume > 0 ? volume : 63.75,
+            shuffle: shuffle,
+            repeatMode: repeatMode,
           );
-        }
-      }
+          await adapter.write(settings);
+          final restored = await (await store()).read();
+          expect(restored.toJson(), settings.toJson());
+          final preferences = await SharedPreferences.getInstance();
+          expect(preferences.getKeys(), {'playback.settings'});
+          expect(
+            jsonDecode(preferences.getString('playback.settings')!),
+            settings.toJson(),
+          );
+        },
+      );
     }
 
     test(

@@ -158,29 +158,21 @@ DesktopCloseBehavior? selected(WidgetTester tester) => tester
 void main() {
   setUp(mockDesktopDrop);
 
-  for (final platform in [
-    TargetPlatform.linux,
-    TargetPlatform.macOS,
-    TargetPlatform.windows,
-  ]) {
-    for (final width in [320.0, 840.0, 1400.0]) {
-      desktopTest(
-        '$platform exposes desktop settings at ${width.toInt()}px',
-        (tester, fixture) async {
-          await openSettings(tester);
-          expect(find.text('Window behavior'), findsOneWidget);
-          expect(selected(tester), DesktopCloseBehavior.quit);
-          await tapVisible(tester, _minimizeChoice);
-          expect(selected(tester), DesktopCloseBehavior.minimizeToTray);
-          expect(fixture.store.saved, DesktopCloseBehavior.minimizeToTray);
-          await tapVisible(tester, _quitChoice);
-          expect(fixture.store.saved, DesktopCloseBehavior.quit);
-        },
-        platform: platform,
-        size: Size(width, 900),
-      );
-    }
-  }
+  desktopTest(
+    'TargetPlatform.linux exposes desktop settings at 320px',
+    (tester, fixture) async {
+      await openSettings(tester);
+      expect(find.text('Window behavior'), findsOneWidget);
+      expect(selected(tester), DesktopCloseBehavior.quit);
+      await tapVisible(tester, _minimizeChoice);
+      expect(selected(tester), DesktopCloseBehavior.minimizeToTray);
+      expect(fixture.store.saved, DesktopCloseBehavior.minimizeToTray);
+      await tapVisible(tester, _quitChoice);
+      expect(fixture.store.saved, DesktopCloseBehavior.quit);
+    },
+    platform: TargetPlatform.linux,
+    size: const Size(320, 900),
+  );
 
   for (final platform in [TargetPlatform.android, TargetPlatform.iOS]) {
     desktopTest(

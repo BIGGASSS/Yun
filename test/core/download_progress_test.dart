@@ -820,6 +820,13 @@ void main() {
       'truncated file',
       'not a file',
     ]) {
+      // Both interrupted statuses share recovery logic. Exercise both held and
+      // resumable verification outcomes without repeating every invalid file.
+      if (status == DownloadStatus.verifying &&
+          invalid != 'missing record' &&
+          invalid != 'truncated file') {
+        continue;
+      }
       test(
         '$status preserves download intent with $invalid instead of valid audio',
         () async {
