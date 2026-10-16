@@ -68,6 +68,10 @@ jobs:
           fvm flutter precache --linux
           FLUTTER_ROOT="$PWD/.fvm/flutter_sdk" bash packages/flutter_secure_storage_linux/linux/test/run_method_response_tests.sh
       - run: fvm flutter test
+      # Calendar-day math regressions only reproduce under a DST-observing
+      # timezone; the file also runs (benignly) in the plain test step above.
+      - name: Stats date math across DST transitions
+        run: TZ=America/New_York fvm flutter test test/ui/stats_dst_test.dart
       - run: RUN_NATIVE_PLAYBACK=1 fvm flutter test test/services/native_playback_test.dart
       - run: python3 scripts/api_smoke.py --binary "$YUN_SERVER_BINARY"
   deployment:

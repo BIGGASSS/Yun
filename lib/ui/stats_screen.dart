@@ -77,6 +77,7 @@ class _StatsScreenState extends State<StatsScreen> {
   bool _loading = false;
   String? _error;
   int _request = 0;
+  String? _loadedKey;
 
   // Representative artwork and play queues, rebuilt only when the account's
   // track list changes identity.
@@ -109,17 +110,11 @@ class _StatsScreenState extends State<StatsScreen> {
       _error = null;
     });
     final now = widget._now();
+    // Calendar-day arithmetic: DateTime constructor overflow handles month
+    // boundaries and stays on local midnights across DST transitions.
     final from = switch (_range) {
-      '7 days' => DateTime(
-        now.year,
-        now.month,
-        now.day,
-      ).subtract(const Duration(days: 6)),
-      '30 days' => DateTime(
-        now.year,
-        now.month,
-        now.day,
-      ).subtract(const Duration(days: 29)),
+      '7 days' => DateTime(now.year, now.month, now.day - 6),
+      '30 days' => DateTime(now.year, now.month, now.day - 29),
       'Custom' => _custom?.start,
       _ => null,
     };
@@ -134,6 +129,10 @@ class _StatsScreenState extends State<StatsScreen> {
               )
             : null,
       );
+      // Tag the snapshot with the range that produced it. Results are only
+      // presented while the selection still matches; a failed range change
+      // must not dress previous-range totals in new-range controls.
+      _loadedKey = _selectionKey();
     } catch (error) {
       if (mounted && request == _request) setState(() => _error = '$error');
     } finally {
@@ -172,6 +171,15 @@ class _StatsScreenState extends State<StatsScreen> {
   void _jumpToTop() {
     if (_scroll.hasClients) _scroll.jumpTo(0);
   }
+
+  /// Identifies the range selection (including custom dates) so displayed
+  /// stats can be tied to the load that produced them.
+  String _selectionKey() =>
+      '$_range|${_custom?.start.millisecondsSinceEpoch}|'
+      '${_custom?.end.millisecondsSinceEpoch}';
+
+  bool get _stale =>
+      _app.stats != null && _loadedKey != null && _loadedKey != _selectionKey();
 
   static String _norm(String value) => value.trim().toLowerCase();
 
@@ -229,6 +237,17 @@ class _StatsScreenState extends State<StatsScreen> {
   static DateTime _dayStart(DateTime value) =>
       DateTime(value.year, value.month, value.day);
 
+  /// Calendar-day distance between local dates. UTC ordinals are exact: two
+  /// local midnights can be 23 or 25 hours apart across DST transitions.
+  static int _dayOrdinal(DateTime local) =>
+      DateTime.utc(local.year, local.month, local.day).millisecondsSinceEpoch ~/
+      Duration.millisecondsPerDay;
+
+  /// The local midnight `days` calendar days after [local]; the constructor
+  /// normalizes month/year overflow instead of stepping 24-hour durations.
+  static DateTime _addCalendarDays(DateTime local, int days) =>
+      DateTime(local.year, local.month, local.day + days);
+
   /// Buckets history into days, or months for long ranges. The server caps
   /// history at the newest 100 sessions, so long-range charts are recent.
   ({List<_Bucket> buckets, bool daily}) _activity(ServerStats stats) {
@@ -237,9 +256,9 @@ class _StatsScreenState extends State<StatsScreen> {
     var to = today;
     final custom = _custom;
     if (_range == '7 days') {
-      from = today.subtract(const Duration(days: 6));
+      from = _addCalendarDays(today, -6);
     } else if (_range == '30 days') {
-      from = today.subtract(const Duration(days: 29));
+      from = _addCalendarDays(today, -29);
     } else if (_range == 'Custom' && custom != null) {
       from = _dayStart(custom.start);
       to = _dayStart(custom.end);
@@ -256,7 +275,7 @@ class _StatsScreenState extends State<StatsScreen> {
       }
       from = first;
     }
-    final days = to.difference(from).inDays + 1;
+    final days = _dayOrdinal(to) - _dayOrdinal(from) + 1;
     if (days <= 0) return (buckets: const <_Bucket>[], daily: true);
     String listened(int ms) => ms == 0
         ? 'No listening'
@@ -264,9 +283,9 @@ class _StatsScreenState extends State<StatsScreen> {
     if (days <= 45) {
       final sums = List<int>.filled(days, 0);
       for (final entry in stats.history) {
-        final index = _dayStart(
-          DateTime.fromMillisecondsSinceEpoch(entry.startedAt),
-        ).difference(from).inDays;
+        final index =
+            _dayOrdinal(DateTime.fromMillisecondsSinceEpoch(entry.startedAt)) -
+            _dayOrdinal(from);
         if (index >= 0 && index < days) sums[index] += entry.listenedMs;
       }
       return (
@@ -274,7 +293,7 @@ class _StatsScreenState extends State<StatsScreen> {
         buckets: [
           for (var i = 0; i < days; i++)
             () {
-              final day = from.add(Duration(days: i));
+              final day = _addCalendarDays(from, i);
               return _Bucket(
                 ms: sums[i],
                 label: days <= 7
@@ -318,7 +337,7 @@ class _StatsScreenState extends State<StatsScreen> {
 
   String _dayLabel(DateTime day) {
     final today = _dayStart(widget._now());
-    final diff = today.difference(_dayStart(day)).inDays;
+    final diff = _dayOrdinal(today) - _dayOrdinal(day);
     if (diff == 0) return 'Today';
     if (diff == 1) return 'Yesterday';
     if (diff < 7) return _weekdayLong[day.weekday - 1];
@@ -401,10 +420,11 @@ class _StatsScreenState extends State<StatsScreen> {
           ],
         ),
         const SizedBox(height: 10),
-        // Reserve the progress line's height so content never jumps.
+        // Reserve the progress line's height so content never jumps. While a
+        // new range is loading, the body shows the centered progress instead.
         SizedBox(
           height: 3,
-          child: _loading && stats != null
+          child: _loading && stats != null && !_stale
               ? const QuietProgress(label: 'Loading listening statistics')
               : null,
         ),
@@ -417,7 +437,7 @@ class _StatsScreenState extends State<StatsScreen> {
                 'totals include server-confirmed listening.',
           ),
         ],
-        if (_error != null && stats != null) ...[
+        if (_error != null && stats != null && !_stale) ...[
           const SizedBox(height: 12),
           _ErrorCard(message: _error!, onRetry: _loading ? null : _load),
         ],
@@ -426,21 +446,10 @@ class _StatsScreenState extends State<StatsScreen> {
   }
 
   List<Widget> _body(BuildContext context, ServerStats? stats) {
-    if (stats == null) {
-      if (_loading) {
-        return const [
-          SliverFillRemaining(
-            hasScrollBody: false,
-            child: Center(
-              child: SizedBox(
-                width: 220,
-                child: QuietProgress(label: 'Loading listening statistics'),
-              ),
-            ),
-          ),
-        ];
-      }
-      if (_error != null) {
+    if (stats == null || _stale) {
+      // A failed range change must not present the previous range's results
+      // under the new selection; only same-range refreshes keep content.
+      if (!_loading && _error != null) {
         return [
           SliverFillRemaining(
             hasScrollBody: false,
@@ -457,13 +466,26 @@ class _StatsScreenState extends State<StatsScreen> {
           ),
         ];
       }
+      if (!_loading && stats == null) {
+        return const [
+          SliverFillRemaining(
+            hasScrollBody: false,
+            child: EmptyState(
+              icon: Icons.headphones_outlined,
+              title: 'Press play to begin',
+              message: 'Listening history appears here after your first synced session.',
+            ),
+          ),
+        ];
+      }
       return const [
         SliverFillRemaining(
           hasScrollBody: false,
-          child: EmptyState(
-            icon: Icons.headphones_outlined,
-            title: 'Press play to begin',
-            message: 'Listening history appears here after your first synced session.',
+          child: Center(
+            child: SizedBox(
+              width: 220,
+              child: QuietProgress(label: 'Loading listening statistics'),
+            ),
           ),
         ),
       ];

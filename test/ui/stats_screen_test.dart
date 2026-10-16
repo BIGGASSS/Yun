@@ -209,6 +209,49 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
+  testWidgets('failed range change never presents previous-range results', (
+    tester,
+  ) async {
+    final app = _TestApp(serverStats: _stats(now));
+    addTearDown(app.dispose);
+    await pump(tester, app);
+    expect(find.text('First song'), findsWidgets);
+
+    app.serverStats = null; // subsequent loads fail
+    await tester.tap(find.text('7 days'));
+    await tester.pumpAndSettle();
+
+    // All-time results must not remain under the 7 days selection, and the
+    // chart must not re-bucket old history against the new range.
+    expect(find.text('Could not load stats'), findsOneWidget);
+    expect(find.text('First song'), findsNothing);
+    expect(find.text('Activity'), findsNothing);
+
+    app.serverStats = _stats(now);
+    await tester.tap(find.text('Retry'));
+    await tester.pumpAndSettle();
+    expect(find.text('First song'), findsWidgets);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('same-range refresh failure keeps results with an inline error', (
+    tester,
+  ) async {
+    final app = _TestApp(serverStats: _stats(now));
+    addTearDown(app.dispose);
+    await pump(tester, app);
+
+    app.serverStats = null;
+    await tester.tap(find.byTooltip('Refresh listening stats'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('First song'), findsWidgets);
+    expect(find.text('Could not load stats'), findsNothing);
+    expect(find.text('Retry'), findsOneWidget);
+    expect(find.textContaining('Server unavailable'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('signed out shows the listening story prompt', (tester) async {
     final app = _TestApp(signedIn: false);
     addTearDown(app.dispose);
