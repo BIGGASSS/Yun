@@ -178,8 +178,10 @@ class _StatsScreenState extends State<StatsScreen> {
       '$_range|${_custom?.start.millisecondsSinceEpoch}|'
       '${_custom?.end.millisecondsSinceEpoch}';
 
-  bool get _stale =>
-      _app.stats != null && _loadedKey != null && _loadedKey != _selectionKey();
+  /// The controller's cached snapshot outlives this screen (navigation
+  /// recreates the state), so an untagged snapshot is unverified: present it
+  /// only after this instance has loaded and tagged the current selection.
+  bool get _stale => _app.stats != null && _loadedKey != _selectionKey();
 
   static String _norm(String value) => value.trim().toLowerCase();
 

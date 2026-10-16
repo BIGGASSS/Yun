@@ -252,6 +252,46 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
+  testWidgets(
+    'recreated screen does not present cached stats from another range',
+    (tester) async {
+      final app = _TestApp(serverStats: _stats(now));
+      addTearDown(app.dispose);
+      await pump(tester, app);
+
+      // Load a non-default range, then recreate the screen as shell
+      // navigation does; the controller retains the 7-day snapshot.
+      await tester.tap(find.text('7 days'));
+      await tester.pumpAndSettle();
+      expect(find.text('First song'), findsWidgets);
+
+      app.serverStats = null; // the recreated screen's initial load fails
+      // Simulate shell navigation: leaving Stats disposes the screen state,
+      // returning recreates it, while the controller retains the snapshot.
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: YunTheme.light(),
+          home: const Scaffold(body: SizedBox()),
+        ),
+      );
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: YunTheme.light(),
+          home: Scaffold(
+            body: StatsScreen(app: app, now: () => now),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      // The untagged 7-day snapshot must never be presented as All time.
+      expect(find.text('Could not load stats'), findsOneWidget);
+      expect(find.text('First song'), findsNothing);
+      expect(find.text('Activity'), findsNothing);
+      expect(tester.takeException(), isNull);
+    },
+  );
+
   testWidgets('signed out shows the listening story prompt', (tester) async {
     final app = _TestApp(signedIn: false);
     addTearDown(app.dispose);
