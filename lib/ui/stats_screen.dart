@@ -17,6 +17,7 @@ class StatsScreen extends StatefulWidget {
 class _StatsScreenState extends State<StatsScreen> {
   String _range = 'All time';
   DateTimeRange? _custom;
+  _ShownRange? _shown;
   bool _loading = false;
   String? _error;
   int _request = 0;
@@ -31,18 +32,25 @@ class _StatsScreenState extends State<StatsScreen> {
 
   Future<void> _load() async {
     final request = ++_request;
+    final range = _range;
+    final custom = _custom;
     setState(() {
       _loading = true;
       _error = null;
     });
     final window = ListeningStats.window(
-      range: _range,
-      custom: _custom,
+      range: range,
+      custom: custom,
       now: DateTime.now(),
     );
     try {
       await widget.app.loadStats(from: window.from, to: window.to);
-      if (mounted && request == _request) setState(() => _loading = false);
+      if (mounted && request == _request) {
+        setState(() {
+          _loading = false;
+          _shown = _ShownRange(range, custom);
+        });
+      }
     } catch (error) {
       if (mounted && request == _request) {
         setState(() {
@@ -72,7 +80,7 @@ class _StatsScreenState extends State<StatsScreen> {
   @override
   Widget build(BuildContext context) {
     final app = widget.app;
-    final stats = app.stats;
+    final stats = _statsForSelection(app.stats);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -201,6 +209,16 @@ class _StatsScreenState extends State<StatsScreen> {
         ),
       ],
     );
+  }
+
+  /// [AppController.stats] is whatever last succeeded. Show it only for the
+  /// range that produced it, so a failed range change cannot relabel it.
+  ServerStats? _statsForSelection(ServerStats? stats) {
+    final shown = _shown;
+    if (stats == null || shown == null || !shown.matches(_range, _custom)) {
+      return null;
+    }
+    return stats;
   }
 
   Widget _rangeControls() {
@@ -631,6 +649,19 @@ class _PeriodEmpty extends StatelessWidget {
     title: 'Nothing in this period',
     message: 'Choose a wider date range or listen to some music.',
   );
+}
+
+/// Range whose successful load produced the stats currently on screen.
+class _ShownRange {
+  const _ShownRange(this.range, this.custom);
+  final String range;
+  final DateTimeRange? custom;
+
+  bool matches(String range, DateTimeRange? custom) {
+    if (this.range != range) return false;
+    if (range != 'Custom') return true;
+    return this.custom == custom;
+  }
 }
 
 /// Local date window for `GET /stats`. [to] is exclusive, matching the server.

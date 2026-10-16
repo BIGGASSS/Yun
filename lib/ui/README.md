@@ -64,7 +64,8 @@ the specified major. Core dependencies must also be installed before running
 - Listening history is grouped by day, with top lists shown against the
   longest entry in that list. Date ranges stay inclusive local dates (server
   `to` is exclusive). Pending listening outbox counts are explained, and a
-  failed refresh keeps the last loaded stats.
+  failed refresh of that same range keeps the last loaded stats. A different
+  range shows them only after that range loads.
 - Server login/logout, theme light/dark/system (persisted by bootstrap), device
   text scaling/reduced motion, labeled controls, Ctrl/Cmd shortcuts.
 

@@ -323,6 +323,86 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
+  testWidgets(
+    'a failed range change does not present the previous totals as the new range',
+    (tester) async {
+      final app = _StatsApp();
+      await size(tester, const Size(900, 700));
+      await show(tester, app);
+      expect(find.text('12h 40m'), findsOneWidget);
+      expect(find.text('First light'), findsOneWidget);
+      expect(
+        tester
+            .widget<ChoiceChip>(find.widgetWithText(ChoiceChip, 'All time'))
+            .selected,
+        isTrue,
+      );
+
+      app.fail = true;
+      await tester.tap(find.widgetWithText(ChoiceChip, '7 days'));
+      await tester.pump();
+      await tester.pump();
+
+      final today = DateTime.now();
+      expect(
+        app.lastFrom,
+        DateTime(
+          today.year,
+          today.month,
+          today.day,
+        ).subtract(const Duration(days: 6)),
+      );
+      expect(
+        tester
+            .widget<ChoiceChip>(find.widgetWithText(ChoiceChip, '7 days'))
+            .selected,
+        isTrue,
+      );
+      expect(
+        tester
+            .widget<ChoiceChip>(find.widgetWithText(ChoiceChip, 'All time'))
+            .selected,
+        isFalse,
+      );
+      expect(find.text('12h 40m'), findsNothing);
+      expect(find.text('38'), findsNothing);
+      expect(find.text('First light'), findsNothing);
+      expect(find.text('Stats did not load'), findsOneWidget);
+      expect(find.textContaining('Stats unavailable'), findsOneWidget);
+
+      app.fail = false;
+      app.payload = ServerStats(
+        listenedMs: 5 * 60000,
+        playCount: 2,
+        history: [
+          _history(
+            'week',
+            'track-9',
+            'Week only',
+            'Ada North',
+            DateTime(2026, 10, 16, 9),
+            5 * 60000,
+            true,
+          ),
+        ],
+      );
+      await tester.tap(find.widgetWithText(FilledButton, 'Try again'));
+      await tester.pump();
+      await tester.pump();
+      expect(find.text('Week only'), findsOneWidget);
+      expect(find.text('5m'), findsWidgets);
+      expect(find.text('12h 40m'), findsNothing);
+      expect(find.text('First light'), findsNothing);
+      expect(
+        tester
+            .widget<ChoiceChip>(find.widgetWithText(ChoiceChip, '7 days'))
+            .selected,
+        isTrue,
+      );
+      expect(tester.takeException(), isNull);
+    },
+  );
+
   testWidgets('the first load failure offers another try', (tester) async {
     final app = _StatsApp()..fail = true;
     await size(tester, const Size(900, 700));
