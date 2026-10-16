@@ -61,8 +61,10 @@ the specified major. Core dependencies must also be installed before running
   progress, cancellation/retry. Sources are copied into durable account-private
   staging storage. Cancelled uploads require selecting the source file again;
   macOS drop bookmarks remain scoped until the copy completes.
-- Listening history/top lists and inclusive local-date range selection (server
-  `to` is exclusive). Pending listening outbox counts are explained.
+- Listening history is grouped by day, with top lists shown against the
+  longest entry in that list. Date ranges stay inclusive local dates (server
+  `to` is exclusive). Pending listening outbox counts are explained, and a
+  failed refresh keeps the last loaded stats.
 - Server login/logout, theme light/dark/system (persisted by bootstrap), device
   text scaling/reduced motion, labeled controls, Ctrl/Cmd shortcuts.
 

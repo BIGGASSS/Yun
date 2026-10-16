@@ -343,7 +343,12 @@ class _AppShellState extends State<_AppShell> {
                                                 widget.collectionSettings,
                                           ),
                                           2 => DownloadsScreen(app: app),
-                                          3 => StatsScreen(app: app),
+                                          3 => StatsScreen(
+                                            app: app,
+                                            onSignIn: () => setState(
+                                              () => _destination = 4,
+                                            ),
+                                          ),
                                           _ => SettingsScreen(
                                             app: app,
                                             desktop: widget.desktop,
