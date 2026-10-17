@@ -1,8 +1,11 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:yun/core/app_controller.dart';
 import 'package:yun/ui/stats_screen.dart';
 import 'package:yun/ui/theme.dart';
+import 'package:yun/ui/widgets.dart';
 
 class _TestApp extends AppController {
   _TestApp({this.signedIn = true, this.serverStats})
@@ -24,6 +27,10 @@ class _TestApp extends AppController {
   bool historyFails = false;
   int historyRequests = 0;
   HistoryItem? lastBefore;
+  // When true, every loadHistory call parks on its own completer so tests
+  // control exactly when each page arrives.
+  bool manualHistory = false;
+  final historyCompleters = <Completer<List<HistoryItem>>>[];
 
   final library = <Track>[
     const Track(
@@ -57,11 +64,16 @@ class _TestApp extends AppController {
     DateTime? to,
     HistoryItem? before,
     int limit = 100,
-  }) async {
+  }) {
     historyRequests++;
     lastBefore = before;
+    if (manualHistory) {
+      final completer = Completer<List<HistoryItem>>();
+      historyCompleters.add(completer);
+      return completer.future;
+    }
     if (historyFails) throw StateError('Server unavailable');
-    return olderHistory;
+    return Future.value(olderHistory);
   }
 }
 
@@ -119,6 +131,23 @@ ServerStats _stats(DateTime now) => ServerStats(
       countedPlay: false,
     ),
   ],
+);
+
+void _scrollToEnd(WidgetTester tester) {
+  final state = tester.state<ScrollableState>(find.byType(Scrollable));
+  state.position.jumpTo(state.position.maxScrollExtent);
+}
+
+/// An older page item from 40 days before [now], labelled '4 Sep'.
+HistoryItem _oldItem(DateTime now) => HistoryItem(
+  sessionId: 'old',
+  deviceId: 'd1',
+  trackId: 'one',
+  title: 'First song',
+  artist: 'Artist A',
+  startedAt: now.subtract(const Duration(days: 40)).millisecondsSinceEpoch,
+  listenedMs: 60000,
+  countedPlay: true,
 );
 
 /// A stats payload with a full 100-session first page (the server's stats
@@ -334,15 +363,7 @@ void main() {
     expect(find.text('4 Sep'), findsOneWidget);
 
     // A short page ends pagination: scrolling again asks for nothing more.
-    tester
-        .state<ScrollableState>(find.byType(Scrollable))
-        .position
-        .jumpTo(
-          tester
-              .state<ScrollableState>(find.byType(Scrollable))
-              .position
-              .maxScrollExtent,
-        );
+    _scrollToEnd(tester);
     await tester.pumpAndSettle();
     expect(app.historyRequests, 1);
     expect(tester.takeException(), isNull);
@@ -371,15 +392,7 @@ void main() {
     await pump(tester, app);
     await tester.tap(find.text('History'));
     await tester.pumpAndSettle();
-    tester
-        .state<ScrollableState>(find.byType(Scrollable))
-        .position
-        .jumpTo(
-          tester
-              .state<ScrollableState>(find.byType(Scrollable))
-              .position
-              .maxScrollExtent,
-        );
+    _scrollToEnd(tester);
     await tester.pumpAndSettle();
     expect(find.text('Older sessions did not load'), findsOneWidget);
 
@@ -387,6 +400,87 @@ void main() {
     await tester.tap(find.text('Retry'));
     await tester.pumpAndSettle();
     expect(find.text('Older sessions did not load'), findsNothing);
+    expect(find.text('4 Sep'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('range change while an older page loads resets pagination', (
+    tester,
+  ) async {
+    final app = _TestApp(serverStats: _fullHistoryPage(now))
+      ..manualHistory = true;
+    addTearDown(app.dispose);
+    await pump(tester, app);
+    await tester.tap(find.text('History'));
+    await tester.pumpAndSettle();
+
+    _scrollToEnd(tester);
+    await tester.pump();
+    expect(app.historyRequests, 1);
+    expect(find.byType(QuietProgress), findsOneWidget);
+
+    // The range changes while the page request is in flight. Back to the
+    // top first, where the range chips live.
+    tester.state<ScrollableState>(find.byType(Scrollable)).position.jumpTo(0);
+    await tester.pump();
+    await tester.tap(find.text('30 days'));
+    await tester.pump();
+    await tester.pump();
+
+    // The superseded page completes late and must be discarded without
+    // leaving the pagination spinner stuck for the new range.
+    app.historyCompleters[0].complete([_oldItem(now)]);
+    await tester.pump();
+    await tester.pump();
+    expect(find.text('4 Sep'), findsNothing);
+    expect(find.byType(QuietProgress), findsNothing);
+
+    // Pagination still works against the refreshed first page.
+    _scrollToEnd(tester);
+    await tester.pump();
+    expect(app.historyRequests, 2);
+    expect(app.lastBefore?.sessionId, 's99');
+    app.historyCompleters[1].complete([_oldItem(now)]);
+    await tester.pump();
+    await tester.pump();
+    expect(find.text('4 Sep'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('same-range refresh discards an older page loaded mid-flight', (
+    tester,
+  ) async {
+    final app = _TestApp(serverStats: _fullHistoryPage(now))
+      ..manualHistory = true;
+    addTearDown(app.dispose);
+    await pump(tester, app);
+    await tester.tap(find.text('History'));
+    await tester.pumpAndSettle();
+
+    _scrollToEnd(tester);
+    await tester.pump();
+    expect(app.historyRequests, 1);
+
+    // Scroll back up and refresh the same range: the selection key is
+    // unchanged, so only a per-load generation can invalidate the page.
+    tester.state<ScrollableState>(find.byType(Scrollable)).position.jumpTo(0);
+    await tester.pump();
+    await tester.tap(find.byTooltip('Refresh listening stats'));
+    await tester.pump();
+    await tester.pump();
+
+    app.historyCompleters[0].complete([_oldItem(now)]);
+    await tester.pump();
+    await tester.pump();
+    expect(find.text('4 Sep'), findsNothing);
+
+    // Scrolling back down starts a fresh page against the refreshed list.
+    _scrollToEnd(tester);
+    await tester.pump();
+    expect(app.historyRequests, 2);
+    app.historyCompleters[1].complete([_oldItem(now)]);
+    await tester.pump();
+    await tester.pump();
     expect(find.text('4 Sep'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });

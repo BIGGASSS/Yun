@@ -87,6 +87,9 @@ class _StatsScreenState extends State<StatsScreen> {
   bool _historyDone = false;
   bool _historyLoading = false;
   bool _historyFailed = false;
+  // Bumped on every successful stats load so pages requested against a
+  // superseded first page (range change or same-range refresh) are discarded.
+  int _historyGeneration = 0;
 
   // Representative artwork and play queues, rebuilt only when the account's
   // track list changes identity.
@@ -133,7 +136,7 @@ class _StatsScreenState extends State<StatsScreen> {
       setState(() => _historyDone = true);
       return;
     }
-    final key = _loadedKey;
+    final generation = _historyGeneration;
     setState(() {
       _historyLoading = true;
       _historyFailed = false;
@@ -144,15 +147,16 @@ class _StatsScreenState extends State<StatsScreen> {
         to: _loadedTo,
         before: last,
       );
-      // A range change or refresh mid-flight supersedes this page.
-      if (!mounted || key != _loadedKey) return;
+      // A reload mid-flight supersedes this page: its cursor came from a
+      // first page that may no longer be the one on screen.
+      if (!mounted || generation != _historyGeneration) return;
       setState(() {
         _historyLoading = false;
         _older.addAll(page);
         if (page.length < 100) _historyDone = true;
       });
     } catch (error) {
-      if (!mounted || key != _loadedKey) return;
+      if (!mounted || generation != _historyGeneration) return;
       setState(() {
         _historyLoading = false;
         // Servers without the history endpoint simply have no older pages.
@@ -193,8 +197,10 @@ class _StatsScreenState extends State<StatsScreen> {
       _loadedTo = to;
       if (mounted && request == _request) {
         setState(() {
+          _historyGeneration++;
           _older.clear();
           _historyDone = false;
+          _historyLoading = false;
           _historyFailed = false;
         });
       }
