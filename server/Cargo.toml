@@ -17,6 +17,7 @@ anyhow = "1"
 argon2 = "0.5"
 axum = { version = "0.8", features = ["macros"] }
 clap = { version = "4", features = ["derive", "env"] }
+const_format = "0.2.36"
 hex = "0.4"
 http-body = "1"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }

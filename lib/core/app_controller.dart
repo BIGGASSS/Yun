@@ -1519,6 +1519,34 @@ class AppController extends ChangeNotifier implements SystemMediaArtwork {
         return result;
       });
 
+  /// Fetches the next page of session history. [before] is the last item of
+  /// the previous page; pages continue strictly after it. Returns fewer than
+  /// [limit] items once the range is exhausted.
+  Future<List<HistoryItem>> loadHistory({
+    DateTime? from,
+    DateTime? to,
+    HistoryItem? before,
+    int limit = 100,
+  }) => _online((db, epoch) async {
+    final result = await _api.json(
+      '/history',
+      query: {
+        if (from != null) 'from': from.millisecondsSinceEpoch,
+        if (to != null) 'to': to.millisecondsSinceEpoch,
+        if (before != null) ...{
+          'before_start': before.startedAt,
+          'before_device': before.deviceId,
+          'before_session': before.sessionId,
+        },
+        'limit': limit,
+      },
+    );
+    return [
+      for (final item in result['history'] as List? ?? const [])
+        HistoryItem.fromJson(Map<String, dynamic>.from(item as Map)),
+    ];
+  });
+
   /// Call and await at orderly shutdown; credentials remain for offline restore.
   Future<void> shutdown() {
     // Terminal synchronously, before any in-flight transition can resume.

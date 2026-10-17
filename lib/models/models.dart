@@ -259,6 +259,7 @@ class StatsItem {
 class HistoryItem {
   const HistoryItem({
     required this.sessionId,
+    this.deviceId = '',
     required this.trackId,
     required this.title,
     required this.artist,
@@ -266,11 +267,12 @@ class HistoryItem {
     required this.listenedMs,
     required this.countedPlay,
   });
-  final String sessionId, trackId, title, artist;
+  final String sessionId, deviceId, trackId, title, artist;
   final int startedAt, listenedMs;
   final bool countedPlay;
   factory HistoryItem.fromJson(Map<String, dynamic> j) => HistoryItem(
     sessionId: j['session_id'] as String,
+    deviceId: j['device_id'] as String? ?? '',
     trackId: j['track_id'] as String,
     title: j['title'] as String? ?? '',
     artist: j['artist'] as String? ?? '',
@@ -288,10 +290,15 @@ class ServerStats {
     this.topArtists = const [],
     this.topAlbums = const [],
     this.history = const [],
+    this.activity = const [],
   });
   final int listenedMs, playCount;
   final List<StatsItem> topTracks, topArtists, topAlbums;
   final List<HistoryItem> history;
+
+  /// Per-day listening totals for the range, covering every synced segment —
+  /// unlike [history], this is not capped, so activity charts use it.
+  final List<StatsActivityItem> activity;
   factory ServerStats.fromJson(Map<String, dynamic> j) {
     List<StatsItem> items(String key) => (j[key] as List? ?? [])
         .map((e) => StatsItem.fromJson(Map<String, dynamic>.from(e as Map)))
@@ -305,6 +312,30 @@ class ServerStats {
       history: (j['history'] as List? ?? [])
           .map((e) => HistoryItem.fromJson(Map<String, dynamic>.from(e as Map)))
           .toList(),
+      activity: (j['activity'] as List? ?? [])
+          .map(
+            (e) =>
+                StatsActivityItem.fromJson(Map<String, dynamic>.from(e as Map)),
+          )
+          .toList(),
     );
   }
+}
+
+/// One listener-local calendar day of playback. [day] counts days since the
+/// Unix epoch in the timezone the segments recorded, so it matches the
+/// calendar date the listener experienced.
+class StatsActivityItem {
+  const StatsActivityItem({
+    required this.day,
+    required this.listenedMs,
+    required this.playCount,
+  });
+  final int day, listenedMs, playCount;
+  factory StatsActivityItem.fromJson(Map<String, dynamic> j) =>
+      StatsActivityItem(
+        day: _int(j['day']),
+        listenedMs: _int(j['listened_ms']),
+        playCount: _int(j['play_count']),
+      );
 }

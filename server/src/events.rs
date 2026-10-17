@@ -139,12 +139,22 @@ struct TopAlbum {
 #[derive(Serialize, Deserialize)]
 struct History {
     session_id: String,
+    device_id: String,
     track_id: String,
     title: String,
     artist: String,
     started_at: i64,
     listened_ms: i64,
     counted_play: bool,
+}
+// A listener-local calendar day of playback: `day` counts days since the Unix
+// epoch in the timezone each segment recorded, so charts never depend on the
+// capped history list.
+#[derive(Serialize, Deserialize)]
+struct Activity {
+    day: i64,
+    listened_ms: i64,
+    play_count: i64,
 }
 #[derive(Serialize, Deserialize)]
 pub(crate) struct Stats {
@@ -154,13 +164,14 @@ pub(crate) struct Stats {
     top_artists: Vec<TopArtist>,
     top_albums: Vec<TopAlbum>,
     history: Vec<History>,
+    activity: Vec<Activity>,
 }
 // First use the range index to find candidate sessions. Only their complete
 // histories enter the window. The date filter MUST stay after the window so
 // offline insertion/reordering and threshold crossings across dates are stable.
 // MATERIALIZED shares selected rows across all five aggregates in one statement;
 // no pooled-connection temporary table or repeated all-history window is needed.
-const STATS: &str = "WITH candidates AS MATERIALIZED (
+const SELECTED: &str = "WITH candidates AS MATERIALIZED (
  SELECT DISTINCT device_id,session_id FROM listening_events WHERE user_id=?1 AND started_at>=?2 AND started_at<?3
 ), cumulative AS (
  SELECT e.*,t.title,t.artist,t.album,CASE WHEN t.album_artist='' THEN t.artist ELSE t.album_artist END AS album_artist,
@@ -171,8 +182,13 @@ const STATS: &str = "WITH candidates AS MATERIALIZED (
 ), selected AS MATERIALIZED (
  SELECT *,CASE WHEN running>=threshold AND running-listened_ms<threshold THEN 1 ELSE 0 END AS counted_play
  FROM cumulative WHERE started_at>=?2 AND started_at<?3
-)
-SELECT json_object(
+)";
+// One row per session, newest first. device_id pairs with session_id and
+// started_at to form the keyset cursor for the paginated history endpoint.
+const HISTORY_ROWS: &str = "json_object('session_id',session_id,'device_id',device_id,'track_id',track_id,'title',title,'artist',artist,'started_at',start,'listened_ms',ms,'counted_play',json(CASE WHEN plays=1 THEN 'true' ELSE 'false' END))";
+const STATS: &str = const_format::concatcp!(
+    SELECTED,
+    "SELECT json_object(
  'listened_ms',COALESCE(SUM(listened_ms),0),'play_count',COALESCE(SUM(counted_play),0),
  'top_tracks',(SELECT json_group_array(json_object('id',track_id,'title',title,'artist',artist,'listened_ms',ms,'play_count',plays)) FROM (
  SELECT track_id,title,artist,SUM(listened_ms) ms,SUM(counted_play) plays FROM selected GROUP BY track_id ORDER BY ms DESC,plays DESC,track_id LIMIT 50)),
@@ -180,9 +196,91 @@ SELECT json_object(
  SELECT artist,SUM(listened_ms) ms,SUM(counted_play) plays FROM selected GROUP BY artist ORDER BY ms DESC,plays DESC,artist LIMIT 50)),
  'top_albums',(SELECT json_group_array(json_object('name',album,'artist',album_artist,'listened_ms',ms,'play_count',plays)) FROM (
  SELECT album,album_artist,SUM(listened_ms) ms,SUM(counted_play) plays FROM selected GROUP BY album,album_artist ORDER BY ms DESC,plays DESC,album,album_artist LIMIT 50)),
- 'history',(SELECT json_group_array(json_object('session_id',session_id,'track_id',track_id,'title',title,'artist',artist,'started_at',start,'listened_ms',ms,'counted_play',json(CASE WHEN plays=1 THEN 'true' ELSE 'false' END))) FROM (
- SELECT device_id,session_id,track_id,title,artist,MIN(started_at) start,SUM(listened_ms) ms,MAX(counted_play) plays FROM selected GROUP BY device_id,session_id ORDER BY start DESC,device_id,session_id LIMIT 100))
-) FROM selected";
+ 'history',(SELECT json_group_array(",
+    HISTORY_ROWS,
+    ") FROM (
+ SELECT device_id,session_id,track_id,title,artist,MIN(started_at) start,SUM(listened_ms) ms,MAX(counted_play) plays FROM selected GROUP BY device_id,session_id ORDER BY start DESC,device_id,session_id LIMIT 100)),
+ 'activity',(SELECT json_group_array(json_object('day',day,'listened_ms',ms,'play_count',plays)) FROM (
+ SELECT (started_at+timezone_offset_minutes*60000)/86400000 day,SUM(listened_ms) ms,SUM(counted_play) plays FROM selected GROUP BY day ORDER BY day))
+) FROM selected"
+);
+
+// Keyset-paginated session history: ?4/?5/?6 are the exclusive (start,
+// device_id, session_id) cursor of the last row from the previous page, and
+// ?7 the page size. The same range window and counted-play threshold rules as
+// STATS apply, so pages continue exactly where the stats payload stopped.
+const HISTORY: &str = const_format::concatcp!(
+    SELECTED,
+    "SELECT COALESCE(json_group_array(",
+    HISTORY_ROWS,
+    "),'[]') FROM (
+ SELECT device_id,session_id,track_id,title,artist,start,ms,plays FROM (
+ SELECT device_id,session_id,track_id,title,artist,MIN(started_at) start,SUM(listened_ms) ms,MAX(counted_play) plays FROM selected GROUP BY device_id,session_id
+ ) WHERE ?4 IS NULL OR start<?4 OR (start=?4 AND device_id>?5) OR (start=?4 AND device_id=?5 AND session_id>?6)
+ ORDER BY start DESC,device_id,session_id LIMIT ?7)"
+);
+
+#[derive(Deserialize)]
+pub(crate) struct HistoryQuery {
+    from: Option<i64>,
+    to: Option<i64>,
+    before_start: Option<i64>,
+    before_device: Option<String>,
+    before_session: Option<String>,
+    limit: Option<i64>,
+}
+#[derive(Serialize)]
+pub(crate) struct HistoryPage {
+    history: Vec<History>,
+}
+
+pub(crate) async fn history(
+    State(state): State<AppState>,
+    auth: Auth,
+    Query(query): Query<HistoryQuery>,
+) -> Result<Json<HistoryPage>, ApiError> {
+    let from = query.from.unwrap_or(0);
+    let to = query.to.unwrap_or(i64::MAX);
+    if from < 0 || to < 0 || from > to {
+        return Err(ApiError::bad("invalid history range"));
+    }
+    let cursor = match (
+        query.before_start,
+        &query.before_device,
+        &query.before_session,
+    ) {
+        (None, None, None) => None,
+        (Some(start), Some(device), Some(session)) => {
+            valid_id(device)?;
+            valid_id(session)?;
+            Some((start, device.clone(), session.clone()))
+        }
+        _ => {
+            return Err(ApiError::bad(
+                "history cursor needs before_start, before_device, and before_session",
+            ));
+        }
+    };
+    let limit = query.limit.unwrap_or(100).clamp(1, 500);
+    let result: String = sqlx::query_scalar(HISTORY)
+        .bind(&auth.user)
+        .bind(from)
+        .bind(to)
+        .bind(cursor.as_ref().map(|cursor| cursor.0))
+        .bind(cursor.as_ref().map(|cursor| cursor.1.clone()))
+        .bind(cursor.as_ref().map(|cursor| cursor.2.clone()))
+        .bind(limit)
+        .fetch_one(&state.0.pool)
+        .await?;
+    Ok(Json(HistoryPage {
+        history: serde_json::from_str(&result).map_err(|_| {
+            ApiError::new(
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                "invalid history result",
+            )
+        })?,
+    }))
+}
 
 pub(crate) async fn stats(
     State(state): State<AppState>,

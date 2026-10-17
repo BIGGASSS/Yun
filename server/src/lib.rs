@@ -225,6 +225,7 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/v1/listening-events", post(events::ingest))
         .route("/api/v1/stats", get(events::stats))
+        .route("/api/v1/history", get(events::history))
         .fallback(|| async { ApiError::not_found() })
         .method_not_allowed_fallback(|| async {
             ApiError::new(
