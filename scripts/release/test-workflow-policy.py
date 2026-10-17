@@ -92,6 +92,22 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertIn("            isShrinkResources = true\n", release)
         self.assertIn("python3 scripts/release/test-android-resources.py", self.files[".github/workflows/ci.yml"])
 
+    def test_tag_release_publishes_both_linux_packages_and_windows_installer(self):
+        release = self.files[".github/workflows/tag-release.yml"]
+        collect = block(release, "      - name: Verify and collect release assets")
+        assets = re.findall(r"(?m)^            (yun-\S+)$", collect)
+        self.assertEqual(assets, [
+            "yun-linux-x64/yun-linux-x64.AppImage",
+            "yun-linux-x64/yun-linux-x64.deb",
+            "yun-macos-arm64-unsigned/yun-macos-arm64-unsigned.dmg",
+            "yun-windows-x64-unsigned/yun-windows-x64-unsigned.exe",
+            "yun-android-arm64-release-signed/yun-android-arm64-release-signed.apk",
+            "yun-server-linux-x64/yun-server-linux-x64.tar.gz",
+        ])
+        self.assertIn("sha256sum --check SHA256SUMS", collect)
+        self.assertIn("python3 scripts/release/test-linux-packaging.py", self.native)
+        self.assertIn("./scripts/release/test-windows-packaging.ps1", self.native)
+
     def test_every_external_use_is_sha_pinned_with_ref_comment(self):
         count = 0
         for path, text in self.files.items():

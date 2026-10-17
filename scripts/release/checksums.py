@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
-"""Hash final archives, not mutable inventory files, on every runner OS."""
+"""Hash final release packages, not mutable inventory files, on every runner OS."""
 from hashlib import sha256
 from pathlib import Path
 
 root = Path("dist")
-archives = sorted(p for p in root.iterdir() if p.name.endswith((".tar.gz", ".dmg", ".zip", ".apk")))
+archives = sorted(p for p in root.iterdir() if p.is_file() and p.name.endswith(
+    (".tar.gz", ".dmg", ".zip", ".apk", ".exe", ".AppImage", ".deb")
+))
 if not archives:
     raise SystemExit("No release archives found")
 lines = []

@@ -34,7 +34,7 @@ jobs:
       - run: RUN_NATIVE_PLAYBACK=1 fvm flutter test test/services/native_playback_test.dart
       - run: python3 scripts/api_smoke.py --binary server/target/release/yun-server
       - run: for script in scripts/*.sh scripts/release/*.sh; do bash -n "$script"; done
-      - run: shellcheck scripts/*.sh scripts/release/*.sh
+      - run: shellcheck scripts/*.sh scripts/release/*.sh scripts/release/AppRun
       - run: python3 scripts/test-release-tooling.py
       - run: python3 scripts/release/test-android-signing.py
       - run: python3 scripts/release/test-android-resources.py
@@ -98,9 +98,10 @@ jobs:
           set -euo pipefail
           mkdir -p dist
           assets=(
-            yun-linux-x64/yun-linux-x64.tar.gz
+            yun-linux-x64/yun-linux-x64.AppImage
+            yun-linux-x64/yun-linux-x64.deb
             yun-macos-arm64-unsigned/yun-macos-arm64-unsigned.dmg
-            yun-windows-x64-unsigned/yun-windows-x64-unsigned.zip
+            yun-windows-x64-unsigned/yun-windows-x64-unsigned.exe
             yun-android-arm64-release-signed/yun-android-arm64-release-signed.apk
             yun-server-linux-x64/yun-server-linux-x64.tar.gz
           )

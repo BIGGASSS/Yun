@@ -36,7 +36,7 @@ jobs:
         with:
           persist-credentials: false
       - if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y clang cmake ninja-build pkg-config libgtk-3-dev libmpv-dev libsecret-1-dev liblzma-dev
+        run: sudo apt-get update && sudo apt-get install -y clang cmake ninja-build pkg-config libgtk-3-dev libmpv-dev libsecret-1-dev liblzma-dev dpkg-dev desktop-file-utils
       # smtc_windows builds Rust via Cargokit. Do not rely on a preinstalled toolchain.
       - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
         with:
@@ -58,6 +58,7 @@ jobs:
           fvm flutter build linux --release --target-platform linux-x64
           python3 scripts/verify-linux-tray-linkage.py --bundle build/linux/x64/release/bundle
           bash scripts/release/package-linux.sh
+          python3 scripts/release/test-linux-packaging.py
       - if: matrix.target == 'macos-arm64-unsigned'
         shell: bash
         run: |
@@ -65,6 +66,10 @@ jobs:
           fvm flutter config --enable-macos-arm64-only
           fvm flutter build macos --release
           bash scripts/release/package-macos.sh
+      - name: Windows installer smoke tests (isolated fixture)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/release/test-windows-packaging.ps1
       - if: matrix.target == 'windows-x64-unsigned'
         shell: pwsh
         run: |
