@@ -18,12 +18,17 @@ the default plugin build downloads its pinned source archive.
 
 ## Release packages
 
-Linux x64 releases provide **`yun-linux-x64.AppImage`** and
-**`yun-linux-x64.deb`**, replacing the client tar.gz. Both preserve the entire
-Flutter release bundle, including all plugins, native bundle files, assets and
-`share/` contents, and include the dependency inventory, lockfile, build
-provenance, release/validation docs and notices warning. They use an **Ubuntu
-24.04 baseline**; compatibility with older glibc distributions is not guaranteed.
+Linux x64 releases provide **`yun-linux-x64.AppImage`**,
+**`yun-linux-x64.deb`** and the original **`yun-linux-x64.tar.gz`** with
+**`install.sh`**. AppImage and Debian packages are additional options, not
+replacements for the tarball installer. All three preserve the entire Flutter
+release bundle, including all plugins, native bundle files, assets and `share/`
+contents, and include the dependency inventory, lockfile, build provenance,
+release/validation docs, `LICENSE` and notices warning. All use an **Ubuntu 24.04
+baseline** and the same system GTK3, libsecret and libmpv2 runtime libraries;
+compatibility with older glibc distributions is not guaranteed. Quit Yun before
+installing or upgrading any format. User data, the offline library and keyring
+credentials are kept outside the binary locations.
 See [release and acceptance gates](../docs/RELEASE.md) before redistribution.
 Packaging does not establish real-desktop or hardware validation.
 
@@ -71,10 +76,36 @@ Uninstall using:
 sudo apt remove yun
 ```
 
-Removal preserves user data, the offline library and keyring entries. Neither
-release format provides an automatic updater. Both still need a desktop D-Bus
-session and a Secret Service provider for secure storage (see below); runtime
-library dependencies do not install or configure a working keyring session.
+Removal preserves user data, the offline library and keyring entries.
+
+### Original tarball and install.sh
+
+`yun-linux-x64.tar.gz` extracts into `yun/` with the complete Flutter bundle,
+metadata/docs and `LICENSE`. The original `scripts/release/install-linux.sh` is
+included unchanged as `install.sh`, alongside `scripts/release/yun.desktop` as
+`yun.desktop` and `assets/icon.png` as `yun.png`. Install the same runtime libraries
+listed above for AppImage, and have Bash and Python 3 available. Quit Yun and
+extract each new archive outside the install directory before installing or
+upgrading:
+
+```sh
+tar -xzf yun-linux-x64.tar.gz
+bash yun/install.sh
+"$HOME/.local/opt/yun/yun"
+```
+
+The installer runs **without sudo**, copies the entire extracted bundle into
+`~/.local/opt/yun`, and keeps the immediately previous bundle in
+`~/.local/opt/yun.previous` (replacing any older backup). Its desktop entry is
+`${XDG_DATA_HOME:-$HOME/.local/share}/applications/yun.desktop`, defaulting to
+`~/.local/share/applications/yun.desktop`. To uninstall, remove the installed
+bundle, its `.previous` backup if present, and that user-local desktop entry;
+user data and keyring entries remain separate.
+
+None of the three release formats provides an automatic updater. All three need
+a desktop D-Bus session and a Secret Service provider for secure storage (see
+below); runtime library dependencies do not install or configure a working
+keyring session.
 
 ### Packaging tools
 
@@ -82,8 +113,8 @@ library dependencies do not install or configure a working keyring session.
 runtime 20251108**, both pinned and SHA-256 verified before use. Debian packaging
 requires `dpkg-dev`: `dpkg-shlibdeps` calculates shared-library dependencies,
 with an explicit `libmpv2` dependency added because media_kit loads it dynamically
-rather than linking it. Both formats retain the complete Flutter bundle rather
-than copying just the runner executable.
+rather than linking it. All three formats retain the complete Flutter bundle
+rather than copying just the runner executable.
 
 ## System tray
 
@@ -139,7 +170,9 @@ contains the canonical `app.yun.yun.desktop` entry and `app.yun.yun.png` icon.
 The Debian package installs copies under `/usr/share/applications` and
 `/usr/share/icons/hicolor/256x256/apps` and exposes `/usr/bin/yun`; the AppImage
 retains the complete bundle and supplies its root `AppRun` launcher and desktop
-assets. The application ID and desktop/icon basename are `app.yun.yun`.
+assets. The tarball also preserves `share/` and adds the original `install.sh`,
+`yun.desktop` and `yun.png` for user-local installation as described above.
+The application ID and canonical desktop/icon basename are `app.yun.yun`.
 The GTK window icon is also embedded as a GResource, so it does not depend on the
 working directory. Application icons are derived from the unchanged
 `assets/icon.png`, including the full-color tray derivatives in `assets/tray_icons/`.

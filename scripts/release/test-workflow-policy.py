@@ -92,13 +92,14 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertIn("            isShrinkResources = true\n", release)
         self.assertIn("python3 scripts/release/test-android-resources.py", self.files[".github/workflows/ci.yml"])
 
-    def test_tag_release_publishes_both_linux_packages_and_windows_installer(self):
+    def test_tag_release_publishes_all_three_linux_formats_and_windows_installer(self):
         release = self.files[".github/workflows/tag-release.yml"]
         collect = block(release, "      - name: Verify and collect release assets")
         assets = re.findall(r"(?m)^            (yun-\S+)$", collect)
         self.assertEqual(assets, [
             "yun-linux-x64/yun-linux-x64.AppImage",
             "yun-linux-x64/yun-linux-x64.deb",
+            "yun-linux-x64/yun-linux-x64.tar.gz",
             "yun-macos-arm64-unsigned/yun-macos-arm64-unsigned.dmg",
             "yun-windows-x64-unsigned/yun-windows-x64-unsigned.exe",
             "yun-android-arm64-release-signed/yun-android-arm64-release-signed.apk",

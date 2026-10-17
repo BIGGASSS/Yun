@@ -5,9 +5,9 @@
 Pushing a `v*` tag triggers **Release** (`.github/workflows/tag-release.yml`),
 validates the source, builds all four
 clients and the Linux server, and publishes their installers, AppImage, disk image,
-APK and server archive plus `SHA256SUMS` to a GitHub Release with generated
-release notes. Android uses the configured release keystore (no debug fallback);
-macOS and Windows remain unsigned. All
+APK and Linux client/server archives plus `SHA256SUMS` to a GitHub Release with
+generated release notes. Android uses the configured release keystore (no debug
+fallback); macOS and Windows remain unsigned. All
 builds must succeed before publication. Releases follow repository visibility;
 review the acceptance and license gates below before pushing a release tag.
 
@@ -81,7 +81,7 @@ Unsigned checksums catch corruption, not an attacker replacing both files.
 
 | Artifact | Contents and current signing status |
 | --- | --- |
-| `yun-linux-x64` | `yun-linux-x64.AppImage` and `yun-linux-x64.deb`, each preserving the complete release-mode Flutter bundle, canonical desktop/icon assets, dependency inventory and review warning; Ubuntu 24.04 baseline, system native libraries required |
+| `yun-linux-x64` | `yun-linux-x64.AppImage`, `yun-linux-x64.deb` and the original `yun-linux-x64.tar.gz` with `install.sh`, each preserving the complete release-mode Flutter bundle, canonical desktop/icon assets, dependency inventory, `LICENSE` and review warning; Ubuntu 24.04 baseline, system native libraries required |
 | `yun-macos-arm64-unsigned` | ARM64 release app in a drag-to-Applications DMG; **no Developer ID signing/notarization**, at most Flutter's ad-hoc signatures |
 | `yun-windows-x64-unsigned` | `yun-windows-x64-unsigned.exe`, an Inno Setup wizard containing the complete Flutter release bundle and inventory; per-user install with registered uninstall/upgrade; **no Authenticode signing** |
 | `yun-android-arm64-debug-signed` | Default: **debug-mode, debug-key-signed** ARM64 APK, not a production/Play release |
@@ -374,11 +374,15 @@ of these native/operator steps has been executed by the host-only tooling tests.
 
 ### Linux x64
 
-Choose `yun-linux-x64.AppImage` or `yun-linux-x64.deb`; these replace the client
-tar.gz. Both contain the **whole** Flutter release bundle, dependency inventory,
-lockfile, build provenance, release/validation docs and notices warning. Do not
-extract or move only the `yun` executable. Both are built on the **Ubuntu 24.04
-baseline**; older glibc distributions are not guaranteed.
+Choose `yun-linux-x64.AppImage`, `yun-linux-x64.deb` or the original
+`yun-linux-x64.tar.gz` with `install.sh`. AppImage and Debian packages are
+additional options, not replacements for the tarball installer. All three contain
+the **whole** Flutter release bundle, dependency inventory, lockfile, build
+provenance, release/validation docs, `LICENSE` and notices warning. Do not extract
+or move only the `yun` executable. All use the **Ubuntu 24.04 baseline** and the
+same system GTK3, libsecret and libmpv2 runtime libraries; older glibc distributions
+are not guaranteed. Quit Yun before installing or upgrading any format. User data,
+the offline library and keyring credentials are kept outside the binary locations.
 
 #### AppImage
 
@@ -425,9 +429,33 @@ sudo apt remove yun
 ```
 
 Removal preserves application data, the offline library and keyring credentials.
-Neither format provides an automatic updater.
 
-Both formats need a desktop D-Bus session and a user Secret Service/keyring
+#### Original tarball and install.sh
+
+`yun-linux-x64.tar.gz` extracts into `yun/` with the complete Flutter bundle,
+metadata/docs and `LICENSE`. It also retains the unchanged
+`scripts/release/install-linux.sh` as `install.sh`,
+`scripts/release/yun.desktop` as `yun.desktop`, and `assets/icon.png` as `yun.png`.
+Install the same runtime libraries listed above for AppImage, and have Bash and
+Python 3 available. Quit Yun and extract each new archive outside the install
+directory before installing or upgrading:
+
+```sh
+tar -xzf yun-linux-x64.tar.gz
+bash yun/install.sh
+"$HOME/.local/opt/yun/yun"
+```
+
+The original installer runs **without sudo**, copies the complete extracted bundle
+to `~/.local/opt/yun`, and keeps the immediately previous bundle at
+`~/.local/opt/yun.previous` (replacing any older backup). It writes the desktop
+entry to `${XDG_DATA_HOME:-$HOME/.local/share}/applications/yun.desktop`, defaulting
+to `~/.local/share/applications/yun.desktop`. To uninstall, remove the installed
+bundle, its `.previous` backup if present, and that user-local desktop entry;
+application data and keyring credentials remain separate.
+
+None of the three formats provides an automatic updater. All three need a
+desktop D-Bus session and a user Secret Service/keyring
 (e.g. GNOME Keyring or KWallet) for secure storage; installing libsecret alone
 is not sufficient. Yun uses D-Bus directly for its Linux tray; no
 Ayatana/AppIndicator library is required. Tray display additionally needs a

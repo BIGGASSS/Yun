@@ -100,6 +100,7 @@ jobs:
           assets=(
             yun-linux-x64/yun-linux-x64.AppImage
             yun-linux-x64/yun-linux-x64.deb
+            yun-linux-x64/yun-linux-x64.tar.gz
             yun-macos-arm64-unsigned/yun-macos-arm64-unsigned.dmg
             yun-windows-x64-unsigned/yun-windows-x64-unsigned.exe
             yun-android-arm64-release-signed/yun-android-arm64-release-signed.apk

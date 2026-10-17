@@ -22,7 +22,7 @@ stage=$(mktemp -d)
 trap 'rm -rf "$stage"' EXIT
 mkdir -p dist
 # Do not let an earlier run masquerade as fresh packaging after a failure.
-rm -f dist/yun-linux-x64.AppImage dist/yun-linux-x64.deb
+rm -f dist/yun-linux-x64.AppImage dist/yun-linux-x64.deb dist/yun-linux-x64.tar.gz
 appdir="$stage/Yun.AppDir"
 mkdir -p "$appdir"
 cp -a "$bundle/." "$appdir/"
@@ -32,6 +32,17 @@ cp scripts/release/AppRun "$appdir/AppRun"
 cp linux/packaging/app.yun.yun.desktop "$appdir/"
 cp linux/runner/resources/app.yun.yun.png "$appdir/"
 chmod +x "$appdir/AppRun" "$appdir/yun"
+
+# Keep the original user-local installation route alongside the new packages.
+portable="$stage/yun"
+mkdir -p "$portable"
+cp -a "$appdir/." "$portable/"
+rm "$portable/AppRun" "$portable/app.yun.yun.desktop" "$portable/app.yun.yun.png"
+cp scripts/release/install-linux.sh "$portable/install.sh"
+cp scripts/release/yun.desktop "$portable/yun.desktop"
+cp assets/icon.png "$portable/yun.png"
+chmod +x "$portable/install.sh"
+tar -czf "$stage/yun-linux-x64.tar.gz" -C "$stage" yun
 
 # Stage a normal Debian installation without flattening the Flutter bundle.
 deb="$stage/deb"
@@ -84,4 +95,4 @@ chmod +x "$stage/appimagetool.AppImage"
 ARCH=x86_64 "$stage/appimagetool.AppImage" --appimage-extract-and-run \
   --no-appstream --runtime-file "$stage/runtime-x86_64" "$appdir" "$stage/yun-linux-x64.AppImage"
 chmod +x "$stage/yun-linux-x64.AppImage"
-cp "$stage/yun-linux-x64.AppImage" "$stage/yun-linux-x64.deb" dist/
+cp "$stage/yun-linux-x64.AppImage" "$stage/yun-linux-x64.deb" "$stage/yun-linux-x64.tar.gz" dist/

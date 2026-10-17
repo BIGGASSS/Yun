@@ -30,6 +30,8 @@ class LinuxPackageTests(unittest.TestCase):
         # This reads the embedded runtime without mounting or starting Yun.
         run(str(DIST / "yun-linux-x64.AppImage"), "--appimage-extract", cwd=cls.root)
         cls.appdir = cls.root / "squashfs-root"
+        run("tar", "-xzf", str(DIST / "yun-linux-x64.tar.gz"), "-C", str(cls.root))
+        cls.portable = cls.root / "yun"
 
     def assert_same_tree(self, source, destination):
         for path in source.rglob("*"):
@@ -45,12 +47,32 @@ class LinuxPackageTests(unittest.TestCase):
                     self.assertTrue(target.is_dir())
 
     def test_complete_bundles_and_inventory(self):
-        for payload in (self.deb / "usr/lib/yun", self.appdir):
+        for payload in (self.deb / "usr/lib/yun", self.appdir, self.portable):
             self.assert_same_tree(BUNDLE, payload)
             for source in (ROOT / "LICENSE", ROOT / "docs/RELEASE.md", ROOT / "docs/VALIDATION.md",
                            ROOT / "scripts/release/NOTICES.txt", DIST / "BUILD.txt",
                            DIST / "flutter-dependencies.txt", DIST / "pubspec.lock"):
                 self.assertEqual((payload / source.name).read_bytes(), source.read_bytes())
+
+    def test_original_tarball_installer_and_upgrade(self):
+        for source, name in ((ROOT / "scripts/release/install-linux.sh", "install.sh"),
+                             (ROOT / "scripts/release/yun.desktop", "yun.desktop"),
+                             (ROOT / "assets/icon.png", "yun.png")):
+            self.assertEqual((self.portable / name).read_bytes(), source.read_bytes())
+        self.assertTrue(os.access(self.portable / "install.sh", os.X_OK))
+        home = self.root / "installer home with spaces %f 韵"
+        home.mkdir()
+        data = home / "data"
+        environment = dict(os.environ, HOME=str(home), XDG_DATA_HOME=str(data))
+        for _ in range(2):
+            run(str(self.portable / "install.sh"), env=environment, cwd=self.root)
+        for destination in (home / ".local/opt/yun", home / ".local/opt/yun.previous"):
+            self.assert_same_tree(self.portable, destination)
+        desktop = data / "applications/yun.desktop"
+        run("desktop-file-validate", str(desktop))
+        escaped_home = str(home).replace("%", "%%")
+        self.assertIn(f'Exec="{escaped_home}/.local/opt/yun/yun"', desktop.read_text())
+        self.assertIn(f"Icon={home}/.local/opt/yun/yun.png", desktop.read_text())
 
     def test_debian_metadata_and_desktop_integration(self):
         package = str(DIST / "yun-linux-x64.deb")
