@@ -1632,6 +1632,53 @@ async fn offline_events_are_atomic_idempotent_personal_and_rebuildable() {
 }
 
 #[tokio::test]
+async fn stats_activity_buckets_days_by_each_event_timezone() {
+    let h = Harness::new().await;
+    let track = h.upload(h.a(), &wav(60)).await;
+    let tid = track["id"].as_str().unwrap();
+    // 23:59:59 UTC and 00:00:01 UTC straddle a UTC day boundary. At +120 the
+    // listener experienced both on the same local day; at +0 they did not.
+    // Each event is bucketed with its own recorded offset, so historical DST
+    // changes and device travel cannot misalign day buckets.
+    let mut zoned = event(&h.device_a, &uid(), tid, 86_399_000, 30_000);
+    zoned["timezone_offset_minutes"] = json!(120);
+    let mut zoned_next = event(&h.device_a, &uid(), tid, 86_401_000, 30_000);
+    zoned_next["timezone_offset_minutes"] = json!(120);
+    let mut utc = event(&h.device_a, &uid(), tid, 86_399_000, 30_000);
+    utc["timezone_offset_minutes"] = json!(0);
+    let (code, ack) = json_request(
+        &h.app,
+        "POST",
+        "/api/v1/listening-events",
+        Some(h.a()),
+        json!({"events":[zoned,zoned_next,utc]}),
+    )
+    .await;
+    assert_eq!(code, StatusCode::OK, "{ack}");
+    let (_, stats) = json_request(&h.app, "GET", "/api/v1/stats", Some(h.a()), json!({})).await;
+    assert_eq!(
+        stats["activity"],
+        json!([
+            {"day":0,"listened_ms":30000,"play_count":1},
+            {"day":1,"listened_ms":60000,"play_count":2}
+        ])
+    );
+    // The range filter applies to activity too.
+    let (_, stats) = json_request(
+        &h.app,
+        "GET",
+        "/api/v1/stats?from=86400000",
+        Some(h.a()),
+        json!({}),
+    )
+    .await;
+    assert_eq!(
+        stats["activity"],
+        json!([{"day":1,"listened_ms":30000,"play_count":1}])
+    );
+}
+
+#[tokio::test]
 async fn tags_artwork_and_malformed_payload_limits() {
     use lofty::{
         config::WriteOptions,

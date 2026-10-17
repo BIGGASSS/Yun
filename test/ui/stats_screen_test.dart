@@ -78,6 +78,10 @@ ServerStats _stats(DateTime now) => ServerStats(
       playCount: 15,
     ),
   ],
+  activity: [
+    StatsActivityItem(day: _ordinal(now), listenedMs: 200000, playCount: 1),
+    StatsActivityItem(day: _ordinal(now) - 2, listenedMs: 100000, playCount: 0),
+  ],
   history: [
     HistoryItem(
       sessionId: 's1',
@@ -99,6 +103,10 @@ ServerStats _stats(DateTime now) => ServerStats(
     ),
   ],
 );
+
+int _ordinal(DateTime local) =>
+    DateTime.utc(local.year, local.month, local.day).millisecondsSinceEpoch ~/
+    Duration.millisecondsPerDay;
 
 void main() {
   // Fixed clock: day grouping and range buckets are deterministic.
@@ -132,8 +140,6 @@ void main() {
     expect(find.text('5 hr 4 min'), findsOneWidget);
     expect(find.text('Plays'), findsOneWidget);
     expect(find.text('42'), findsOneWidget);
-    expect(find.text('Per play'), findsOneWidget);
-    expect(find.text('7 min'), findsOneWidget);
     expect(find.text('Top artist'), findsOneWidget);
 
     // Activity chart with daily buckets for the default all-time range.
@@ -143,8 +149,39 @@ void main() {
     expect(find.text('First song'), findsWidgets);
     expect(find.text('Gone song'), findsOneWidget);
     expect(find.text('20 plays'), findsOneWidget);
-    expect(find.text('Play all'), findsOneWidget);
     expect(app.statsRequests, 1);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('activity chart covers server activity beyond capped history', (
+    tester,
+  ) async {
+    final app = _TestApp(
+      serverStats: ServerStats(
+        listenedMs: 4000000,
+        playCount: 4,
+        activity: [
+          StatsActivityItem(
+            day: _ordinal(now) - 120,
+            listenedMs: 3600000,
+            playCount: 3,
+          ),
+          StatsActivityItem(
+            day: _ordinal(now),
+            listenedMs: 400000,
+            playCount: 1,
+          ),
+        ],
+      ),
+    );
+    addTearDown(app.dispose);
+    await pump(tester, app);
+
+    // Monthly buckets span Jun-Oct 2025; a history-based chart could only
+    // cover the capped recent sessions, and would show the cap caption.
+    expect(find.text('Jun'), findsOneWidget);
+    expect(find.text('Oct'), findsOneWidget);
+    expect(find.text('Based on your 100 most recent sessions.'), findsNothing);
     expect(tester.takeException(), isNull);
   });
 

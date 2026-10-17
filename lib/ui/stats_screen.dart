@@ -231,11 +231,6 @@ class _StatsScreenState extends State<StatsScreen> {
     _albumTracks = albumTracks;
   }
 
-  List<Track> get _playableTopTracks => [
-    for (final item in _app.stats?.topTracks ?? const <StatsItem>[])
-      ?_app.trackById(item.id),
-  ];
-
   static DateTime _dayStart(DateTime value) =>
       DateTime(value.year, value.month, value.day);
 
@@ -245,78 +240,119 @@ class _StatsScreenState extends State<StatsScreen> {
       DateTime.utc(local.year, local.month, local.day).millisecondsSinceEpoch ~/
       Duration.millisecondsPerDay;
 
-  /// The local midnight `days` calendar days after [local]; the constructor
-  /// normalizes month/year overflow instead of stepping 24-hour durations.
-  static DateTime _addCalendarDays(DateTime local, int days) =>
-      DateTime(local.year, local.month, local.day + days);
-
-  /// Buckets history into days, or months for long ranges. The server caps
-  /// history at the newest 100 sessions, so long-range charts are recent.
+  /// Buckets listening into days, or months for long ranges. Prefers the
+  /// server's per-day activity, which covers every synced segment in the
+  /// range; history is only a fallback for older servers, since it is capped
+  /// at the newest 100 sessions.
   ({List<_Bucket> buckets, bool daily}) _activity(ServerStats stats) {
-    final today = _dayStart(widget._now());
-    final DateTime from;
-    var to = today;
+    final todayOrdinal = _dayOrdinal(widget._now());
     final custom = _custom;
+    final int fromOrdinal;
+    var toOrdinal = todayOrdinal;
     if (_range == '7 days') {
-      from = _addCalendarDays(today, -6);
+      fromOrdinal = todayOrdinal - 6;
     } else if (_range == '30 days') {
-      from = _addCalendarDays(today, -29);
+      fromOrdinal = todayOrdinal - 29;
     } else if (_range == 'Custom' && custom != null) {
-      from = _dayStart(custom.start);
-      to = _dayStart(custom.end);
+      fromOrdinal = _dayOrdinal(custom.start);
+      toOrdinal = _dayOrdinal(custom.end);
     } else {
-      if (stats.history.isEmpty) {
-        return (buckets: const <_Bucket>[], daily: true);
+      int? first;
+      for (final item in stats.activity) {
+        if (first == null || item.day < first) first = item.day;
       }
-      var first = today;
-      for (final entry in stats.history) {
-        final day = _dayStart(
-          DateTime.fromMillisecondsSinceEpoch(entry.startedAt),
-        );
-        if (day.isBefore(first)) first = day;
+      if (stats.activity.isEmpty) {
+        for (final entry in stats.history) {
+          final day = _dayOrdinal(
+            DateTime.fromMillisecondsSinceEpoch(entry.startedAt),
+          );
+          if (first == null || day < first) first = day;
+        }
       }
-      from = first;
+      if (first == null) return (buckets: const <_Bucket>[], daily: true);
+      fromOrdinal = first;
     }
-    final days = _dayOrdinal(to) - _dayOrdinal(from) + 1;
+    final days = toOrdinal - fromOrdinal + 1;
     if (days <= 0) return (buckets: const <_Bucket>[], daily: true);
     String listened(int ms) => ms == 0
         ? 'No listening'
         : formatTotalDuration(Duration(milliseconds: ms));
+    String tooltip(String date, int ms, int plays) =>
+        '$date · ${listened(ms)}${plays > 0 ? ' · ${_playsLabel(plays)}' : ''}';
+    // The UTC fields of an ordinal's date are the local calendar date.
+    DateTime labelDate(int ordinal) => DateTime.fromMillisecondsSinceEpoch(
+      ordinal * Duration.millisecondsPerDay,
+      isUtc: true,
+    );
     if (days <= 45) {
       final sums = List<int>.filled(days, 0);
-      for (final entry in stats.history) {
-        final index =
-            _dayOrdinal(DateTime.fromMillisecondsSinceEpoch(entry.startedAt)) -
-            _dayOrdinal(from);
-        if (index >= 0 && index < days) sums[index] += entry.listenedMs;
+      final plays = List<int>.filled(days, 0);
+      if (stats.activity.isEmpty) {
+        for (final entry in stats.history) {
+          final index =
+              _dayOrdinal(
+                DateTime.fromMillisecondsSinceEpoch(entry.startedAt),
+              ) -
+              fromOrdinal;
+          if (index >= 0 && index < days) {
+            sums[index] += entry.listenedMs;
+            if (entry.countedPlay) plays[index] += 1;
+          }
+        }
+      } else {
+        for (final item in stats.activity) {
+          final index = item.day - fromOrdinal;
+          if (index >= 0 && index < days) {
+            sums[index] += item.listenedMs;
+            plays[index] += item.playCount;
+          }
+        }
       }
       return (
         daily: true,
         buckets: [
           for (var i = 0; i < days; i++)
             () {
-              final day = _addCalendarDays(from, i);
+              final day = labelDate(fromOrdinal + i);
               return _Bucket(
                 ms: sums[i],
                 label: days <= 7
                     ? _weekdayShort[day.weekday - 1]
                     : '${day.day}',
-                tooltip:
-                    '${_weekdayShort[day.weekday - 1]}, ${day.day} '
-                    '${_monthShort[day.month - 1]} · ${listened(sums[i])}',
+                tooltip: tooltip(
+                  '${_weekdayShort[day.weekday - 1]}, ${day.day} '
+                  '${_monthShort[day.month - 1]}',
+                  sums[i],
+                  plays[i],
+                ),
               );
             }(),
         ],
       );
     }
     int monthIndex(DateTime day) => day.year * 12 + day.month - 1;
-    final count = monthIndex(to) - monthIndex(from) + 1;
+    final from = labelDate(fromOrdinal);
+    final count = monthIndex(labelDate(toOrdinal)) - monthIndex(from) + 1;
     final sums = List<int>.filled(count, 0);
-    for (final entry in stats.history) {
-      final index =
-          monthIndex(DateTime.fromMillisecondsSinceEpoch(entry.startedAt)) -
-          monthIndex(from);
-      if (index >= 0 && index < count) sums[index] += entry.listenedMs;
+    final plays = List<int>.filled(count, 0);
+    if (stats.activity.isEmpty) {
+      for (final entry in stats.history) {
+        final index =
+            monthIndex(DateTime.fromMillisecondsSinceEpoch(entry.startedAt)) -
+            monthIndex(from);
+        if (index >= 0 && index < count) {
+          sums[index] += entry.listenedMs;
+          if (entry.countedPlay) plays[index] += 1;
+        }
+      }
+    } else {
+      for (final item in stats.activity) {
+        final index = monthIndex(labelDate(item.day)) - monthIndex(from);
+        if (index >= 0 && index < count) {
+          sums[index] += item.listenedMs;
+          plays[index] += item.playCount;
+        }
+      }
     }
     return (
       daily: false,
@@ -330,7 +366,11 @@ class _StatsScreenState extends State<StatsScreen> {
               label: month == 1 && count > 12
                   ? "Jan '${year % 100}"
                   : _monthShort[month - 1],
-              tooltip: '${_monthLong[month - 1]} $year · ${listened(sums[i])}',
+              tooltip: tooltip(
+                '${_monthLong[month - 1]} $year',
+                sums[i],
+                plays[i],
+              ),
             );
           }(),
       ],
@@ -507,7 +547,7 @@ class _StatsScreenState extends State<StatsScreen> {
                 _ActivityChart(
                   buckets: activity.buckets,
                   daily: activity.daily,
-                  capped: stats.history.length >= 100,
+                  capped: stats.activity.isEmpty && stats.history.length >= 100,
                 ),
               ],
               const SizedBox(height: 24),
@@ -538,14 +578,6 @@ class _StatsScreenState extends State<StatsScreen> {
         value: _groupedCount(stats.playCount),
       ),
       _StatCard(
-        icon: Icons.timelapse_rounded,
-        label: 'Per play',
-        value: stats.playCount == 0
-            ? '—'
-            : _headlineTime(stats.listenedMs ~/ stats.playCount),
-        sub: 'average',
-      ),
-      _StatCard(
         icon: Icons.person_outline_rounded,
         label: 'Top artist',
         value: topArtistName ?? '—',
@@ -558,7 +590,6 @@ class _StatsScreenState extends State<StatsScreen> {
   }
 
   Widget _viewSelector(BuildContext context) {
-    final playable = _view == 'Tracks' ? _playableTopTracks : const <Track>[];
     return Wrap(
       spacing: 8,
       runSpacing: 8,
@@ -569,13 +600,6 @@ class _StatsScreenState extends State<StatsScreen> {
             label: Text(view),
             selected: _view == view,
             onSelected: (_) => _changeView(view),
-          ),
-        if (playable.isNotEmpty)
-          TextButton.icon(
-            onPressed: () =>
-                runUiAction(context, () => _app.playback.playQueue(playable)),
-            icon: const Icon(Icons.play_arrow_rounded, size: 18),
-            label: const Text('Play all'),
           ),
       ],
     );
@@ -801,7 +825,7 @@ class _OverviewGrid extends StatelessWidget {
   Widget build(BuildContext context) => LayoutBuilder(
     builder: (context, constraints) {
       const spacing = 12.0;
-      final columns = constraints.maxWidth >= 760 ? 4 : 2;
+      final columns = constraints.maxWidth >= 760 ? 3 : 1;
       final width = (constraints.maxWidth - spacing * (columns - 1)) / columns;
       return Wrap(
         spacing: spacing,
@@ -863,17 +887,16 @@ class _StatCard extends StatelessWidget {
               fontWeight: FontWeight.w600,
             ),
           ),
-          if (sub != null) ...[
-            const SizedBox(height: 4),
-            Text(
-              sub!,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: theme.textTheme.bodySmall?.copyWith(
-                color: scheme.onSurfaceVariant,
-              ),
+          // Always reserve the sub line so cards in the grid stay one height.
+          const SizedBox(height: 4),
+          Text(
+            sub ?? '',
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: theme.textTheme.bodySmall?.copyWith(
+              color: scheme.onSurfaceVariant,
             ),
-          ],
+          ),
         ],
       ),
     );
@@ -907,8 +930,9 @@ class _ActivityChart extends StatelessWidget {
   final List<_Bucket> buckets;
   final bool daily;
 
-  /// The server returns at most 100 history sessions; long-range charts then
-  /// cover only recent activity and say so.
+  /// When the chart had to fall back to the history list (older servers
+  /// without per-day activity), it covers at most the 100 newest sessions
+  /// and says so.
   final bool capped;
 
   @override
@@ -1435,19 +1459,15 @@ String _groupedCount(int value) {
 String _playsLabel(int count) =>
     '${_groupedCount(count)} ${count == 1 ? 'play' : 'plays'}';
 
-/// Compact card-scale duration: `<1 min`, `42 min`, `9 hr 30 min`, `27 hr`,
-/// `12 d 3 hr`.
+/// Compact card-scale duration: `<1 min`, `42 min`, `9 hr 30 min`, `76 hr`.
 String _headlineTime(int ms) {
   final minutes = ms ~/ 60000;
   if (minutes <= 0) return '<1 min';
   if (minutes < 60) return '$minutes min';
   final hours = minutes ~/ 60;
-  if (hours < 10) {
+  if (hours < 24) {
     final rest = minutes % 60;
     return rest == 0 ? '$hours hr' : '$hours hr $rest min';
   }
-  if (hours < 48) return '$hours hr';
-  final days = hours ~/ 24;
-  final restHours = hours % 24;
-  return restHours == 0 ? '$days d' : '$days d $restHours hr';
+  return '$hours hr';
 }

@@ -146,6 +146,15 @@ struct History {
     listened_ms: i64,
     counted_play: bool,
 }
+// A listener-local calendar day of playback: `day` counts days since the Unix
+// epoch in the timezone each segment recorded, so charts never depend on the
+// capped history list.
+#[derive(Serialize, Deserialize)]
+struct Activity {
+    day: i64,
+    listened_ms: i64,
+    play_count: i64,
+}
 #[derive(Serialize, Deserialize)]
 pub(crate) struct Stats {
     listened_ms: i64,
@@ -154,6 +163,7 @@ pub(crate) struct Stats {
     top_artists: Vec<TopArtist>,
     top_albums: Vec<TopAlbum>,
     history: Vec<History>,
+    activity: Vec<Activity>,
 }
 // First use the range index to find candidate sessions. Only their complete
 // histories enter the window. The date filter MUST stay after the window so
@@ -181,7 +191,9 @@ SELECT json_object(
  'top_albums',(SELECT json_group_array(json_object('name',album,'artist',album_artist,'listened_ms',ms,'play_count',plays)) FROM (
  SELECT album,album_artist,SUM(listened_ms) ms,SUM(counted_play) plays FROM selected GROUP BY album,album_artist ORDER BY ms DESC,plays DESC,album,album_artist LIMIT 50)),
  'history',(SELECT json_group_array(json_object('session_id',session_id,'track_id',track_id,'title',title,'artist',artist,'started_at',start,'listened_ms',ms,'counted_play',json(CASE WHEN plays=1 THEN 'true' ELSE 'false' END))) FROM (
- SELECT device_id,session_id,track_id,title,artist,MIN(started_at) start,SUM(listened_ms) ms,MAX(counted_play) plays FROM selected GROUP BY device_id,session_id ORDER BY start DESC,device_id,session_id LIMIT 100))
+ SELECT device_id,session_id,track_id,title,artist,MIN(started_at) start,SUM(listened_ms) ms,MAX(counted_play) plays FROM selected GROUP BY device_id,session_id ORDER BY start DESC,device_id,session_id LIMIT 100)),
+ 'activity',(SELECT json_group_array(json_object('day',day,'listened_ms',ms,'play_count',plays)) FROM (
+ SELECT (started_at+timezone_offset_minutes*60000)/86400000 day,SUM(listened_ms) ms,SUM(counted_play) plays FROM selected GROUP BY day ORDER BY day))
 ) FROM selected";
 
 pub(crate) async fn stats(

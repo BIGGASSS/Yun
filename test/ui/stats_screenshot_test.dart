@@ -71,6 +71,35 @@ class _ShotApp extends AppController {
 
 ServerStats _richStats(DateTime now) {
   final today = DateTime(now.year, now.month, now.day);
+  int ordinal(DateTime local) =>
+      DateTime.utc(local.year, local.month, local.day).millisecondsSinceEpoch ~/
+      Duration.millisecondsPerDay;
+  final history = [
+    for (var day = 0; day < 30; day++)
+      for (var session = 0; session < (day * 7 + 3) % 4; session++)
+        HistoryItem(
+          sessionId: 's-$day-$session',
+          trackId: 'track-${(day + session) % 12}',
+          title: 'Track ${(day + session) % 12}',
+          artist: (day + session).isEven ? 'The Midnight' : 'Kavinsky',
+          startedAt: today
+              .subtract(Duration(days: 29 - day))
+              .add(Duration(hours: 8 + session * 3, minutes: session * 17))
+              .millisecondsSinceEpoch,
+          listenedMs: 140000 + (day * session * 97777) % 220000,
+          countedPlay: session.isEven,
+        ),
+  ];
+  // The server aggregates activity over every segment; mirror that here.
+  final byDay = <int, ({int ms, int plays})>{};
+  for (final entry in history) {
+    final day = ordinal(DateTime.fromMillisecondsSinceEpoch(entry.startedAt));
+    final current = byDay[day] ?? (ms: 0, plays: 0);
+    byDay[day] = (
+      ms: current.ms + entry.listenedMs,
+      plays: current.plays + (entry.countedPlay ? 1 : 0),
+    );
+  }
   return ServerStats(
     listenedMs: 67 * 3600000 + 1230000,
     playCount: 1284,
@@ -130,21 +159,14 @@ ServerStats _richStats(DateTime now) {
         playCount: 76,
       ),
     ],
-    history: [
-      for (var day = 0; day < 30; day++)
-        for (var session = 0; session < (day * 7 + 3) % 4; session++)
-          HistoryItem(
-            sessionId: 's-$day-$session',
-            trackId: 'track-${(day + session) % 12}',
-            title: 'Track ${(day + session) % 12}',
-            artist: (day + session).isEven ? 'The Midnight' : 'Kavinsky',
-            startedAt: today
-                .subtract(Duration(days: 29 - day))
-                .add(Duration(hours: 8 + session * 3, minutes: session * 17))
-                .millisecondsSinceEpoch,
-            listenedMs: 140000 + (day * session * 97777) % 220000,
-            countedPlay: session.isEven,
-          ),
+    history: history,
+    activity: [
+      for (final day in byDay.keys.toList()..sort())
+        StatsActivityItem(
+          day: day,
+          listenedMs: byDay[day]!.ms,
+          playCount: byDay[day]!.plays,
+        ),
     ],
   );
 }
