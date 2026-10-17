@@ -10,6 +10,16 @@ Artwork has a separate, bounded 1 GiB cache per account. Artwork currently on sc
 
 Selected uploads are first copied into account-private staging storage (up to 1 GiB per file by default). Successful or cancelled jobs delete only these staged copies, never your originals. Budget staging space on top of downloads. Transfers run while the app is running and resume later; the app doesn't promise OS-scheduled transfers after it exits.
 
+## Data directory
+
+In **Settings → Data storage**, view the current directory and choose a different folder. **Use default location** restores the platform's application-support location. You can cancel a pending change before restarting. Fully quit Yun (not just minimize to the tray) and reopen it to apply the change.
+
+Choose an existing, writable folder without `accounts` or `artwork` entries. Unrelated files are left alone. Nested source/destination folders and symlinked destinations are rejected. On Android, only folders accessible to the app as ordinary filesystem paths are supported; protected folders and document-provider-only locations cannot be used. On macOS, the folder picker retains sandbox permission across launches.
+
+At the next launch, before opening any account database, Yun copies all accounts' downloads, partial downloads, upload staging, cached libraries, artwork, offline selections, and pending listening history. It updates managed paths in the copied databases, then switches directories only after a successful copy and saved configuration. Original upload source files, server data, system preferences, and secure credentials do not move. The atomic location/recovery configuration (`.yun-data-config.json`) stays in system application support. Old managed copies are removed only after the switch; changed files or external upload originals are retained. Such retained entries may need to be moved aside before reusing an old directory.
+
+Keep both locations connected, leave enough destination space for the full copy, and close other Yun instances before restarting. Do not remove the reserved `.yun-data-*` identity/recovery files. If copying fails, Yun keeps the original location and shows the error in Settings; cancel or choose another destination. An interrupted copy is recovered on startup. If the active drive is missing or its identity has changed, startup stops instead of silently opening an empty library: reconnect the original drive and choose **Retry**. Do not manually move the files while Yun is running. Concurrent app instances and power-loss durability across filesystem/preferences writes are not guaranteed.
+
 ## Purge unused downloads
 
 In **Downloads**, choose **Purge unused downloads** to preview the file count and space recoverable from unselected audio and interrupted partial files. Confirm **Purge** to remove them, or cancel to leave them unchanged. **Clear All** in Activity only dismisses completed entries; it does not remove audio.

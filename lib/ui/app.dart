@@ -3,9 +3,11 @@ import 'package:flutter/services.dart';
 
 import '../core/app_controller.dart';
 import '../core/collection_settings_controller.dart';
+import '../core/data_directory_controller.dart';
 import '../core/desktop_controller.dart';
 import '../core/update_check_controller.dart';
 import '../models/app_update.dart';
+import '../services/data_directory_picker.dart';
 import 'downloads_screen.dart';
 import 'library_screen.dart';
 import 'player.dart';
@@ -27,6 +29,8 @@ class YunApp extends StatefulWidget {
     this.initialThemeMode = ThemeMode.system,
     this.onThemeChanged,
     this.collectionSettings,
+    this.dataDirectory,
+    this.directoryPicker,
   });
   final AppController controller;
   final DesktopController? desktop;
@@ -34,6 +38,8 @@ class YunApp extends StatefulWidget {
   final ThemeMode initialThemeMode;
   final ValueChanged<ThemeMode>? onThemeChanged;
   final CollectionSettingsController? collectionSettings;
+  final DataDirectoryController? dataDirectory;
+  final DataDirectoryPicker? directoryPicker;
 
   @override
   State<YunApp> createState() => _YunAppState();
@@ -55,6 +61,8 @@ class _YunAppState extends State<YunApp> {
       collectionSettings: widget.collectionSettings ?? _localSettings,
       desktop: widget.desktop,
       updateCheck: widget.updateCheck,
+      dataDirectory: widget.dataDirectory,
+      directoryPicker: widget.directoryPicker,
       themeMode: _themeMode,
       onThemeChanged: (mode) {
         setState(() => _themeMode = mode);
@@ -72,10 +80,14 @@ class _AppShell extends StatefulWidget {
     required this.onThemeChanged,
     required this.collectionSettings,
     this.updateCheck,
+    this.dataDirectory,
+    this.directoryPicker,
   });
   final AppController app;
   final DesktopController? desktop;
   final UpdateCheckController? updateCheck;
+  final DataDirectoryController? dataDirectory;
+  final DataDirectoryPicker? directoryPicker;
   final ThemeMode themeMode;
   final ValueChanged<ThemeMode> onThemeChanged;
   final CollectionSettingsController collectionSettings;
@@ -348,6 +360,9 @@ class _AppShellState extends State<_AppShell> {
                                             app: app,
                                             desktop: widget.desktop,
                                             updateCheck: widget.updateCheck,
+                                            dataDirectory: widget.dataDirectory,
+                                            directoryPicker:
+                                                widget.directoryPicker,
                                             themeMode: widget.themeMode,
                                             onThemeChanged:
                                                 widget.onThemeChanged,
