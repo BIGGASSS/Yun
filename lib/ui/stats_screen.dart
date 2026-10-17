@@ -1,5 +1,6 @@
 import 'dart:math' as math;
 
+import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 
 import '../core/app_controller.dart';
@@ -79,6 +80,14 @@ class _StatsScreenState extends State<StatsScreen> {
   int _request = 0;
   String? _loadedKey;
 
+  // History pagination: pages older than the stats payload's newest 100
+  // sessions, loaded on scroll via the keyset cursor of the last item.
+  final _older = <HistoryItem>[];
+  DateTime? _loadedFrom, _loadedTo;
+  bool _historyDone = false;
+  bool _historyLoading = false;
+  bool _historyFailed = false;
+
   // Representative artwork and play queues, rebuilt only when the account's
   // track list changes identity.
   List<Track>? _artSource;
@@ -92,6 +101,7 @@ class _StatsScreenState extends State<StatsScreen> {
   @override
   void initState() {
     super.initState();
+    _scroll.addListener(_onScroll);
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted && _app.isAuthenticated) _load();
     });
@@ -101,6 +111,58 @@ class _StatsScreenState extends State<StatsScreen> {
   void dispose() {
     _scroll.dispose();
     super.dispose();
+  }
+
+  void _onScroll() {
+    if (_view != 'History' || _historyDone || _historyLoading) return;
+    if (!_scroll.hasClients || _scroll.position.extentAfter > 600) return;
+    _loadOlder();
+  }
+
+  /// Loads the next page of sessions older than the stats payload's newest
+  /// 100, continuing strictly after the last item via its keyset cursor.
+  Future<void> _loadOlder() async {
+    final stats = _app.stats;
+    if (stats == null) return;
+    final base = stats.history;
+    final last = _older.isEmpty
+        ? (base.isEmpty ? null : base.last)
+        : _older.last;
+    // Without device_id the item came from a server too old to paginate.
+    if (last == null || last.deviceId.isEmpty) {
+      setState(() => _historyDone = true);
+      return;
+    }
+    final key = _loadedKey;
+    setState(() {
+      _historyLoading = true;
+      _historyFailed = false;
+    });
+    try {
+      final page = await _app.loadHistory(
+        from: _loadedFrom,
+        to: _loadedTo,
+        before: last,
+      );
+      // A range change or refresh mid-flight supersedes this page.
+      if (!mounted || key != _loadedKey) return;
+      setState(() {
+        _historyLoading = false;
+        _older.addAll(page);
+        if (page.length < 100) _historyDone = true;
+      });
+    } catch (error) {
+      if (!mounted || key != _loadedKey) return;
+      setState(() {
+        _historyLoading = false;
+        // Servers without the history endpoint simply have no older pages.
+        if (error is DioException && error.response?.statusCode == 404) {
+          _historyDone = true;
+        } else {
+          _historyFailed = true;
+        }
+      });
+    }
   }
 
   Future<void> _load() async {
@@ -118,21 +180,24 @@ class _StatsScreenState extends State<StatsScreen> {
       'Custom' => _custom?.start,
       _ => null,
     };
+    final to = _range == 'Custom' && _custom != null
+        ? DateTime(_custom!.end.year, _custom!.end.month, _custom!.end.day + 1)
+        : null;
     try {
-      await _app.loadStats(
-        from: from,
-        to: _range == 'Custom' && _custom != null
-            ? DateTime(
-                _custom!.end.year,
-                _custom!.end.month,
-                _custom!.end.day + 1,
-              )
-            : null,
-      );
+      await _app.loadStats(from: from, to: to);
       // Tag the snapshot with the range that produced it. Results are only
       // presented while the selection still matches; a failed range change
       // must not dress previous-range totals in new-range controls.
       _loadedKey = _selectionKey();
+      _loadedFrom = from;
+      _loadedTo = to;
+      if (mounted && request == _request) {
+        setState(() {
+          _older.clear();
+          _historyDone = false;
+          _historyFailed = false;
+        });
+      }
     } catch (error) {
       if (mounted && request == _request) setState(() => _error = '$error');
     } finally {
@@ -421,22 +486,19 @@ class _StatsScreenState extends State<StatsScreen> {
                   title: 'Your listening story',
                   message: 'Connect to your server to see history and listening totals across your devices.',
                 )
-              : RefreshIndicator(
-                  onRefresh: _load,
-                  child: CustomScrollView(
-                    controller: _scroll,
-                    physics: const AlwaysScrollableScrollPhysics(),
-                    slivers: [
-                      SliverPadding(
-                        padding: const EdgeInsets.symmetric(horizontal: 24),
-                        sliver: SliverToBoxAdapter(
-                          child: _controls(context, stats),
-                        ),
+              : CustomScrollView(
+                  controller: _scroll,
+                  physics: const AlwaysScrollableScrollPhysics(),
+                  slivers: [
+                    SliverPadding(
+                      padding: const EdgeInsets.symmetric(horizontal: 24),
+                      sliver: SliverToBoxAdapter(
+                        child: _controls(context, stats),
                       ),
-                      ..._body(context, stats),
-                      const SliverToBoxAdapter(child: SizedBox(height: 24)),
-                    ],
-                  ),
+                    ),
+                    ..._body(context, stats),
+                    const SliverToBoxAdapter(child: SizedBox(height: 24)),
+                  ],
                 ),
         ),
       ],
@@ -708,7 +770,7 @@ class _StatsScreenState extends State<StatsScreen> {
           },
         );
       default:
-        return _historyList(context, stats.history);
+        return _historyList(context, stats);
     }
   }
 
@@ -750,7 +812,8 @@ class _StatsScreenState extends State<StatsScreen> {
     ];
   }
 
-  List<Widget> _historyList(BuildContext context, List<HistoryItem> history) {
+  List<Widget> _historyList(BuildContext context, ServerStats stats) {
+    final history = [...stats.history, ..._older];
     if (history.isEmpty) {
       return const [
         SliverFillRemaining(
@@ -813,6 +876,31 @@ class _StatsScreenState extends State<StatsScreen> {
           },
         ),
       ),
+      if (_historyLoading)
+        const SliverToBoxAdapter(
+          child: Padding(
+            padding: EdgeInsets.only(top: 16),
+            child: QuietProgress(),
+          ),
+        )
+      else if (_historyFailed)
+        SliverToBoxAdapter(
+          child: Padding(
+            padding: const EdgeInsets.only(top: 12),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Text(
+                  'Older sessions did not load',
+                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                    color: Theme.of(context).colorScheme.onSurfaceVariant,
+                  ),
+                ),
+                TextButton(onPressed: _loadOlder, child: const Text('Retry')),
+              ],
+            ),
+          ),
+        ),
     ];
   }
 }
@@ -823,8 +911,8 @@ class _Bucket {
   final String label, tooltip;
 }
 
-/// Responsive grid of headline metrics: four across on wide layouts, two
-/// across on narrow ones.
+/// Responsive grid of headline metrics: three across on wide layouts, stacked
+/// on narrow ones. All cards reserve their sub-line so heights match.
 class _OverviewGrid extends StatelessWidget {
   const _OverviewGrid({required this.cards});
   final List<Widget> cards;

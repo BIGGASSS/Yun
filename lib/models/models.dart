@@ -259,6 +259,7 @@ class StatsItem {
 class HistoryItem {
   const HistoryItem({
     required this.sessionId,
+    this.deviceId = '',
     required this.trackId,
     required this.title,
     required this.artist,
@@ -266,11 +267,12 @@ class HistoryItem {
     required this.listenedMs,
     required this.countedPlay,
   });
-  final String sessionId, trackId, title, artist;
+  final String sessionId, deviceId, trackId, title, artist;
   final int startedAt, listenedMs;
   final bool countedPlay;
   factory HistoryItem.fromJson(Map<String, dynamic> j) => HistoryItem(
     sessionId: j['session_id'] as String,
+    deviceId: j['device_id'] as String? ?? '',
     trackId: j['track_id'] as String,
     title: j['title'] as String? ?? '',
     artist: j['artist'] as String? ?? '',

@@ -1632,6 +1632,103 @@ async fn offline_events_are_atomic_idempotent_personal_and_rebuildable() {
 }
 
 #[tokio::test]
+async fn history_paginates_sessions_with_a_keyset_cursor() {
+    let h = Harness::new().await;
+    let track = h.upload(h.a(), &wav(60)).await;
+    let tid = track["id"].as_str().unwrap();
+    // Three sessions on one device, 10 seconds apart.
+    let sessions: Vec<String> = (0..3).map(|_| uid()).collect();
+    let events: Vec<_> = sessions
+        .iter()
+        .enumerate()
+        .map(|(index, session)| {
+            event(
+                &h.device_a,
+                session,
+                tid,
+                10_000 * (index as i64 + 1),
+                5_000,
+            )
+        })
+        .collect();
+    let (code, ack) = json_request(
+        &h.app,
+        "POST",
+        "/api/v1/listening-events",
+        Some(h.a()),
+        json!({"events": events}),
+    )
+    .await;
+    assert_eq!(code, StatusCode::OK, "{ack}");
+
+    // Page 1: the newest two sessions, each with its cursor fields.
+    let (code, page) = json_request(
+        &h.app,
+        "GET",
+        "/api/v1/history?limit=2",
+        Some(h.a()),
+        json!({}),
+    )
+    .await;
+    assert_eq!(code, StatusCode::OK, "{page}");
+    let history = page["history"].as_array().unwrap();
+    assert_eq!(history.len(), 2, "{page}");
+    assert_eq!(history[0]["session_id"], json!(sessions[2]));
+    assert_eq!(history[0]["started_at"], 30_000);
+    assert_eq!(history[0]["device_id"], json!(h.device_a));
+    assert_eq!(history[1]["session_id"], json!(sessions[1]));
+
+    // Page 2 continues strictly after the last row of page 1.
+    let last = &history[1];
+    let path = format!(
+        "/api/v1/history?limit=2&before_start={}&before_device={}&before_session={}",
+        last["started_at"].as_i64().unwrap(),
+        last["device_id"].as_str().unwrap(),
+        last["session_id"].as_str().unwrap(),
+    );
+    let (code, page) = json_request(&h.app, "GET", &path, Some(h.a()), json!({})).await;
+    assert_eq!(code, StatusCode::OK, "{page}");
+    let history = page["history"].as_array().unwrap();
+    assert_eq!(history.len(), 1, "{page}");
+    assert_eq!(history[0]["session_id"], json!(sessions[0]));
+
+    // Page 3: the cursor past the oldest session returns an empty page.
+    let last = &history[0];
+    let path = format!(
+        "/api/v1/history?limit=2&before_start={}&before_device={}&before_session={}",
+        last["started_at"].as_i64().unwrap(),
+        last["device_id"].as_str().unwrap(),
+        last["session_id"].as_str().unwrap(),
+    );
+    let (code, page) = json_request(&h.app, "GET", &path, Some(h.a()), json!({})).await;
+    assert_eq!(code, StatusCode::OK, "{page}");
+    assert_eq!(page["history"], json!([]));
+
+    // The range filter applies before pagination.
+    let (code, page) = json_request(
+        &h.app,
+        "GET",
+        "/api/v1/history?from=20000",
+        Some(h.a()),
+        json!({}),
+    )
+    .await;
+    assert_eq!(code, StatusCode::OK, "{page}");
+    assert_eq!(page["history"].as_array().unwrap().len(), 2);
+
+    // A partial cursor is rejected rather than silently ignored.
+    let (code, _) = json_request(
+        &h.app,
+        "GET",
+        "/api/v1/history?before_start=30000",
+        Some(h.a()),
+        json!({}),
+    )
+    .await;
+    assert_eq!(code, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
 async fn stats_activity_buckets_days_by_each_event_timezone() {
     let h = Harness::new().await;
     let track = h.upload(h.a(), &wav(60)).await;

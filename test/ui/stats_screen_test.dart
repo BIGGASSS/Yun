@@ -20,6 +20,10 @@ class _TestApp extends AppController {
   final bool signedIn;
   ServerStats? serverStats;
   int statsRequests = 0;
+  List<HistoryItem> olderHistory = const [];
+  bool historyFails = false;
+  int historyRequests = 0;
+  HistoryItem? lastBefore;
 
   final library = <Track>[
     const Track(
@@ -45,6 +49,19 @@ class _TestApp extends AppController {
     if (result == null) throw StateError('Server unavailable');
     stats = result;
     return result;
+  }
+
+  @override
+  Future<List<HistoryItem>> loadHistory({
+    DateTime? from,
+    DateTime? to,
+    HistoryItem? before,
+    int limit = 100,
+  }) async {
+    historyRequests++;
+    lastBefore = before;
+    if (historyFails) throw StateError('Server unavailable');
+    return olderHistory;
   }
 }
 
@@ -101,6 +118,26 @@ ServerStats _stats(DateTime now) => ServerStats(
       listenedMs: 100000,
       countedPlay: false,
     ),
+  ],
+);
+
+/// A stats payload with a full 100-session first page (the server's stats
+/// history cap), so the history view has somewhere older to go.
+ServerStats _fullHistoryPage(DateTime now) => ServerStats(
+  listenedMs: 5000000,
+  playCount: 100,
+  history: [
+    for (var i = 0; i < 100; i++)
+      HistoryItem(
+        sessionId: 's$i',
+        deviceId: 'd1',
+        trackId: 'one',
+        title: 'First song',
+        artist: 'Artist A',
+        startedAt: now.millisecondsSinceEpoch - i * 60000,
+        listenedMs: 50000,
+        countedPlay: true,
+      ),
   ],
 );
 
@@ -253,6 +290,104 @@ void main() {
       find.bySemanticsLabel(RegExp(r'over 1 days, 1h in total')),
       findsOneWidget,
     );
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('history loads older sessions when scrolled to the end', (
+    tester,
+  ) async {
+    final app = _TestApp(serverStats: _fullHistoryPage(now))
+      ..olderHistory = [
+        HistoryItem(
+          sessionId: 'old',
+          deviceId: 'd1',
+          trackId: 'one',
+          title: 'First song',
+          artist: 'Artist A',
+          startedAt: now
+              .subtract(const Duration(days: 40))
+              .millisecondsSinceEpoch,
+          listenedMs: 60000,
+          countedPlay: true,
+        ),
+      ];
+    addTearDown(app.dispose);
+    await pump(tester, app);
+    await tester.tap(find.text('History'));
+    await tester.pumpAndSettle();
+    expect(find.text('4 Sep'), findsNothing);
+
+    tester
+        .state<ScrollableState>(find.byType(Scrollable))
+        .position
+        .jumpTo(
+          tester
+              .state<ScrollableState>(find.byType(Scrollable))
+              .position
+              .maxScrollExtent,
+        );
+    await tester.pumpAndSettle();
+
+    // The next page continues strictly after the first page's last session.
+    expect(app.historyRequests, 1);
+    expect(app.lastBefore?.sessionId, 's99');
+    expect(find.text('4 Sep'), findsOneWidget);
+
+    // A short page ends pagination: scrolling again asks for nothing more.
+    tester
+        .state<ScrollableState>(find.byType(Scrollable))
+        .position
+        .jumpTo(
+          tester
+              .state<ScrollableState>(find.byType(Scrollable))
+              .position
+              .maxScrollExtent,
+        );
+    await tester.pumpAndSettle();
+    expect(app.historyRequests, 1);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('older history failure offers a retry and recovers', (
+    tester,
+  ) async {
+    final app = _TestApp(serverStats: _fullHistoryPage(now))
+      ..historyFails = true
+      ..olderHistory = [
+        HistoryItem(
+          sessionId: 'old',
+          deviceId: 'd1',
+          trackId: 'one',
+          title: 'First song',
+          artist: 'Artist A',
+          startedAt: now
+              .subtract(const Duration(days: 40))
+              .millisecondsSinceEpoch,
+          listenedMs: 60000,
+          countedPlay: true,
+        ),
+      ];
+    addTearDown(app.dispose);
+    await pump(tester, app);
+    await tester.tap(find.text('History'));
+    await tester.pumpAndSettle();
+    tester
+        .state<ScrollableState>(find.byType(Scrollable))
+        .position
+        .jumpTo(
+          tester
+              .state<ScrollableState>(find.byType(Scrollable))
+              .position
+              .maxScrollExtent,
+        );
+    await tester.pumpAndSettle();
+    expect(find.text('Older sessions did not load'), findsOneWidget);
+
+    app.historyFails = false;
+    await tester.tap(find.text('Retry'));
+    await tester.pumpAndSettle();
+    expect(find.text('Older sessions did not load'), findsNothing);
+    expect(find.text('4 Sep'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
 
