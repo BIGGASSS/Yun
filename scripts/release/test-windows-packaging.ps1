@@ -173,11 +173,16 @@ try {
     # Compile without build metadata, then with a quoted prerelease/build version.
     Invoke-Package
     $info = [Diagnostics.FileVersionInfo]::GetVersionInfo($installer)
-    Assert-True ($info.FileVersion -eq '1.2.3.0') 'a missing build number becomes .0'
+    # FileVersion is display text and need not format all four numeric words.
+    # Check the numeric PE version words rather than its independent text field.
+    $numericVersion = @($info.FileMajorPart, $info.FileMinorPart, $info.FileBuildPart, $info.FilePrivatePart) -join '.'
+    Assert-True ($numericVersion -eq '1.2.3.0') "a missing build number becomes .0 (got $numericVersion)"
     Write-Fixture $pubspec "name: yun`nversion: '1.2.3-rc.1+45' # Flutter version`n"
     Invoke-Package
     $info = [Diagnostics.FileVersionInfo]::GetVersionInfo($installer)
-    Assert-True ($info.FileVersion -eq '1.2.3.45') 'PE version comes from pubspec, not a hardcoded version'
+    $numericVersion = @($info.FileMajorPart, $info.FileMinorPart, $info.FileBuildPart, $info.FilePrivatePart) -join '.'
+    Assert-True ($numericVersion -eq '1.2.3.45') "PE version comes from pubspec (got $numericVersion)"
+    Assert-True ($info.ProductVersion -eq '1.2.3-rc.1+45') 'the full version is preserved as display text'
     Assert-True ((Get-AuthenticodeSignature -LiteralPath $installer).Status -eq 'NotSigned') 'Setup remains unsigned'
 
     # No /DIR override: test the real default per-user destination and optional task default.
