@@ -1,0 +1,5 @@
+#!/bin/sh
+# Resolve the complete bundle independently of the caller's working directory.
+set -eu
+here=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
+exec "$here/yun" "$@"

@@ -4,18 +4,19 @@
 
 Pushing a `v*` tag triggers **Release** (`.github/workflows/tag-release.yml`),
 validates the source, builds all four
-clients and the Linux server, and publishes their archives/APK plus `SHA256SUMS`
-to a GitHub Release with generated release notes. Android uses the configured
-release keystore (no debug fallback); macOS and Windows remain unsigned. All
+clients and the Linux server, and publishes their installers, AppImage, disk image,
+APK and Linux client/server archives plus `SHA256SUMS` to a GitHub Release with
+generated release notes. Android uses the configured release keystore (no debug
+fallback); macOS and Windows remain unsigned. All
 builds must succeed before publication. Releases follow repository visibility;
 review the acceptance and license gates below before pushing a release tag.
 
 CI and the separate **Release candidates** workflow
 (`.github/workflows/release.yml`) upload workflow artifacts only (14-day retention).
-They do not publish a GitHub Release, packages, or container images. These artifacts
-are publicly accessible when the repository is public; environment approval does
-not make an artifact private. An artifact is **not** evidence of a completed
-hardware, security, signing, or license review.
+They do not publish a GitHub Release or upload to package/container registries.
+These artifacts are publicly accessible when the repository is public; environment
+approval does not make an artifact private. An artifact is **not** evidence of a
+completed hardware, security, signing, or license review.
 
 - `.fvmrc` is the Flutter version source of truth: currently **3.47.5**.
 - `.github/actions/flutter/action.yml` first bootstraps that exact Flutter/Dart
@@ -37,11 +38,20 @@ hardware, security, signing, or license review.
 
 `CI` runs Flutter analyze/test; Rust fmt/test/clippy (`-D warnings`) and release
 build; shell lint, Docker/Caddy configuration and container smoke checks; and all
-four native client builds via `native-builds.yml`. Ubuntu installs GTK3, libmpv,
-libsecret, Ayatana AppIndicator, clang, CMake, Ninja, pkg-config, and liblzma
-development dependencies.
+four native client builds via `native-builds.yml`. Ubuntu 24.04 installs GTK3,
+libmpv, libsecret, clang, CMake, Ninja, pkg-config, and liblzma development
+dependencies. No Ayatana/AppIndicator library is required.
 macOS uses the Apple Silicon `macos-15` runner (asserts arm64); Windows uses x64
 MSVC on `windows-2022`; Android uses Java 17 plus the Android SDK.
+
+Linux packaging uses **appimagetool 1.9.1** and the **type2 runtime 20251108**,
+both version-pinned and SHA-256 verified before use. It preserves the Flutter
+bundle directly, without linuxdeploy or vendoring system GTK3/libsecret/libmpv.
+The Debian package uses `dpkg-dev`'s `dpkg-shlibdeps` to calculate shared-library
+dependencies, plus an explicit `libmpv2` dependency because playback loads it
+dynamically. Windows packaging uses `scripts/release/package-windows.ps1` and
+Inno Setup 6.3+ (`ISCC.exe`, preinstalled on `windows-2022`; use `-IsccPath` or
+`ISCC_PATH` for a nonstandard local installation).
 
 To publish a release, update `pubspec.yaml`'s version/build number, commit the
 reviewed changes, then push a tag such as:
@@ -62,16 +72,18 @@ packaging does not run the validation job: verify successful CI for the exact
 commit first. Tag releases separately gate packaging on validation, including
 Flutter tests against a freshly built actual server binary.
 Download the per-target artifacts from that workflow run; manual dispatch does
-not publish a GitHub Release. Check `SHA256SUMS` against the contained archives, e.g.
-`sha256sum -c SHA256SUMS` (Linux) or `shasum -a 256 -c SHA256SUMS` (macOS).
-On Windows use `Get-FileHash -Algorithm SHA256 <archive>` and compare explicitly.
+not publish a GitHub Release. Check `SHA256SUMS` against the downloaded release
+files, e.g. `sha256sum -c SHA256SUMS` (Linux) or
+`shasum -a 256 -c SHA256SUMS` (macOS).
+On Windows use `Get-FileHash -Algorithm SHA256 yun-windows-x64-unsigned.exe`
+and compare explicitly.
 Unsigned checksums catch corruption, not an attacker replacing both files.
 
 | Artifact | Contents and current signing status |
 | --- | --- |
-| `yun-linux-x64` | Release-mode complete Flutter bundle in `yun-linux-x64.tar.gz`, installer, `.desktop`, icon, dependency inventory and review warning |
+| `yun-linux-x64` | `yun-linux-x64.AppImage`, `yun-linux-x64.deb` and the original `yun-linux-x64.tar.gz` with `install.sh`, each preserving the complete release-mode Flutter bundle, canonical desktop/icon assets, dependency inventory, `LICENSE` and review warning; Ubuntu 24.04 baseline, system native libraries required |
 | `yun-macos-arm64-unsigned` | ARM64 release app in a drag-to-Applications DMG; **no Developer ID signing/notarization**, at most Flutter's ad-hoc signatures |
-| `yun-windows-x64-unsigned` | Complete release bundle ZIP; **no Authenticode signing**, portable executable with adjacent DLLs/data |
+| `yun-windows-x64-unsigned` | `yun-windows-x64-unsigned.exe`, an Inno Setup wizard containing the complete Flutter release bundle and inventory; per-user install with registered uninstall/upgrade; **no Authenticode signing** |
 | `yun-android-arm64-debug-signed` | Default: **debug-mode, debug-key-signed** ARM64 APK, not a production/Play release |
 | `yun-android-arm64-release-signed` | Tag releases or manual opt-in: release-mode ARM64 APK signed with the operator's keystore; signature verified with `apksigner`, still subject to acceptance/license gates |
 | `yun-server-linux-x64` | Locked Rust server release binary (CI), or tar.gz with server operations docs and Cargo dependency inventory (release/candidate workflows) |
@@ -244,32 +256,48 @@ export an unencrypted PFX or pass its password using `signtool /p`. The example
 uses an already provisioned **CurrentUser\\My** certificate; a hardware provider
 may prompt for authorization. Certificate thumbprints are public identifiers.
 
-Extract the verified unsigned ZIP to a clean private staging directory. Inventory
-all PE files; preserve third-party signatures and follow their redistribution
-terms. The commands sign Yun's executable, **not a claim that all bundled DLLs
-are publisher-signed**. Sign additional first-party PE binaries only after review.
-From that staging directory, with `Yun/` containing the full bundle:
+Work from the reviewed source checkout with a freshly built complete release
+bundle in `build/windows/x64/runner/Release` and its dependency inventory,
+`pubspec.lock`, and `BUILD.txt` prepared in `dist/` as in `native-builds.yml`.
+Inventory all PE files; preserve third-party signatures and follow their
+redistribution terms. The commands sign Yun's executable and the final installer,
+**not a claim that all bundled DLLs are publisher-signed**. Sign additional
+first-party PE binaries only after review. Run from the checkout root in
+PowerShell 7 with Inno Setup 6.3+ installed:
 
 ```powershell
 $ErrorActionPreference = 'Stop'
 $Thumbprint = Read-Host 'Approved code-signing certificate SHA-1 thumbprint'
-signtool sign /s My /sha1 $Thumbprint /fd SHA256 /tr https://timestamp.digicert.com /td SHA256 Yun\yun.exe
+$Exe = 'build/windows/x64/runner/Release/yun.exe'
+signtool sign /s My /sha1 $Thumbprint /fd SHA256 /tr https://timestamp.digicert.com /td SHA256 $Exe
 if ($LASTEXITCODE -ne 0) { throw 'Signing failed' }
-signtool verify /pa /all /v Yun\yun.exe
+signtool verify /pa /all /v $Exe
 if ($LASTEXITCODE -ne 0) { throw 'Signature verification failed' }
-Get-AuthenticodeSignature Yun\yun.exe | Format-List Status,SignerCertificate,TimeStamperCertificate
+Get-AuthenticodeSignature $Exe | Format-List Status,SignerCertificate,TimeStamperCertificate
 # Compare publisher/certificate to the independently approved identity.
-Add-Content Yun\BUILD.txt 'Operator Authenticode signing applied; retain certificate/timestamp evidence separately.'
-New-Item -ItemType Directory -Path dist -Force | Out-Null
-Compress-Archive -Path Yun -DestinationPath dist/yun-windows-x64-authenticode.zip -Force
-Get-FileHash -Algorithm SHA256 dist/yun-windows-x64-authenticode.zip
+Add-Content dist/BUILD.txt 'Operator Authenticode signing of yun.exe and installer; uninstaller remains unsigned. Retain certificate/timestamp evidence separately.'
+# The bundle-preserving packaging helper performs no signing itself.
+./scripts/release/package-windows.ps1
+$Installer = 'dist/yun-windows-x64-authenticode.exe'
+Move-Item dist/yun-windows-x64-unsigned.exe $Installer
+signtool sign /s My /sha1 $Thumbprint /fd SHA256 /tr https://timestamp.digicert.com /td SHA256 $Installer
+if ($LASTEXITCODE -ne 0) { throw 'Installer signing failed' }
+signtool verify /pa /all /v $Installer
+if ($LASTEXITCODE -ne 0) { throw 'Installer signature verification failed' }
+Get-AuthenticodeSignature $Installer | Format-List Status,SignerCertificate,TimeStamperCertificate
+python scripts/release/checksums.py # Only AFTER signing changed the installer bytes.
+if ($LASTEXITCODE -ne 0) { throw 'Checksum generation failed' }
+Get-FileHash -Algorithm SHA256 $Installer
 ```
 
-Use the CA-approved RFC3161 timestamp service if different. Verify on a clean
-Windows machine, including timestamp/certificate chain and SmartScreen behavior;
-signing does not guarantee reputation or remove prompts. Preserve signed ZIP
-hashes and verification evidence privately; never relabel the original unsigned
-workflow artifact as signed.
+Signing the final installer does not sign Inno Setup's generated uninstaller;
+the default packaging configuration leaves that uninstaller unsigned. A signed
+uninstaller requires a separately reviewed Inno Setup signing configuration.
+Use the CA-approved RFC3161 timestamp service if different. Verify installation,
+upgrade and uninstall on a clean Windows machine, including timestamp/certificate
+chain and SmartScreen behavior; signing does not guarantee reputation or remove
+prompts. Preserve signed installer hashes and verification evidence privately;
+never relabel the original unsigned workflow artifact as signed.
 
 ## macOS Developer ID + notarization: secure operator procedure (not automated)
 
@@ -346,31 +374,96 @@ of these native/operator steps has been executed by the host-only tooling tests.
 
 ### Linux x64
 
-Built on Ubuntu 24.04; older glibc distributions are not guaranteed. Install runtime
-dependencies on Ubuntu 24.04:
+Choose `yun-linux-x64.AppImage`, `yun-linux-x64.deb` or the original
+`yun-linux-x64.tar.gz` with `install.sh`. AppImage and Debian packages are
+additional options, not replacements for the tarball installer. All three contain
+the **whole** Flutter release bundle, dependency inventory, lockfile, build
+provenance, release/validation docs, `LICENSE` and notices warning. Do not extract
+or move only the `yun` executable. All use the **Ubuntu 24.04 baseline** and the
+same system GTK3, libsecret and libmpv2 runtime libraries; older glibc distributions
+are not guaranteed. Quit Yun before installing or upgrading any format. User data,
+the offline library and keyring credentials are kept outside the binary locations.
+
+#### AppImage
+
+The AppImage is **not a universal standalone binary**: it intentionally relies
+on system GTK3, libsecret and libmpv2, plus their transitive dependencies. No
+linuxdeploy step vendors those libraries. On Ubuntu 24.04:
 
 ```sh
-sudo apt-get update
-sudo apt-get install libgtk-3-0t64 libmpv2 libsecret-1-0
-# A running user Secret Service/keyring (e.g. GNOME Keyring) is also required.
-tar -xzf yun-linux-x64.tar.gz
-bash yun/install.sh
+sudo apt update
+sudo apt install libgtk-3-0t64 libsecret-1-0 libmpv2
+chmod +x yun-linux-x64.AppImage
+./yun-linux-x64.AppImage
 ```
 
-Yun uses D-Bus directly for its Linux tray; no Ayatana/AppIndicator library is
-required. Tray display additionally needs a StatusNotifier host (for example KDE
-Plasma). Without one Yun remains usable but will not hide to the tray. Closing quits by
-default; **Settings → Window behavior** can opt into close-to-tray. Use **Quit Yun**
-before replacing binaries when that preference is enabled.
+The image contains a root `AppRun` launcher that starts the bundled `yun`.
+If FUSE is unavailable, the pinned runtime supports this FUSE-free alternative:
 
-The installer requires Bash/Python 3 and installs the **whole** bundle into
-`~/.local/opt/yun`, with a desktop entry in
-`${XDG_DATA_HOME:-~/.local/share}/applications/yun.desktop`. Close Yun before
-updating; the previous bundle is kept at `~/.local/opt/yun.previous`. You can also
-run `./yun/yun` directly from the extracted archive. Do not move only the executable.
-Remove those install/desktop paths to uninstall binaries; do not delete application
-data or keyring entries without deciding whether to preserve your offline library
-and credentials. No root-level install or automatic updater is provided.
+```sh
+./yun-linux-x64.AppImage --appimage-extract-and-run
+```
+
+Quit Yun before replacing the AppImage with a newer verified download. Delete
+the AppImage to remove its binaries; user data and keyring entries are separate.
+
+#### Debian package
+
+Use APT so native runtime dependencies are resolved automatically:
+
+```sh
+sudo apt update
+sudo apt install ./yun-linux-x64.deb
+yun
+```
+
+The package installs the complete bundle into `/usr/lib/yun`, provides the
+`/usr/bin/yun` symlink, and installs the canonical
+`/usr/share/applications/app.yun.yun.desktop` and
+`/usr/share/icons/hicolor/256x256/apps/app.yun.yun.png` assets. Quit Yun before
+upgrading with the same `apt install ./yun-linux-x64.deb` command for the newer
+package. Uninstall with:
+
+```sh
+sudo apt remove yun
+```
+
+Removal preserves application data, the offline library and keyring credentials.
+
+#### Original tarball and install.sh
+
+`yun-linux-x64.tar.gz` extracts into `yun/` with the complete Flutter bundle,
+metadata/docs and `LICENSE`. It also retains the unchanged
+`scripts/release/install-linux.sh` as `install.sh`,
+`scripts/release/yun.desktop` as `yun.desktop`, and `assets/icon.png` as `yun.png`.
+Install the same runtime libraries listed above for AppImage, and have Bash and
+Python 3 available. Quit Yun and extract each new archive outside the install
+directory before installing or upgrading:
+
+```sh
+tar -xzf yun-linux-x64.tar.gz
+bash yun/install.sh
+"$HOME/.local/opt/yun/yun"
+```
+
+The original installer runs **without sudo**, copies the complete extracted bundle
+to `~/.local/opt/yun`, and keeps the immediately previous bundle at
+`~/.local/opt/yun.previous` (replacing any older backup). It writes the desktop
+entry to `${XDG_DATA_HOME:-$HOME/.local/share}/applications/yun.desktop`, defaulting
+to `~/.local/share/applications/yun.desktop`. To uninstall, remove the installed
+bundle, its `.previous` backup if present, and that user-local desktop entry;
+application data and keyring credentials remain separate.
+
+None of the three formats provides an automatic updater. All three need a
+desktop D-Bus session and a user Secret Service/keyring
+(e.g. GNOME Keyring or KWallet) for secure storage; installing libsecret alone
+is not sufficient. Yun uses D-Bus directly for its Linux tray; no
+Ayatana/AppIndicator library is required. Tray display additionally needs a
+StatusNotifier host (for example KDE Plasma). Without one Yun remains usable but
+will not hide to the tray. Closing quits by default; **Settings → Window
+behavior** can opt into close-to-tray. Use **Quit Yun** before upgrading or
+removing binaries when that preference is enabled. Desktop/keyring/media behavior
+still requires real-desktop validation; packaging is not evidence of that testing.
 
 ### macOS ARM64
 
@@ -383,19 +476,26 @@ replacing the app; remove the app to uninstall binaries, retaining user data unl
 you explicitly choose to remove it. Keychain, background playback, notifications,
 and lock-screen/media controls require real-device validation.
 
-### Windows x64 portable
+### Windows x64
 
-Install the Microsoft Visual C++ 2015–2022 x64 Redistributable from Microsoft if
-not already installed. Extract the entire ZIP into a writable folder such as
-`%LOCALAPPDATA%\Programs\Yun`; run `Yun\yun.exe` (or extract the inner `Yun`
-folder there). Keep every DLL, plugin, `data` directory, and native media file
-beside the executable. Create a normal shortcut if desired; no installer, service,
-or PATH change is required. Quit before replacing the directory. SmartScreen may
-warn because this is unsigned; verify source/checksum and follow organizational
-policy rather than bypassing system-wide protections. Delete the bundle to
-uninstall binaries. Application data and secure-storage credentials are separate
-and are not erased by removing the portable folder. Validate playback and Windows
-System Media Transport Controls on a real Windows machine.
+Install the [Microsoft Visual C++ 2015–2022 x64 Redistributable](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist)
+from Microsoft if not already installed. Yun's installer does **not** download or
+install this runtime automatically.
+
+Run `yun-windows-x64-unsigned.exe` and follow the Inno Setup wizard. Yun installs
+per-user into `%LOCALAPPDATA%\Programs\Yun` without administrator privileges,
+including every Flutter DLL, plugin, `data` directory, native media file and
+release inventory. The wizard creates a Start Menu shortcut and offers an
+optional desktop shortcut. Launch Yun from the shortcut or the installed
+`yun.exe`; do not move the executable away from its bundle.
+
+Quit Yun before running a newer installer to upgrade the registered installation.
+Use Windows Settings → Apps → Yun → Uninstall to remove the installed files and
+shortcuts. Application data and secure-storage credentials are separate and are
+preserved by uninstall. SmartScreen may warn because this installer is unsigned;
+verify source/checksum and follow organizational policy rather than bypassing
+system-wide protections. Installation, upgrade, uninstall, playback and Windows
+System Media Transport Controls still require validation on a real Windows machine.
 
 ### Android ARM64 evaluation APK
 

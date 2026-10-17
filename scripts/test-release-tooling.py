@@ -94,11 +94,17 @@ sys.stdout.buffer.write(pathlib.Path(os.environ[source]).read_bytes())
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             (root / "dist").mkdir()
-            (root / "dist/candidate.zip").write_bytes(b"fixture")
+            names = ["candidate" + suffix for suffix in
+                     (".zip", ".tar.gz", ".apk", ".dmg", ".exe", ".AppImage", ".deb")]
+            for name in names:
+                (root / "dist" / name).write_bytes(name.encode())
+            (root / "dist/BUILD.txt").write_text("not a release asset")
+            (root / "dist/directory.deb").mkdir()
             subprocess.run(["python3", str(ROOT / "scripts/release/checksums.py")], cwd=root, check=True)
             self.assertEqual(
                 (root / "dist/SHA256SUMS").read_text(),
-                hashlib.sha256(b"fixture").hexdigest() + "  candidate.zip\n",
+                "".join(hashlib.sha256(name.encode()).hexdigest() + f"  {name}\n"
+                        for name in sorted(names)),
             )
 
     def test_restore_rejects_unsafe_or_nonbackup_archives_before_docker(self):

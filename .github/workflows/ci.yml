@@ -81,7 +81,7 @@ jobs:
         with:
           persist-credentials: false
       - run: for script in scripts/*.sh scripts/release/*.sh; do bash -n "$script"; done
-      - run: shellcheck scripts/*.sh scripts/release/*.sh
+      - run: shellcheck scripts/*.sh scripts/release/*.sh scripts/release/AppRun
       - run: python3 scripts/test-release-tooling.py
       - run: python3 scripts/release/test-android-signing.py
       - run: python3 scripts/release/test-android-resources.py
