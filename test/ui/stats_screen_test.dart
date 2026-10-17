@@ -185,6 +185,77 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
+  testWidgets('chart keeps activity recorded ahead of the viewing date', (
+    tester,
+  ) async {
+    // Segments are bucketed in their recorded timezone; a viewer behind that
+    // timezone must not drop days the server returned (cross-device timezones
+    // or westward travel put recorded dates past the viewer's midnight).
+    final app = _TestApp(
+      serverStats: ServerStats(
+        listenedMs: 5400000,
+        playCount: 2,
+        activity: [
+          StatsActivityItem(
+            day: _ordinal(now) - 2,
+            listenedMs: 1800000,
+            playCount: 1,
+          ),
+          StatsActivityItem(
+            day: _ordinal(now) + 1,
+            listenedMs: 3600000,
+            playCount: 1,
+          ),
+        ],
+      ),
+    );
+    addTearDown(app.dispose);
+    await pump(tester, app);
+
+    // Oct 12–15 (viewer: Oct 14): four buckets retaining every returned ms.
+    expect(
+      find.bySemanticsLabel(
+        RegExp(r'over 4 days, 1h 30m in total\. Peak: Wed, 15 Oct'),
+      ),
+      findsOneWidget,
+    );
+
+    // Selected ranges expand to fit returned days at the boundary too.
+    await tester.tap(find.text('7 days'));
+    await tester.pumpAndSettle();
+    expect(
+      find.bySemanticsLabel(RegExp(r'over 8 days, 1h 30m in total')),
+      findsOneWidget,
+    );
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('chart appears when all activity is recorded ahead of the '
+      'viewing date', (tester) async {
+    final app = _TestApp(
+      serverStats: ServerStats(
+        listenedMs: 3600000,
+        playCount: 1,
+        activity: [
+          StatsActivityItem(
+            day: _ordinal(now) + 1,
+            listenedMs: 3600000,
+            playCount: 1,
+          ),
+        ],
+      ),
+    );
+    addTearDown(app.dispose);
+    await pump(tester, app);
+
+    expect(find.text('Activity'), findsOneWidget);
+    expect(
+      find.bySemanticsLabel(RegExp(r'over 1 days, 1h in total')),
+      findsOneWidget,
+    );
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('view chips switch between rankings and grouped history', (
     tester,
   ) async {

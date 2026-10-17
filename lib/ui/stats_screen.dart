@@ -247,7 +247,7 @@ class _StatsScreenState extends State<StatsScreen> {
   ({List<_Bucket> buckets, bool daily}) _activity(ServerStats stats) {
     final todayOrdinal = _dayOrdinal(widget._now());
     final custom = _custom;
-    final int fromOrdinal;
+    int fromOrdinal;
     var toOrdinal = todayOrdinal;
     if (_range == '7 days') {
       fromOrdinal = todayOrdinal - 6;
@@ -271,6 +271,14 @@ class _StatsScreenState extends State<StatsScreen> {
       }
       if (first == null) return (buckets: const <_Bucket>[], daily: true);
       fromOrdinal = first;
+    }
+    // Recorded day ordinals use each segment's own timezone, which can sit
+    // just outside the viewing device's calendar bounds (cross-device
+    // timezones, travel). The server already filtered the absolute range;
+    // never drop returned listening — expand the chart to fit it.
+    for (final item in stats.activity) {
+      if (item.day < fromOrdinal) fromOrdinal = item.day;
+      if (item.day > toOrdinal) toOrdinal = item.day;
     }
     final days = toOrdinal - fromOrdinal + 1;
     if (days <= 0) return (buckets: const <_Bucket>[], daily: true);
