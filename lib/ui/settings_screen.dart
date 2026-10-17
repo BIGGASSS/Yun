@@ -2,8 +2,11 @@ import 'package:flutter/material.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 
 import '../core/app_controller.dart';
+import '../core/data_directory_controller.dart';
 import '../core/desktop_controller.dart';
 import '../core/update_check_controller.dart';
+import '../services/data_directory_picker.dart';
+import 'data_storage_settings.dart';
 import 'widgets.dart';
 
 class SettingsScreen extends StatefulWidget {
@@ -12,12 +15,16 @@ class SettingsScreen extends StatefulWidget {
     required this.app,
     this.desktop,
     this.updateCheck,
+    this.dataDirectory,
+    this.directoryPicker,
     required this.themeMode,
     required this.onThemeChanged,
   });
   final AppController app;
   final DesktopController? desktop;
   final UpdateCheckController? updateCheck;
+  final DataDirectoryController? dataDirectory;
+  final DataDirectoryPicker? directoryPicker;
   final ThemeMode themeMode;
   final ValueChanged<ThemeMode> onThemeChanged;
   @override
@@ -280,6 +287,16 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     padding: EdgeInsets.symmetric(vertical: 24),
                     child: Divider(),
                   ),
+                  if (widget.dataDirectory != null) ...[
+                    DataStorageSettings(
+                      controller: widget.dataDirectory!,
+                      picker: widget.directoryPicker,
+                    ),
+                    const Padding(
+                      padding: EdgeInsets.symmetric(vertical: 24),
+                      child: Divider(),
+                    ),
+                  ],
                   if (isDesktopPlatform && widget.desktop != null) ...[
                     _WindowBehavior(desktop: widget.desktop!),
                     const Padding(

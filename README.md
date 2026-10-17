@@ -23,7 +23,7 @@ Rendered from the Flutter UI using a demo library and original sample artwork.
 - Admin-created accounts, Argon2id passwords, rotating and revocable sessions, and authenticated original-file streaming with byte-range seeking.
 - File selection in the app and drag-and-drop on desktop, durable resumable uploads, embedded tags and artwork, per-account deduplication, quotas, and validation.
 - Versioned playlists with conflict detection and incremental library sync.
-- Explicit offline selections for tracks, albums, and playlists. Downloads are resumable and checksum-verified. Artwork is cached per account, with byte progress and storage management.
+- Explicit offline selections for tracks, albums, and playlists. Downloads are resumable and checksum-verified. Artwork is cached per account, with byte progress and storage management. **Settings → Data storage** changes the local data directory and safely migrates all accounts' data on the next launch.
 - Monotonic listening-time segments, a durable offline outbox, idempotent server ingestion, listening history, and personal track, artist, and album rankings.
 - Android foreground audio, macOS media controls, Linux MPRIS and Windows SMTC adapters, platform configurations, and native artifact workflows.
 - Container and HTTPS deployment, stopped-server backup and restore, unit and widget tests, real Rust↔Dart TCP integration tests, CI, and evaluation packaging.

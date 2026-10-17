@@ -35,6 +35,13 @@ the specified major. Core dependencies must also be installed before running
   trays keep the window visible, retain the preference, and expose a dismissible
   error. Controls are platform-gated even at narrow desktop / wide mobile sizes.
   Bootstrap supplies the optional `YunApp.desktop` controller.
+- **Settings → Data storage** shows the active local directory, offers a native
+  folder picker, restores the default location, and cancels pending changes.
+  Changes require a full quit/reopen; startup migrates all accounts before any
+  database is opened. Copy/permission errors leave the original data available.
+  macOS retains read-write security-scoped folder bookmarks across launches;
+  Android requires an app-accessible filesystem directory, not a provider URI.
+  Bootstrap supplies `YunApp.dataDirectory` and the optional directory picker.
 - Track rows show audio bitrate in kbps alongside artist and availability.
   Legacy tracks fall back to a clearly marked (~) file-size/duration estimate;
   missing duration/size leaves bitrate hidden. The shared info also appears in
