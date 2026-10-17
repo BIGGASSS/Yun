@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 import 'dart:ui' show AppExitResponse;
 
 import 'package:flutter/material.dart';
@@ -7,10 +8,12 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import 'core/app_controller.dart';
 import 'core/collection_settings_controller.dart';
+import 'core/data_directory_controller.dart';
 import 'core/desktop_controller.dart';
 import 'core/update_check_controller.dart';
-import 'services/desktop_host.dart';
 import 'services/collection_settings_store.dart';
+import 'services/data_directory_picker.dart';
+import 'services/desktop_host.dart';
 import 'services/desktop_settings_store.dart';
 import 'services/desktop_window_startup.dart';
 import 'services/github_update_checker.dart';
@@ -32,6 +35,7 @@ class YunBootstrap extends StatefulWidget {
     this.controllerFactory,
     this.desktopHostFactory,
     this.updateCheckerFactory,
+    this.dataDirectoryFactory,
   });
 
   /// Native boundary injected by bootstrap tests; never called on touch/web.
@@ -42,6 +46,10 @@ class YunBootstrap extends StatefulWidget {
     required Future<void> Function(PlaybackSettings) savePlaybackSettings,
   })?
   controllerFactory;
+
+  /// Custom account factories bypass native storage selection unless this is
+  /// supplied. Production always resolves storage before opening the account.
+  final Future<DataDirectoryController> Function()? dataDirectoryFactory;
 
   /// Builds the advisory startup update checker; injected by bootstrap tests.
   /// Returning null or throwing only skips the check, never startup.
@@ -58,6 +66,8 @@ class _YunBootstrapState extends State<YunBootstrap> {
   SharedPreferences? _preferences;
   CollectionSettingsController? _collectionSettings;
   UpdateCheckController? _updateCheck;
+  DataDirectoryController? _dataDirectory;
+  final _directoryPicker = DataDirectoryPicker();
   Object? _failure;
   bool _ready = false;
   late final AppLifecycleListener _lifecycle;
@@ -109,13 +119,18 @@ class _YunBootstrapState extends State<YunBootstrap> {
         try {
           await _collectionSettings?.flushSettings();
         } finally {
-          await _desktop?.flushSettings();
+          try {
+            await _desktop?.flushSettings();
+          } finally {
+            await _dataDirectory?.flush();
+          }
         }
       }
     }
   }
 
   Future<void> _shutdownController() async {
+    await _dataDirectory?.flush();
     await _collectionSettings?.flushSettings();
     await _controller?.shutdown();
   }
@@ -166,6 +181,8 @@ class _YunBootstrapState extends State<YunBootstrap> {
       _desktop = null;
       _updateCheck?.dispose();
       _updateCheck = null;
+      _dataDirectory?.dispose();
+      _dataDirectory = null;
       _preferences = await SharedPreferences.getInstance();
       final collectionStore = SharedPreferencesCollectionSettingsStore(
         _preferences!,
@@ -186,17 +203,37 @@ class _YunBootstrapState extends State<YunBootstrap> {
         shuffle: saved.shuffle,
         repeatMode: saved.repeatMode,
       );
-      final factory = widget.controllerFactory ?? AppController.new;
-      final controller = factory(
-        playbackSettings: settings,
-        savePlaybackSettings: store.write,
-      );
+      final storageFactory = widget.dataDirectoryFactory;
+      if (storageFactory != null || widget.controllerFactory == null) {
+        await _directoryPicker.restoreAccess();
+        _dataDirectory =
+            await (storageFactory ?? DataDirectoryController.open)();
+      }
+      if (!mounted) {
+        _dataDirectory?.dispose();
+        _dataDirectory = null;
+        return;
+      }
+      final controller =
+          widget.controllerFactory?.call(
+            playbackSettings: settings,
+            savePlaybackSettings: store.write,
+          ) ??
+          AppController(
+            playbackSettings: settings,
+            savePlaybackSettings: store.write,
+            storageDirectory: () async =>
+                Directory(_dataDirectory!.currentPath),
+          );
       _controller = controller;
       if (desktop) {
         final integration = DesktopController(
           host: (widget.desktopHostFactory ?? NativeDesktopHost.new)(),
           settings: SharedPreferencesDesktopSettingsStore(_preferences!),
-          prepareExit: () async => await _collectionSettings?.flushSettings(),
+          prepareExit: () async {
+            await _dataDirectory?.flush();
+            await _collectionSettings?.flushSettings();
+          },
           shutdown: controller.shutdown,
           checkpoint: () async {
             try {
@@ -230,6 +267,7 @@ class _YunBootstrapState extends State<YunBootstrap> {
   void dispose() {
     _lifecycle.dispose();
     _updateCheck?.dispose();
+    _dataDirectory?.dispose();
     _desktop?.dispose();
     _controller?.dispose();
     super.dispose();
@@ -248,6 +286,8 @@ class _YunBootstrapState extends State<YunBootstrap> {
         collectionSettings: _collectionSettings,
         desktop: _desktop,
         updateCheck: _updateCheck,
+        dataDirectory: _dataDirectory,
+        directoryPicker: _directoryPicker,
         initialThemeMode: theme,
         onThemeChanged: (mode) async {
           await _preferences?.setString('appearance.theme', mode.name);
@@ -277,7 +317,7 @@ class _YunBootstrapState extends State<YunBootstrap> {
                     const SizedBox(height: 12),
                     const Text(
                       'Check that your secure credential store is available '
-                      'and your application storage is writable. '
+                      'and your data drive is connected and writable. '
                       'Your music and pending history have not been deleted.',
                     ),
                     const SizedBox(height: 12),
