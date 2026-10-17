@@ -15,7 +15,7 @@ class StatsScreen extends StatefulWidget {
     : _now = now ?? DateTime.now;
   final AppController app;
 
-  /// Clock for range bucketing; injectable so golden tests can freeze time.
+  /// Clock for range bucketing; injectable so tests can freeze time.
   final DateTime Function() _now;
   @override
   State<StatsScreen> createState() => _StatsScreenState();

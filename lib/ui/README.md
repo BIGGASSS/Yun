@@ -67,8 +67,5 @@ the specified major. Core dependencies must also be installed before running
   text scaling/reduced motion, labeled controls, Ctrl/Cmd shortcuts.
 
 Tests: `test/ui/` and `test/core/app_artwork_test.dart`. The desktop player has
-layout/interaction tests and dark/light/840px goldens in `test/ui/goldens/`.
-Goldens intentionally use Flutter's deterministic test font, not desktop fonts;
-regenerate only after visual review with
-`fvm flutter test test/ui/player_bar_screenshot_test.dart --update-goldens`.
+layout/interaction tests in `test/ui/player_bar_test.dart`.
 Production screens contain no mock records; fixtures live only in test directories.
