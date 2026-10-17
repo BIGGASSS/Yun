@@ -182,7 +182,7 @@ try {
     $info = [Diagnostics.FileVersionInfo]::GetVersionInfo($installer)
     $numericVersion = @($info.FileMajorPart, $info.FileMinorPart, $info.FileBuildPart, $info.FilePrivatePart) -join '.'
     Assert-True ($numericVersion -eq '1.2.3.45') "PE version comes from pubspec (got $numericVersion)"
-    Assert-True ($info.ProductVersion -eq '1.2.3-rc.1+45') 'the full version is preserved as display text'
+    # The full human-readable version is checked in the installed DisplayVersion below.
     Assert-True ((Get-AuthenticodeSignature -LiteralPath $installer).Status -eq 'NotSigned') 'Setup remains unsigned'
 
     # No /DIR override: test the real default per-user destination and optional task default.
