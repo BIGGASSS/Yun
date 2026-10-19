@@ -336,6 +336,107 @@ void main() {
     }
   });
 
+  for (final view in ['Tracks', 'Albums', 'Artists']) {
+    for (final descending in [false, true]) {
+      for (final shuffle in [false, true]) {
+        _libraryTest(
+          '$view search row keeps the full collection (descending=$descending, shuffle=$shuffle)',
+          (tester, app) async {
+            app.playback.setShuffle(shuffle);
+            if (view != 'Tracks') {
+              await _tap(tester, view);
+              await _tap(tester, view == 'Albums' ? 'Collection' : 'Zebra');
+            }
+            if (view != 'Albums') await _sort(tester, 'Duration');
+            if (descending) {
+              await tester.tap(find.byTooltip('Sort descending'));
+              await tester.pumpAndSettle();
+            }
+            final ascending = [
+              'zulu',
+              if (view == 'Tracks') 'bravo',
+              'alpha',
+              'coda',
+            ];
+            final expected = descending
+                ? ascending.reversed.toList()
+                : ascending;
+            await _tap(tester, 'Alpha');
+            expect(app.playback.queue.map((track) => track.id), expected);
+
+            await tester.enterText(find.byType(TextField), '  aLpHa  ');
+            await tester.pumpAndSettle();
+            expect(_visibleIds(tester), ['alpha']);
+            await _tap(tester, 'Alpha');
+            expect(app.playback.queue.map((track) => track.id), expected);
+            expect(app.playback.currentTrack?.id, 'alpha');
+            expect(app.playback.index, expected.indexOf('alpha'));
+            expect(app.playback.shuffle, shuffle);
+            expect(app.playback.isPlaying, isTrue);
+            await app.playback.next();
+            expect(app.playback.currentTrack?.id, isNot('alpha'));
+          },
+        );
+      }
+    }
+  }
+
+  for (final view in ['Albums', 'Artists']) {
+    _libraryTest('$view opened from search queues the complete group', (
+      tester,
+      app,
+    ) async {
+      await tester.enterText(find.byType(TextField), 'Alpha');
+      await tester.pumpAndSettle();
+      await _tap(tester, view);
+      await _tap(tester, view == 'Albums' ? 'Collection' : 'Zebra');
+      expect(_visibleIds(tester), ['alpha']);
+      await _tap(tester, 'Alpha');
+      expect(app.playback.queue.map((track) => track.id), [
+        if (view == 'Albums') 'zulu',
+        'alpha',
+        'coda',
+        if (view == 'Artists') 'zulu',
+      ]);
+      expect(app.playback.currentTrack?.id, 'alpha');
+    });
+  }
+
+  _libraryTest('search row queue updates with sorting and library changes', (
+    tester,
+    app,
+  ) async {
+    await tester.enterText(find.byType(TextField), 'Alpha');
+    await tester.pumpAndSettle();
+    await _sort(tester, 'Duration');
+    app.library = [
+      ..._tracks.where((track) => track.id != 'coda'),
+      const Track(id: 'new', title: 'New song', durationMs: 250),
+    ];
+    app.update();
+    await tester.pumpAndSettle();
+    expect(_visibleIds(tester), ['alpha']);
+    await _tap(tester, 'Alpha');
+    expect(app.playback.queue.map((track) => track.id), [
+      'zulu',
+      'bravo',
+      'new',
+      'alpha',
+    ]);
+    expect(app.playback.index, 3);
+    await tester.tap(find.byTooltip('Clear search'));
+    await tester.pumpAndSettle();
+    expect(_visibleIds(tester), ['zulu', 'bravo', 'new', 'alpha']);
+    await _tap(tester, 'New song');
+    expect(app.playback.queue.map((track) => track.id), [
+      'zulu',
+      'bravo',
+      'new',
+      'alpha',
+    ]);
+    expect(app.playback.currentTrack?.id, 'new');
+  });
+
   _libraryTest('Play queues the filtered tracks in the current sort order', (
     tester,
     app,
