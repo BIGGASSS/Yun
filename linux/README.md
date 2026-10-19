@@ -13,8 +13,52 @@ system `libmpv.so.2` (or `.so.1`). A build can succeed without it, but playback
 cannot. Distribution packages must depend on the appropriate libmpv runtime
 (e.g. `libmpv2`), GTK 3, and `libsecret-1-0`, plus their transitive dependencies.
 No Ayatana/AppIndicator library is required by Yun.
-The runner links the plugin-provided mimalloc object as recommended by media_kit;
-the default plugin build downloads its pinned source archive.
+
+## Allocator selection
+
+The runner uses the **system allocator by default** (`YUN_USE_MIMALLOC=OFF`).
+The production `media_kit_libs_linux` dependency remains enabled for playback;
+OFF skips its static mimalloc download/build and does not link mimalloc, even if
+the plugin discovers a system shared mimalloc library. This avoids imposing a
+process-wide allocator override on the Flutter runner. It is not a claim that
+all native libraries use the same allocator or that every memory issue is fixed.
+
+To restore the prior media_kit-provided static mimalloc behavior, opt in with
+`YUN_USE_MIMALLOC=ON`. Its pinned source archive is downloaded and its object
+linked into `yun`; a missing allocator export fails configuration rather than
+silently falling back. Download, compilation and link failures also fail the build.
+
+Flutter 3.47.5's Linux build command does **not** accept arbitrary CMake `-D`
+arguments (nor forward `CMAKE_ARGS`). Yun instead accepts an environment value
+of exactly `ON` or `OFF` as the CMake option's initial default. An existing
+`CMakeCache.txt` value or an explicit CMake `-DYUN_USE_MIMALLOC=...` takes priority;
+changing or unsetting the environment alone does **not** change a cached choice.
+When switching allocator variants, remove the generated build directory for the
+architecture/mode being built (below: x64 release), or use `fvm flutter clean`
+for all configurations. Do not do this while another build is running.
+
+```sh
+# Reproduce the default release/CI variant, including after a mimalloc build:
+rm -rf build/linux/x64/release
+YUN_USE_MIMALLOC=OFF fvm flutter build linux --release --target-platform linux-x64
+python3 scripts/verify-linux-allocator.py --binary build/linux/x64/release/bundle/yun --expect system
+
+# Optional compatibility/comparison build using the prior allocator:
+rm -rf build/linux/x64/release
+YUN_USE_MIMALLOC=ON fvm flutter build linux --release --target-platform linux-x64
+python3 scripts/verify-linux-allocator.py --binary build/linux/x64/release/bundle/yun --expect mimalloc
+```
+
+Both variants use the same release packaging command:
+`bash scripts/release/package-linux.sh`. Rebuild before packaging after changing
+the allocator; packaging alone does not rebuild the bundle. Release CI explicitly
+selects OFF, checks the built runner's dynamic exports/dependencies before
+packaging, and records the allocator in `dist/BUILD.txt`.
+
+Run the offline CMake/linkage regressions with
+`python3 scripts/test-linux-allocator.py` (CMake, Ninja, a C++ compiler and binutils
+required; no Flutter build or network access). These exercise the actual project
+CMake with fixture plugins, not a full playback/desktop test.
 
 ## Release packages
 

@@ -109,6 +109,18 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertIn("python3 scripts/release/test-linux-packaging.py", self.native)
         self.assertIn("./scripts/release/test-windows-packaging.ps1", self.native)
 
+    def test_linux_release_uses_system_allocator_and_verifies_linkage(self):
+        linux = block(self.native, "      - if: matrix.target == 'linux-x64'")
+        self.assertIn("python3 scripts/test-linux-allocator.py", linux)
+        build = "YUN_USE_MIMALLOC=OFF fvm flutter build linux --release --target-platform linux-x64"
+        verify = ("python3 scripts/verify-linux-allocator.py "
+                  "--binary build/linux/x64/release/bundle/yun --expect system")
+        self.assertIn(build, linux)
+        self.assertIn(verify, linux)
+        self.assertLess(linux.index(build), linux.index(verify))
+        self.assertLess(linux.index(verify), linux.index("bash scripts/release/package-linux.sh"))
+        self.assertIn("python3 scripts/test-linux-allocator.py", self.files[".github/workflows/ci.yml"])
+
     def test_every_external_use_is_sha_pinned_with_ref_comment(self):
         count = 0
         for path, text in self.files.items():

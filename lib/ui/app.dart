@@ -428,6 +428,18 @@ class _AppShellState extends State<_AppShell> {
     ),
   );
 
+  Widget _appIcon(double size) {
+    final pixels = (size * MediaQuery.devicePixelRatioOf(context)).ceil();
+    return Image.asset(
+      'assets/icon.png',
+      width: size,
+      height: size,
+      cacheWidth: pixels,
+      cacheHeight: pixels,
+      semanticLabel: '韵',
+    );
+  }
+
   Widget _rail(bool extended) => NavigationRail(
     extended: extended,
     minExtendedWidth: 200,
@@ -438,12 +450,7 @@ class _AppShellState extends State<_AppShell> {
     onDestinationSelected: (value) => setState(() => _destination = value),
     leading: Padding(
       padding: const EdgeInsets.fromLTRB(12, 24, 12, 28),
-      child: Image.asset(
-        'assets/icon.png',
-        width: 48,
-        height: 48,
-        semanticLabel: '韵',
-      ),
+      child: _appIcon(48),
     ),
     destinations: [
       for (var index = 0; index < _labels.length; index++)
@@ -460,13 +467,7 @@ class _AppShellState extends State<_AppShell> {
       padding: const EdgeInsets.fromLTRB(24, 8, 12, 0),
       child: Row(
         children: [
-          if (!desktop)
-            Image.asset(
-              'assets/icon.png',
-              width: 32,
-              height: 32,
-              semanticLabel: '韵',
-            ),
+          if (!desktop) _appIcon(32),
           const Spacer(),
           if (app.isOffline && app.isAuthenticated)
             Flexible(

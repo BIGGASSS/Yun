@@ -96,35 +96,65 @@ void main() {
     addTearDown(tester.view.resetDevicePixelRatio);
   }
 
-  for (final width in [390.0, 1000.0, 1400.0]) {
-    testWidgets('app branding at ${width.toInt()}px', (tester) async {
-      final app = _TestApp();
-      addTearDown(app.dispose);
-      await size(tester, Size(width, 900));
-      await tester.pumpWidget(YunApp(controller: app));
-      await tester.pumpAndSettle();
+  final logo = find.byWidgetPredicate((widget) {
+    if (widget is! Image || widget.image is! ResizeImage) return false;
+    final provider = (widget.image as ResizeImage).imageProvider;
+    return provider is AssetImage && provider.assetName == 'assets/icon.png';
+  });
 
-      expect(tester.widget<MaterialApp>(find.byType(MaterialApp)).title, '韵');
-      final logo = find.byWidgetPredicate(
-        (widget) =>
-            widget is Image &&
-            widget.image is AssetImage &&
-            (widget.image as AssetImage).assetName == 'assets/icon.png',
-      );
-      expect(logo, findsOneWidget);
-      expect(tester.widget<Image>(logo).semanticLabel, '韵');
-      expect(tester.getSize(logo), Size.square(width >= 840 ? 48 : 32));
-      if (width >= 840) {
-        expect(
-          find.descendant(of: find.byType(NavigationRail), matching: logo),
-          findsOneWidget,
-        );
-      }
-      expect(find.text('yun'), findsNothing);
-      expect(find.text('Yun'), findsNothing);
-      expect(tester.takeException(), isNull);
-    });
+  for (final width in [390.0, 1000.0, 1400.0]) {
+    for (final dpr in [1.0, 1.3, 2.0]) {
+      testWidgets('app branding at ${width.toInt()}px, DPR $dpr', (
+        tester,
+      ) async {
+        final app = _TestApp();
+        addTearDown(app.dispose);
+        await size(tester, Size(width * dpr, 900 * dpr));
+        tester.view.devicePixelRatio = dpr;
+        await tester.pumpWidget(YunApp(controller: app));
+        await tester.pumpAndSettle();
+
+        expect(tester.widget<MaterialApp>(find.byType(MaterialApp)).title, '韵');
+        expect(logo, findsOneWidget);
+        final image = tester.widget<Image>(logo);
+        final logicalSize = width >= 840 ? 48.0 : 32.0;
+        final provider = image.image as ResizeImage;
+        expect(image.semanticLabel, '韵');
+        expect(tester.getSize(logo), Size.square(logicalSize));
+        expect(provider.width, (logicalSize * dpr).ceil());
+        expect(provider.height, (logicalSize * dpr).ceil());
+        if (width >= 840) {
+          expect(
+            find.descendant(of: find.byType(NavigationRail), matching: logo),
+            findsOneWidget,
+          );
+        }
+        expect(find.text('yun'), findsNothing);
+        expect(find.text('Yun'), findsNothing);
+        expect(tester.takeException(), isNull);
+      });
+    }
   }
+
+  testWidgets('app icon decode size follows display density changes', (
+    tester,
+  ) async {
+    final app = _TestApp();
+    addTearDown(app.dispose);
+    await size(tester, const Size(1000, 900));
+    await tester.pumpWidget(YunApp(controller: app));
+    await tester.pumpAndSettle();
+    expect((tester.widget<Image>(logo).image as ResizeImage).width, 48);
+
+    tester.view.physicalSize = const Size(2000, 1800);
+    tester.view.devicePixelRatio = 2;
+    await tester.pumpAndSettle();
+    final provider = tester.widget<Image>(logo).image as ResizeImage;
+    expect(provider.width, 96);
+    expect(provider.height, 96);
+    expect(tester.getSize(logo), const Size.square(48));
+    expect(tester.takeException(), isNull);
+  });
 
   for (final signedIn in [false, true]) {
     for (final width in [390.0, 1000.0]) {

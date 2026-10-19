@@ -79,16 +79,44 @@ set_target_properties(${BINARY_NAME}
 )
 
 
+# Flutter does not forward arbitrary CMake flags. The environment initializes
+# this option on a fresh configure; an existing CMake cache (or -D) takes priority.
+set(YUN_USE_MIMALLOC_DEFAULT OFF)
+if(DEFINED ENV{YUN_USE_MIMALLOC})
+  if(NOT "$ENV{YUN_USE_MIMALLOC}" MATCHES "^(ON|OFF)$")
+    message(FATAL_ERROR "YUN_USE_MIMALLOC environment variable must be ON or OFF")
+  endif()
+  set(YUN_USE_MIMALLOC_DEFAULT "$ENV{YUN_USE_MIMALLOC}")
+endif()
+option(YUN_USE_MIMALLOC "Link media_kit's mimalloc allocator into the runner"
+  ${YUN_USE_MIMALLOC_DEFAULT})
+
+# Keep the production media_kit plugin, but skip its static allocator download
+# and build when using the system allocator. The plugin may discover a shared
+# mimalloc in OFF mode; it must not be linked into the runner either.
+set(MIMALLOC_USE_STATIC_LIBS ${YUN_USE_MIMALLOC} CACHE BOOL
+  "Build media_kit's static mimalloc object" FORCE)
+# The plugin exports this through the cache. Never reuse a stale discovery.
+unset(MIMALLOC_LIB CACHE)
+unset(MIMALLOC_LIB)
+
 # Generated plugin build rules, which manage building the plugins and adding
 # them to the application.
 include(flutter/generated_plugins.cmake)
 
-# media_kit recommends mimalloc to avoid native allocator leaks.
-if(MIMALLOC_LIB)
+if(YUN_USE_MIMALLOC)
+  if(NOT MIMALLOC_LIB OR
+      (NOT TARGET MIMALLOC_TARGET AND NOT EXISTS "${MIMALLOC_LIB}"))
+    message(FATAL_ERROR
+      "YUN_USE_MIMALLOC=ON requires media_kit_libs_linux to provide mimalloc")
+  endif()
   target_link_libraries(${BINARY_NAME} PRIVATE ${MIMALLOC_LIB})
   if(TARGET MIMALLOC_TARGET)
     add_dependencies(${BINARY_NAME} MIMALLOC_TARGET)
   endif()
+  message(STATUS "Yun allocator: media_kit mimalloc (YUN_USE_MIMALLOC=ON)")
+else()
+  message(STATUS "Yun allocator: system (YUN_USE_MIMALLOC=OFF)")
 endif()
 
 # === Installation ===
