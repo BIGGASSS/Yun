@@ -41,7 +41,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
   final _selected = <String>{};
   Object? _accountScope;
   Object? _viewKey;
-  List<Track> _filtered = const [], _visible = const [];
+  List<Track> _filtered = const [], _visible = const [], _queue = const [];
   Map<String, List<Track>> _grouped = const {};
 
   Object get _scope =>
@@ -159,31 +159,32 @@ class _LibraryScreenState extends State<LibraryScreen> {
     final viewKey = (app.tracks, query, _view, _group, sort, descending);
     if (_viewKey != viewKey) {
       _viewKey = viewKey;
-      final filtered = app.tracks
-          .where(
-            (track) =>
-                query.isEmpty ||
-                '${track.title} ${track.artist} ${track.album} ${track.albumArtist}'
-                    .toLowerCase()
-                    .contains(query),
-          )
-          .toList();
+      bool matchesSearch(Track track) =>
+          query.isEmpty ||
+          '${track.title} ${track.artist} ${track.album} ${track.albumArtist}'
+              .toLowerCase()
+              .contains(query);
+      final filtered = app.tracks.where(matchesSearch).toList();
       final groups = <String, List<Track>>{};
       if (_view != 'Tracks') {
         for (final track in filtered) {
           groups.putIfAbsent(_groupKey(track), () => []).add(track);
         }
       }
-      var visible = _group == null ? filtered : groups[_group] ?? <Track>[];
+      // Search narrows the rows, not the collection used for row playback.
+      final collection = app.tracks
+          .where((track) => _group == null || _groupKey(track) == _group)
+          .toList();
       if (albumDetail) {
-        visible.sort((a, b) {
+        collection.sort((a, b) {
           final disc = (a.discNumber ?? 0).compareTo(b.discNumber ?? 0);
           return disc != 0
               ? disc
               : (a.trackNumber ?? 0).compareTo(b.trackNumber ?? 0);
         });
       }
-      _visible = sortTracks(visible, sort, descending: descending);
+      _queue = sortTracks(collection, sort, descending: descending);
+      _visible = query.isEmpty ? _queue : _queue.where(matchesSearch).toList();
       _filtered = filtered;
       _grouped = groups;
     }
@@ -457,7 +458,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
                     key: ValueKey(track.id),
                     app: app,
                     track: track,
-                    queue: visible,
+                    queue: _queue,
                     selected: _selecting ? _selected.contains(track.id) : null,
                     onSelectionChanged: !_selecting
                         ? null

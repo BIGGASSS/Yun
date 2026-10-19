@@ -47,6 +47,8 @@ the specified major. Core dependencies must also be installed before running
   missing duration/size leaves bitrate hidden. The shared info also appears in
   playlists, the track picker, download activity, and the playback queue.
 - Library search, albums/artists, metadata and immediate artwork replacement.
+  Playing a search-result row keeps the full library or current album/artist
+  queue in its chosen sort order. Explicit Play and Play selected stay filtered.
   Track sorting and checkbox multiselection support filtered select-all, bulk
   playback, playlist addition, offline pinning and confirmed deletion.
   Sort fields and directions persist separately for library tracks, album
