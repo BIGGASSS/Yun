@@ -44,6 +44,16 @@ dependencies. No Ayatana/AppIndicator library is required.
 macOS uses the Apple Silicon `macos-15` runner (asserts arm64); Windows uses x64
 MSVC on `windows-2022`; Android uses Java 17 plus the Android SDK.
 
+Linux releases use the **system allocator** (`YUN_USE_MIMALLOC=OFF`), while keeping
+the production media_kit playback plugin. The native workflow runs isolated CMake
+allocator regressions and checks the built runner's allocator linkage before
+packaging; `dist/BUILD.txt` records the choice. For a comparison/fallback build,
+`YUN_USE_MIMALLOC=ON` restores the prior static mimalloc override. Flutter receives
+this as an environment variable, not a Flutter `-D` flag. It only initializes a
+fresh CMake cache: clean the relevant build directory when switching variants.
+See [Linux allocator selection](../linux/README.md#allocator-selection) for exact
+build, verification and cache-reset commands.
+
 Linux packaging uses **appimagetool 1.9.1** and the **type2 runtime 20251108**,
 both version-pinned and SHA-256 verified before use. It preserves the Flutter
 bundle directly, without linuxdeploy or vendoring system GTK3/libsecret/libmpv.

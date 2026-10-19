@@ -59,7 +59,10 @@ jobs:
       - if: matrix.target == 'linux-x64'
         shell: bash
         run: |
-          fvm flutter build linux --release --target-platform linux-x64
+          python3 scripts/test-linux-allocator.py
+          YUN_USE_MIMALLOC=OFF fvm flutter build linux --release --target-platform linux-x64
+          python3 scripts/verify-linux-allocator.py --binary build/linux/x64/release/bundle/yun --expect system
+          printf '%s\n' 'Linux runner allocator: system (YUN_USE_MIMALLOC=OFF)' >> dist/BUILD.txt
           python3 scripts/verify-linux-tray-linkage.py --bundle build/linux/x64/release/bundle
           bash scripts/release/package-linux.sh
           python3 scripts/release/test-linux-packaging.py

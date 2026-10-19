@@ -60,6 +60,7 @@ jobs:
           name: yun-server-linux-x64
           path: server/target/release
       - run: chmod +x "$YUN_SERVER_BINARY"
+      - run: python3 scripts/test-linux-allocator.py
       - run: python3 scripts/verify-linux-tray-linkage.py
       - run: fvm dart format --output=none --set-exit-if-changed lib test packages/yun_tray_manager_linux/lib
       - run: fvm flutter analyze
