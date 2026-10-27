@@ -332,14 +332,14 @@ esac
             self.assertIn("      - run: python3 scripts/release/test-workflow-policy.py\n",
                           block(text, f"  {job}:"))
 
-    def test_review_and_action_update_coverage(self):
+    def test_review_coverage(self):
         owners = (GITHUB / "CODEOWNERS").read_text().splitlines()
         for path in ("/.github/", "/scripts/release/", "/android/app/build.gradle.kts"):
             self.assertIn(f"{path} @BIGGASSS", owners)
+
+    def test_dependabot_updates_are_disabled(self):
         dependabot = (GITHUB / "dependabot.yml").read_text()
-        self.assertIn("  - package-ecosystem: github-actions\n", dependabot)
-        self.assertIn("    directory: /\n", dependabot)
-        self.assertIn("      interval: weekly\n", dependabot)
+        self.assertEqual(dependabot, "version: 2\nupdates: []\n")
 
 
 if __name__ == "__main__":

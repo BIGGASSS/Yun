@@ -37,7 +37,7 @@ Hashes below are of the **original bytes**, before local patches:
    `uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5`.
    The initial cache pin was resolved using
    `gh api repos/actions/cache/commits/v5 --jq .sha`.
-   Subsequent reviewed Dependabot updates may advance these pins; `action.yml`
+   Subsequent reviewed manual updates may advance these pins; `action.yml`
    is authoritative for the current cache revisions.
 3. In `setup.sh`, add `--fail` to both curl downloads and verify the selected
    manifest's SHA-256 before extraction using the new Yun-owned
@@ -69,8 +69,8 @@ valid digest succeeds; mismatched/missing digests and HTTP errors do not extract
 
 ## Updates and verification
 
-Dependabot's weekly `github-actions` scan handles nested `actions/cache` pins in
-this local action. It does **not** update the vendored Flutter action itself;
+Dependabot updates are disabled for this repository. Nested `actions/cache` pins
+and the vendored Flutter action itself must be updated manually;
 upstream vendor updates require manual review:
 
 1. Select and review a new full upstream commit SHA (including license changes).
