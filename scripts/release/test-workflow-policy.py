@@ -338,8 +338,8 @@ esac
             self.assertIn(f"{path} @BIGGASSS", owners)
 
     def test_dependabot_updates_are_disabled(self):
-        dependabot = (GITHUB / "dependabot.yml").read_text()
-        self.assertEqual(dependabot, "version: 2\nupdates: []\n")
+        for name in ("dependabot.yml", "dependabot.yaml"):
+            self.assertFalse((GITHUB / name).exists(), name)
 
 
 if __name__ == "__main__":
